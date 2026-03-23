@@ -1,0 +1,47 @@
+{
+  "name": "farmlink",
+  "version": "0.1.0",
+  "description": "Text-first platform connecting farms with markets via AI-powered SMS",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "migrate": "tsx src/db/migrate.ts",
+    "migrate:down": "tsx src/db/migrate.ts down",
+    "seed": "tsx src/db/seed.ts",
+    "worker": "tsx src/workers/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@fastify/auth": "^5.0.0",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/formbody": "^8.0.2",
+    "@fastify/multipart": "^9.4.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/sensible": "^6.0.0",
+    "@fastify/static": "^9.0.0",
+    "bullmq": "^5.34.0",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.0",
+    "kysely": "^0.27.5",
+    "pg": "^8.13.1",
+    "twilio": "^5.4.0",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
