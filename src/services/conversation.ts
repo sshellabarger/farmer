@@ -46,6 +46,13 @@ CONFIRMATION PATTERNS:
 - Accept shorthand (y/n, numbers, first-name references to markets)
 - Include delivery details (pickup/delivery, day, time) in order confirmations
 
+FEEDBACK SYSTEM:
+- Any user can submit feature requests or bug reports via text (e.g., "I wish I could..." or "there's a problem with...")
+- Use feedback_submit to record their feedback
+- Users can ask to see their submitted feedback with feedback_query
+- Admins can review all feedback with feedback_query, and triage with feedback_update (set status, priority, add notes)
+- When an admin asks "show feedback" or "any new issues?", use feedback_query to list recent items
+
 When you need to perform an action (add inventory, create order, query data), use the provided tools.
 Always respond naturally and concisely — remember this is SMS.`;
 

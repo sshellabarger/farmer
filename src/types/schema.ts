@@ -15,6 +15,9 @@ export type MessageSource = 'sms' | 'web' | 'system';
 export type NotificationType = 'new_inventory' | 'price_change' | 'order_update' | 'reminder';
 export type NotificationChannel = 'sms' | 'email' | 'push';
 export type NotificationStatus = 'pending' | 'sent' | 'delivered' | 'failed';
+export type FeedbackType = 'feature_request' | 'bug_report';
+export type FeedbackStatus = 'open' | 'under_review' | 'planned' | 'in_progress' | 'resolved' | 'closed';
+export type FeedbackPriority = 'low' | 'medium' | 'high' | 'critical';
 
 // ─── Table Interfaces ───────────────────────────────────────────
 
@@ -218,6 +221,20 @@ export interface NotificationsTable {
   created_at: Generated<Date>;
 }
 
+export interface FeedbackTable {
+  id: Generated<string>;
+  user_id: string;
+  type: FeedbackType;
+  status: Generated<FeedbackStatus>;
+  priority: Generated<FeedbackPriority>;
+  title: string;
+  description: string;
+  admin_notes: string | null;
+  source: MessageSource;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
 // ─── Database Interface ─────────────────────────────────────────
 
 export interface DB {
@@ -235,6 +252,7 @@ export interface DB {
   conversations: ConversationsTable;
   messages: MessagesTable;
   notifications: NotificationsTable;
+  feedback: FeedbackTable;
 }
 
 // ─── Convenience Types ──────────────────────────────────────────
@@ -259,3 +277,7 @@ export type NewOrder = Insertable<OrdersTable>;
 
 export type FarmMarketRel = Selectable<FarmMarketRelsTable>;
 export type Notification = Selectable<NotificationsTable>;
+
+export type Feedback = Selectable<FeedbackTable>;
+export type NewFeedback = Insertable<FeedbackTable>;
+export type FeedbackUpdate = Updateable<FeedbackTable>;

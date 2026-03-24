@@ -176,6 +176,19 @@ export const api = {
   updateMarket: (data: any) =>
     request<any>('/profile/market', { method: 'PUT', body: JSON.stringify(data) }),
 
+  // Feedback
+  getFeedback: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/feedback${qs}`);
+  },
+  getFeedbackItem: (id: string) => request<any>(`/feedback/${id}`),
+  createFeedback: (data: { type: string; title: string; description: string }) =>
+    request<any>('/feedback', { method: 'POST', body: JSON.stringify(data) }),
+  updateFeedback: (id: string, data: any) =>
+    request<any>(`/feedback/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteFeedback: (id: string) =>
+    request<any>(`/feedback/${id}`, { method: 'DELETE' }),
+
   // Uploads
   uploadImage: async (file: File): Promise<{ url: string; filename: string }> => {
     const formData = new FormData();

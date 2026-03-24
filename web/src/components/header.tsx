@@ -64,6 +64,9 @@ export function Header() {
                   🏪 {market.name}
                 </NavBtn>
               )}
+              <NavBtn active={pathname === '/feedback'} onClick={() => router.push('/feedback')}>
+                Feedback
+              </NavBtn>
               <NavBtn active={pathname === '/settings'} onClick={() => router.push('/settings')}>
                 ⚙️ Settings
               </NavBtn>
@@ -115,6 +118,9 @@ export function Header() {
                   🏪 {market.name}
                 </MobileNavBtn>
               )}
+              <MobileNavBtn active={pathname === '/feedback'} onClick={() => { router.push('/feedback'); setMenuOpen(false); }}>
+                Feedback
+              </MobileNavBtn>
               <MobileNavBtn active={pathname === '/settings'} onClick={() => { router.push('/settings'); setMenuOpen(false); }}>
                 ⚙️ Settings
               </MobileNavBtn>

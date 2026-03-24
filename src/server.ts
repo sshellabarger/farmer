@@ -22,6 +22,7 @@ import { deliveryRoutes } from './routes/deliveries.js';
 import { productRoutes } from './routes/products.js';
 import { uploadRoutes } from './routes/uploads.js';
 import { profileRoutes } from './routes/profile.js';
+import { feedbackRoutes } from './routes/feedback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -85,6 +86,7 @@ async function start() {
   await app.register(productRoutes, { prefix: '/api/products' });
   await app.register(uploadRoutes, { prefix: '/api/uploads' });
   await app.register(profileRoutes, { prefix: '/api/profile' });
+  await app.register(feedbackRoutes, { prefix: '/api/feedback' });
 
   await app.listen({ port: env.PORT, host: env.HOST });
   console.log(`🌱 FarmLink API running on ${env.HOST}:${env.PORT}`);

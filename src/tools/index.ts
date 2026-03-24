@@ -10,6 +10,7 @@ import { recurringOrderCreate, recurringOrderUpdate } from './recurring.js';
 import { analyticsSummary } from './analytics.js';
 import { userSignup } from './signup.js';
 import { deliveryScheduleSet, deliveryQuery } from './delivery.js';
+import { feedbackSubmit, feedbackQuery, feedbackUpdate } from './feedback.js';
 
 export interface ToolContext {
   db: Kysely<DB>;
@@ -289,6 +290,81 @@ export const toolDefinitions: Anthropic.Tool[] = [
       },
     },
   },
+  {
+    name: 'feedback_submit',
+    description:
+      'Submit a feature request or bug report from a user. Use when a user says they want to request a feature, suggest an improvement, report a bug or issue, or provide feedback about the platform.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['feature_request', 'bug_report'],
+          description: 'Whether this is a feature request or a bug report',
+        },
+        title: {
+          type: 'string',
+          description: 'Short summary/title of the feedback (max 255 chars)',
+        },
+        description: {
+          type: 'string',
+          description: 'Detailed description of the feature request or bug, including any steps to reproduce for bugs',
+        },
+      },
+      required: ['type', 'title', 'description'],
+    },
+  },
+  {
+    name: 'feedback_query',
+    description:
+      'List and filter feedback items (feature requests and bug reports). Admins see all feedback; regular users see only their own. Use when someone asks to see feedback, check on their requests, or review submitted issues.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['feature_request', 'bug_report'],
+          description: 'Filter by feedback type',
+        },
+        status: {
+          type: 'string',
+          enum: ['open', 'under_review', 'planned', 'in_progress', 'resolved', 'closed'],
+          description: 'Filter by status',
+        },
+        priority: {
+          type: 'string',
+          enum: ['low', 'medium', 'high', 'critical'],
+          description: 'Filter by priority',
+        },
+      },
+    },
+  },
+  {
+    name: 'feedback_update',
+    description:
+      'Update a feedback item\'s status, priority, or admin notes. Admin only. Use when an admin wants to triage, review, or update the status of a feedback item.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        feedback_id: { type: 'string', description: 'UUID of the feedback item to update' },
+        status: {
+          type: 'string',
+          enum: ['open', 'under_review', 'planned', 'in_progress', 'resolved', 'closed'],
+          description: 'New status',
+        },
+        priority: {
+          type: 'string',
+          enum: ['low', 'medium', 'high', 'critical'],
+          description: 'New priority level',
+        },
+        admin_notes: {
+          type: 'string',
+          description: 'Internal admin notes about this feedback item',
+        },
+      },
+      required: ['feedback_id'],
+    },
+  },
 ];
 
 type ToolHandler = (input: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>;
@@ -308,6 +384,9 @@ const toolHandlers: Record<string, ToolHandler> = {
   delivery_schedule_set: deliveryScheduleSet,
   delivery_query: deliveryQuery,
   analytics_summary: analyticsSummary,
+  feedback_submit: feedbackSubmit,
+  feedback_query: feedbackQuery,
+  feedback_update: feedbackUpdate,
 };
 
 export async function executeTool(
