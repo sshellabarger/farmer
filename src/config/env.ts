@@ -5,9 +5,9 @@ import { z } from 'zod';
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
-  TWILIO_ACCOUNT_SID: z.string().min(1),
-  TWILIO_AUTH_TOKEN: z.string().min(1),
-  TWILIO_PHONE_NUMBER: z.string().min(1),
+  TELNYX_API_KEY: z.string().min(1),
+  TELNYX_PHONE_NUMBER: z.string().min(1),
+  TELNYX_MESSAGING_PROFILE_ID: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().min(1),
   PORT: z.coerce.number().default(3000),
   HOST: z.string().default('0.0.0.0'),

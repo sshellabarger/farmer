@@ -3,11 +3,11 @@ dotenv.config({ override: true });
 import { Worker, Queue } from 'bullmq';
 import pg from 'pg';
 import { Kysely, PostgresDialect } from 'kysely';
-import Twilio from 'twilio';
 import type { DB } from '../types/schema.js';
 import type { Env } from '../config/env.js';
 import { processRecurringOrders } from '../services/recurring-orders.js';
 import { setupProactiveJobs } from './proactive-jobs.js';
+import { sendSms } from '../services/telnyx.js';
 
 const { Pool } = pg;
 
@@ -20,8 +20,18 @@ const db = new Kysely<DB>({
   }),
 });
 
-const twilioClient = Twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!);
-const twilioPhone = process.env.TWILIO_PHONE_NUMBER!;
+const env: Env = {
+  DATABASE_URL: databaseUrl,
+  REDIS_URL: redisUrl,
+  TELNYX_API_KEY: process.env.TELNYX_API_KEY!,
+  TELNYX_PHONE_NUMBER: process.env.TELNYX_PHONE_NUMBER!,
+  TELNYX_MESSAGING_PROFILE_ID: process.env.TELNYX_MESSAGING_PROFILE_ID,
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+  PORT: Number(process.env.PORT || 3000),
+  HOST: process.env.HOST || '0.0.0.0',
+  NODE_ENV: (process.env.NODE_ENV as 'development' | 'production' | 'test') || 'development',
+  JWT_SECRET: process.env.JWT_SECRET!,
+};
 
 interface NotificationJobData {
   notificationId: string;
@@ -67,13 +77,9 @@ const worker = new Worker<NotificationJobData>(
       }
     }
 
-    // Send the SMS
+    // Send the SMS via Telnyx
     try {
-      await twilioClient.messages.create({
-        to: phone,
-        from: twilioPhone,
-        body: message,
-      });
+      await sendSms({ env, to: phone, body: message });
 
       await db
         .updateTable('notifications')
@@ -97,7 +103,7 @@ const worker = new Worker<NotificationJobData>(
     concurrency: 5,
     limiter: {
       max: 1,
-      duration: 1000, // 1 msg/sec rate limit (Twilio)
+      duration: 1000, // 1 msg/sec rate limit
     },
   }
 );
@@ -117,19 +123,6 @@ console.log('🔄 Notification worker started');
 // recurring orders whose next_delivery <= today.
 
 const schedulerQueue = new Queue('scheduler', { connection: { url: redisUrl } });
-
-const env: Env = {
-  DATABASE_URL: databaseUrl,
-  REDIS_URL: redisUrl,
-  TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID!,
-  TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN!,
-  TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER!,
-  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
-  PORT: Number(process.env.PORT || 3000),
-  HOST: process.env.HOST || '0.0.0.0',
-  NODE_ENV: (process.env.NODE_ENV as 'development' | 'production' | 'test') || 'development',
-  JWT_SECRET: process.env.JWT_SECRET!,
-};
 
 // Add the repeatable job (BullMQ deduplicates by repeat key)
 await schedulerQueue.upsertJobScheduler(

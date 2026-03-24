@@ -1,25 +1,42 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { processInboundMessage } from '../services/conversation.js';
-import { sendSms } from '../services/twilio.js';
+import { sendSms } from '../services/telnyx.js';
 
-const inboundSchema = z.object({
-  From: z.string(),
-  To: z.string(),
-  Body: z.string(),
-  MessageSid: z.string(),
-  NumMedia: z.coerce.number().optional(),
+// Telnyx webhook payload shape (nested under data.payload)
+const telnyxInboundSchema = z.object({
+  data: z.object({
+    event_type: z.string(),
+    id: z.string(),
+    payload: z.object({
+      from: z.object({ phone_number: z.string() }),
+      to: z.array(z.object({ phone_number: z.string() })),
+      text: z.string(),
+      id: z.string(),
+      media: z.array(z.any()).optional(),
+    }),
+  }),
 });
 
 export async function smsRoutes(app: FastifyInstance) {
-  // Twilio inbound webhook
+  // Telnyx inbound webhook
   app.post('/inbound', async (request, reply) => {
-    const parsed = inboundSchema.safeParse(request.body);
+    const parsed = telnyxInboundSchema.safeParse(request.body);
     if (!parsed.success) {
+      app.log.warn({ errors: parsed.error.flatten() }, 'Invalid Telnyx webhook payload');
       return reply.status(400).send({ error: 'Invalid webhook payload' });
     }
 
-    const { From: from, Body: body, MessageSid: messageSid } = parsed.data;
+    const { data } = parsed.data;
+
+    // Only process inbound messages
+    if (data.event_type !== 'message.received') {
+      return reply.send({ ok: true });
+    }
+
+    const from = data.payload.from.phone_number;
+    const body = data.payload.text;
+    const messageSid = data.payload.id;
 
     app.log.info({ from, body: body.substring(0, 50), messageSid }, 'Inbound SMS');
 
@@ -36,7 +53,7 @@ export async function smsRoutes(app: FastifyInstance) {
         to: from,
         body: '👋 Welcome! To use FarmLink, please create an account first at our website. Visit farmlink.app/signup to get started!',
       });
-      return reply.type('text/xml').send('<Response></Response>');
+      return reply.send({ ok: true });
     }
 
     try {
@@ -49,23 +66,22 @@ export async function smsRoutes(app: FastifyInstance) {
         messageSid,
       });
 
-      // Send reply via Twilio
+      // Send reply via Telnyx
       await sendSms({
         env: app.env,
         to: from,
         body: responseText,
       });
 
-      // Return empty TwiML (we send reply via API, not TwiML response)
-      reply.type('text/xml').send('<Response></Response>');
+      reply.send({ ok: true });
     } catch (err) {
       app.log.error(err, 'Failed to process inbound SMS');
-      // Still return 200 so Twilio doesn't retry
-      reply.type('text/xml').send('<Response></Response>');
+      // Still return 200 so Telnyx doesn't retry
+      reply.send({ ok: true });
     }
   });
 
-  // Direct chat endpoint — bypasses Twilio, for web testing
+  // Direct chat endpoint — bypasses Telnyx, for web testing
   app.post('/chat', async (request, reply) => {
     const schema = z.object({
       phone: z.string().min(10),
@@ -174,10 +190,12 @@ export async function smsRoutes(app: FastifyInstance) {
     reply.send({ conversations: results });
   });
 
-  // Twilio delivery status callback
+  // Telnyx delivery status callback
   app.post('/status', async (request, reply) => {
-    const body = request.body as Record<string, string>;
-    app.log.info({ sid: body.MessageSid, status: body.MessageStatus }, 'SMS status update');
+    const body = request.body as { data?: { event_type?: string; payload?: { id?: string; to?: string } } };
+    const eventType = body?.data?.event_type || 'unknown';
+    const msgId = body?.data?.payload?.id || 'unknown';
+    app.log.info({ id: msgId, event: eventType }, 'SMS status update');
     // TODO: update notification status in DB
     reply.send({ ok: true });
   });
