@@ -10,14 +10,14 @@ FarmLink is a text-first platform connecting small and mid-size farms with marke
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| **Runtime** | Node.js 20+ / TypeScript | Single language across stack; excellent Twilio SDK; fast async I/O for SMS webhooks |
+| **Runtime** | Node.js 20+ / TypeScript | Single language across stack; fast async I/O for SMS webhooks |
 | **API Framework** | Fastify | Performance, schema validation, plugin ecosystem |
 | **Database** | PostgreSQL 16 + PostGIS | Relational integrity for orders/inventory; PostGIS for delivery radius/routing |
 | **Cache / Queue** | Redis 7 + BullMQ | Conversation state caching, delayed notification queue, job scheduling |
 | **AI Engine** | Anthropic Claude API | Tool-calling for structured actions; natural conversation; reliable intent parsing |
-| **SMS Provider** | Twilio Programmable Messaging | Proven SMS API; webhook-based; phone number management; MMS support |
-| **Web Frontend** | Next.js 14 (App Router) | SSR for SEO, React for dashboards, API routes for BFF pattern |
-| **Auth** | Phone-based OTP (Twilio Verify) + session tokens | SMS-native auth; no passwords to manage |
+| **SMS Provider** | Telnyx Messaging | Reliable SMS API; webhook-based; phone number management; MMS support; competitive pricing |
+| **Web Frontend** | Next.js 15 (App Router) | SSR for SEO, React 19 for dashboards, API routes for BFF pattern |
+| **Auth** | Phone-based OTP + JWT session tokens | SMS-native auth; no passwords to manage |
 | **Object Storage** | Cloudflare R2 or AWS S3 | Product images, documents, export files |
 | **Hosting** | Railway or Render (initially), AWS ECS (scale) | Simple deploy initially, container-based for growth |
 | **Monitoring** | Sentry + PostHog | Error tracking + product analytics |
@@ -73,25 +73,24 @@ A scheduled job (BullMQ cron) triggers proactive outbound messages:
 - Weekly sales summary every Sunday evening
 - Price change alerts if competing farms adjust pricing
 
-### 2. SMS Integration (Twilio)
+### 2. SMS Integration (Telnyx)
 
 ```
 Inbound flow:
-  Farmer/Market phone → Twilio → Webhook POST /api/sms/inbound
-  → Parse sender → Load conversation → AI Engine → Respond
+  Farmer/Market phone → Telnyx → Webhook POST /api/sms/inbound
+  → Validate payload → Parse sender → Load conversation → AI Engine → Respond
 
 Outbound flow:
-  System event → BullMQ job → Twilio Messages API → Farmer/Market phone
+  System event → BullMQ job → Telnyx Messages API → Farmer/Market phone
 ```
 
 **Phone Number Strategy:**
-- One Twilio number per deployment (initially)
+- One Telnyx number per deployment (initially)
 - Users are identified by their registered phone number
 - Support for multiple phone numbers per user (personal + business)
 - Conversation threading by phone number
 
 **Message Handling:**
-- Rate limit: max 1 outbound message per second per number (Twilio limit)
 - Delivery receipts tracked via status callbacks
 - Failed message retry: 3 attempts with exponential backoff
 - MMS support for product photos (farmers can text a photo with inventory)
@@ -178,7 +177,7 @@ Authentication:
   POST   /api/auth/logout
 
 SMS Webhooks:
-  POST   /api/sms/inbound          # Twilio webhook
+  POST   /api/sms/inbound          # Telnyx webhook
   POST   /api/sms/status            # Delivery receipt callback
 
 Farms:
@@ -282,14 +281,14 @@ Railway / Render:
   └── redis (managed)
 
 External:
-  ├── Twilio (SMS)
+  ├── Telnyx (SMS)
   ├── Anthropic (Claude API)
   └── R2/S3 (storage)
 ```
 
 **Estimated monthly costs at launch (< 50 farms, < 200 markets):**
 - Railway/Render hosting: ~$40-80/mo
-- Twilio SMS: ~$50-150/mo (depends on volume, ~$0.0079/msg)
+- Telnyx SMS: ~$30-100/mo (depends on volume, ~$0.004/msg)
 - Claude API: ~$30-100/mo (depends on message volume)
 - Postgres: included in hosting
 - Domain + DNS: ~$15/yr
@@ -324,7 +323,7 @@ Market onboarding follows a similar conversational flow, ending with a connectio
 
 - **Phone verification**: All accounts require verified phone numbers
 - **API authentication**: JWT tokens with 24h expiry, refresh via OTP
-- **SMS spoofing**: Validate Twilio webhook signatures on all inbound
+- **SMS spoofing**: Validate Telnyx webhook signatures on all inbound
 - **Rate limiting**: Per-phone-number rate limits (10 messages/minute)
 - **Data encryption**: At rest (Postgres) and in transit (TLS)
 - **PII handling**: Phone numbers and names are PII; minimize logging, encrypt at rest
