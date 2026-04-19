@@ -244,9 +244,29 @@ export async function orderRoutes(app: FastifyInstance) {
   });
 
   // PUT /api/orders/:id — user must be a party on the order (or admin)
+  // Markets can only modify pending orders; once confirmed, only the farm can edit
   app.put<{ Params: { id: string } }>('/:id', {
     preHandler: [auth, orderParty],
   }, async (request, reply) => {
+    const order = await app.db
+      .selectFrom('orders')
+      .select(['id', 'status', 'farm_id', 'market_id'])
+      .where('id', '=', request.params.id)
+      .executeTakeFirst();
+
+    if (!order) return reply.notFound('Order not found');
+
+    const user = request.authUser!;
+    const isAdmin = user.role === 'admin';
+    const isFarmParty = !!user.farmId && order.farm_id === user.farmId;
+    const isMarketParty = !!user.marketId && order.market_id === user.marketId;
+
+    if (!isAdmin) {
+      if (order.status !== 'pending' && isMarketParty && !isFarmParty) {
+        return reply.status(403).send({ error: 'Markets can only modify pending orders. Contact the farm for changes.' });
+      }
+    }
+
     const { notes } = request.body as Record<string, unknown>;
     const updates: Record<string, unknown> = {};
     if (notes !== undefined) updates.notes = notes;
@@ -279,6 +299,28 @@ export async function orderRoutes(app: FastifyInstance) {
       .executeTakeFirst();
 
     if (!order) return reply.notFound('Order not found');
+
+    const user = request.authUser!;
+    const isAdmin = user.role === 'admin';
+    const isFarmParty = !!user.farmId && order.farm_id === user.farmId;
+    const isMarketParty = !!user.marketId && order.market_id === user.marketId;
+
+    // Business rules for who can update order status:
+    // - Pending orders: market can cancel or modify; farm can confirm or cancel
+    // - Once confirmed (or beyond): ONLY the farm can update status
+    if (!isAdmin) {
+      if (order.status === 'pending') {
+        // Market can only cancel pending orders
+        if (isMarketParty && !isFarmParty && newStatus !== 'cancelled') {
+          return reply.status(403).send({ error: 'Markets can only cancel pending orders. The farm must confirm.' });
+        }
+      } else {
+        // After confirmation, only the farm can update status
+        if (!isFarmParty) {
+          return reply.status(403).send({ error: 'Only the farm can update order status after confirmation.' });
+        }
+      }
+    }
 
     // Validate state transition
     const validTransitions: Record<string, string[]> = {

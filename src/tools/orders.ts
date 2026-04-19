@@ -132,8 +132,38 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
 }
 
 export async function orderUpdate(input: Record<string, unknown>, ctx: ToolContext) {
-  const { db } = ctx;
+  const { db, userId } = ctx;
   const orderId = input.order_id as string;
+
+  // Load the order to check current status and parties
+  const order = await db
+    .selectFrom('orders')
+    .select(['id', 'status', 'farm_id', 'market_id'])
+    .where('id', '=', orderId)
+    .executeTakeFirst();
+
+  if (!order) throw new Error('Order not found');
+
+  // Enforce business rules: markets can only cancel/modify pending orders;
+  // once confirmed, only the farm can update status
+  if (userId && input.status) {
+    const userFarm = await db.selectFrom('farms').select('id').where('user_id', '=', userId).executeTakeFirst();
+    const userMarket = await db.selectFrom('markets').select('id').where('user_id', '=', userId).executeTakeFirst();
+    const isFarmParty = !!userFarm && order.farm_id === userFarm.id;
+    const isMarketParty = !!userMarket && order.market_id === userMarket.id;
+
+    if (order.status === 'pending') {
+      // Market can only cancel pending orders
+      if (isMarketParty && !isFarmParty && input.status !== 'cancelled') {
+        throw new Error('Markets can only cancel pending orders. The farm must confirm the order.');
+      }
+    } else {
+      // After confirmation, only the farm can update status
+      if (!isFarmParty) {
+        throw new Error('Only the farm can update order status after confirmation.');
+      }
+    }
+  }
 
   const updates: Record<string, unknown> = {};
   if (input.status) updates.status = input.status;

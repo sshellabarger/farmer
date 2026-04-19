@@ -2,7 +2,7 @@ import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
 import type { DB } from '../types/schema.js';
 import type { Env } from '../config/env.js';
-import { sendSms } from './telnyx.js';
+import { sendSms } from './sms.js';
 
 /**
  * Process all recurring orders due today.

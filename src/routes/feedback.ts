@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole } from '../middleware/rbac.js';
-import { sendSms } from '../services/telnyx.js';
+import { sendSms } from '../services/sms.js';
 
 const createSchema = z.object({
   type: z.enum(['feature_request', 'bug_report']),

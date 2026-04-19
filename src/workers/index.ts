@@ -7,7 +7,7 @@ import type { DB } from '../types/schema.js';
 import type { Env } from '../config/env.js';
 import { processRecurringOrders } from '../services/recurring-orders.js';
 import { setupProactiveJobs } from './proactive-jobs.js';
-import { sendSms } from '../services/telnyx.js';
+import { sendSms } from '../services/sms.js';
 
 const { Pool } = pg;
 
@@ -23,9 +23,13 @@ const db = new Kysely<DB>({
 const env: Env = {
   DATABASE_URL: databaseUrl,
   REDIS_URL: redisUrl,
-  TELNYX_API_KEY: process.env.TELNYX_API_KEY!,
-  TELNYX_PHONE_NUMBER: process.env.TELNYX_PHONE_NUMBER!,
+  SMS_PROVIDER: (process.env.SMS_PROVIDER as 'telnyx' | 'voipms') || 'telnyx',
+  TELNYX_API_KEY: process.env.TELNYX_API_KEY || '',
+  TELNYX_PHONE_NUMBER: process.env.TELNYX_PHONE_NUMBER || '',
   TELNYX_MESSAGING_PROFILE_ID: process.env.TELNYX_MESSAGING_PROFILE_ID,
+  VOIPMS_USERNAME: process.env.VOIPMS_USERNAME,
+  VOIPMS_PASSWORD: process.env.VOIPMS_PASSWORD,
+  VOIPMS_DID: process.env.VOIPMS_DID,
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
   PORT: Number(process.env.PORT || 3000),
   HOST: process.env.HOST || '0.0.0.0',

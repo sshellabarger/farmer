@@ -66,10 +66,10 @@ async function start() {
 
   // Routes
   await app.register(authRoutes, { prefix: '/api/auth' });
-  // SMS routes with tighter rate limit: 10 req/min per IP
+  // SMS routes with rate limit: 60 req/min per IP (dashboard loads convos + history)
   await app.register(async (scope) => {
     await scope.register(rateLimit, {
-      max: 10,
+      max: 60,
       timeWindow: '1 minute',
       keyGenerator: (req) => req.ip,
     });

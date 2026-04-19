@@ -53,8 +53,43 @@ FEEDBACK SYSTEM:
 - Admins can review all feedback with feedback_query, and triage with feedback_update (set status, priority, add notes)
 - When an admin asks "show feedback" or "any new issues?", use feedback_query to list recent items
 
-When you need to perform an action (add inventory, create order, query data), use the provided tools.
+TOOL USE IS MANDATORY FOR ANY ACTION:
+- NEVER claim you added, created, updated, deleted, scheduled, confirmed, cancelled, registered, listed, or saved anything unless you actually invoked the matching tool in this turn.
+- If a user asks for an action (add inventory, place an order, update a price, change order status, set delivery schedule, sign up, submit feedback, etc.), you MUST call the corresponding tool BEFORE replying with confirmation.
+- Adding inventory → inventory_add. Updating inventory → inventory_update. Creating an order → order_create. Updating an order → order_update. Setting delivery schedule → delivery_schedule_set. Signup → user_signup. Recurring orders → recurring_order_create / recurring_order_update. Feedback → feedback_submit / feedback_update.
+- Only after a tool returns success may you confirm the action to the user. If a tool returns an error or needs more info, ask the user — do not pretend it succeeded.
+- Reading/listing data also requires the matching query tool; do not invent data from context alone unless it is already provided in CURRENT CONTEXT.
+
 Always respond naturally and concisely — remember this is SMS.`;
+
+// Tool names that mutate data — used to verify Claude actually performed claimed actions.
+const MUTATING_TOOLS = new Set([
+  'inventory_add',
+  'inventory_update',
+  'order_create',
+  'order_update',
+  'recurring_order_create',
+  'recurring_order_update',
+  'delivery_schedule_set',
+  'user_signup',
+  'feedback_submit',
+  'feedback_update',
+  'notify_markets',
+]);
+
+// Past-tense action phrases that imply a mutation was performed.
+// If any of these appear in the final reply but no mutating tool was called this turn,
+// we force Claude to either actually call the tool or rewrite its reply.
+const ACTION_CLAIM_PATTERNS: RegExp[] = [
+  /\b(added|listed|posted|created|placed|submitted|recorded|saved|logged|registered|signed[- ]?up|set\s+up|set\s+your|scheduled|booked|confirmed|cancell?ed|updated|changed|removed|deleted|reserved|marked\s+as)\b/i,
+  /\b(i\s+(?:have|just|now)\s+(?:added|created|updated|placed|set|scheduled|registered|cancell?ed|removed|saved|recorded))\b/i,
+  /\b(your\s+(?:order|inventory|listing|delivery\s+schedule|account|feedback)\s+(?:is|has\s+been|was)\s+(?:created|added|updated|saved|placed|confirmed|set|recorded|submitted))\b/i,
+  /\b(done|all\s+set|got\s+it\s+saved)\b/i,
+];
+
+function responseClaimsAction(text: string): boolean {
+  return ACTION_CLAIM_PATTERNS.some((re) => re.test(text));
+}
 
 interface ProcessMessageInput {
   db: Kysely<DB>;
@@ -282,6 +317,11 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     tools: toolDefinitions,
   });
 
+  // Track which tools (especially mutating ones) were called this turn so we can
+  // verify Claude actually performed any action it claims in its final reply.
+  const calledTools = new Set<string>();
+  const successfulMutations = new Set<string>();
+
   // 7. Process tool calls in a loop (supports multi-step)
   while (response.stop_reason === 'tool_use') {
     const toolUseBlocks = response.content.filter(
@@ -291,8 +331,16 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolUseBlocks) {
+      calledTools.add(toolUse.name);
       try {
         const result = await executeTool(toolUse.name, toolUse.input as Record<string, unknown>, toolContext);
+        if (MUTATING_TOOLS.has(toolUse.name)) {
+          // Treat as successful only if the tool didn't return an explicit error/needs_more flag
+          const r = result as Record<string, unknown> | null | undefined;
+          const failed =
+            r && typeof r === 'object' && (('error' in r && r.error) || ('needs_price' in r && r.needs_price));
+          if (!failed) successfulMutations.add(toolUse.name);
+        }
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
@@ -319,6 +367,84 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
       messages,
       tools: toolDefinitions,
     });
+  }
+
+  // 7c. Verification pass: if Claude's final reply claims an action was taken
+  // but no mutating tool was successfully invoked this turn, force a corrective
+  // round so it actually calls the tool (or rewrites the message). We allow up
+  // to 2 corrective attempts to avoid infinite loops if Claude refuses.
+  let correctionAttempts = 0;
+  while (correctionAttempts < 2) {
+    const finalText = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+
+    if (!finalText || !responseClaimsAction(finalText)) break;
+    if (successfulMutations.size > 0) break;
+
+    correctionAttempts++;
+
+    messages.push({ role: 'assistant', content: response.content });
+    messages.push({
+      role: 'user',
+      content:
+        'SYSTEM CHECK: Your previous reply implies you performed an action (added/created/updated/scheduled/etc.), but you did not actually call any data-modifying tool this turn. You MUST either: (1) call the appropriate tool right now to actually perform the action, then confirm only after it succeeds; or (2) if you do not have enough information, ask the user for what is missing instead of claiming success. Do not fabricate confirmations.',
+    });
+
+    response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 500,
+      system: SYSTEM_PROMPT + contextBlock,
+      messages,
+      tools: toolDefinitions,
+      tool_choice: { type: 'any' },
+    });
+
+    // Drain any new tool calls triggered by the correction
+    while (response.stop_reason === 'tool_use') {
+      const toolUseBlocks = response.content.filter(
+        (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
+      );
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const toolUse of toolUseBlocks) {
+        calledTools.add(toolUse.name);
+        try {
+          const result = await executeTool(
+            toolUse.name,
+            toolUse.input as Record<string, unknown>,
+            toolContext
+          );
+          if (MUTATING_TOOLS.has(toolUse.name)) {
+            const r = result as Record<string, unknown> | null | undefined;
+            const failed =
+              r && typeof r === 'object' && (('error' in r && r.error) || ('needs_price' in r && r.needs_price));
+            if (!failed) successfulMutations.add(toolUse.name);
+          }
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result),
+          });
+        } catch (err) {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+            is_error: true,
+          });
+        }
+      }
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'user', content: toolResults });
+      response = await client.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        system: SYSTEM_PROMPT + contextBlock,
+        messages,
+        tools: toolDefinitions,
+      });
+    }
   }
 
   // 7b. If signup just created a conversation, pick it up so we can store the response
@@ -350,6 +476,9 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
           model: response.model,
           usage: response.usage,
           stop_reason: response.stop_reason,
+          tools_called: Array.from(calledTools),
+          mutations_succeeded: Array.from(successfulMutations),
+          correction_attempts: correctionAttempts,
         }),
       })
       .execute();

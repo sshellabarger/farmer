@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { authenticate, requireRole, requireFarmOwner } from '../middleware/rbac.js';
 
 export async function farmRoutes(app: FastifyInstance) {
@@ -307,5 +308,110 @@ export async function farmRoutes(app: FastifyInstance) {
     );
 
     return { markets: enriched };
+  });
+
+  // POST /api/farms/:id/markets — farmer adds a new market (creates market + relationship)
+  app.post<{ Params: { id: string } }>('/:id/markets', {
+    preHandler: [auth, farmerOrAdmin, farmOwner],
+  }, async (request, reply) => {
+    const farmId = request.params.id;
+    const schema = z.object({
+      name: z.string().min(1),
+      phone: z.string().optional(),
+      location: z.string().optional(),
+      type: z.enum(['grocery', 'restaurant', 'farmers_market', 'co_op', 'other']).optional().default('grocery'),
+      priority: z.number().int().positive().optional().default(99),
+      notification_delay_min: z.number().int().min(0).optional().default(0),
+    });
+
+    const data = schema.parse(request.body);
+
+    // Check if a market with this phone already exists
+    let marketId: string | undefined;
+    if (data.phone) {
+      const existing = await app.db
+        .selectFrom('markets')
+        .select(['id'])
+        .where('phone', '=', data.phone)
+        .executeTakeFirst();
+      if (existing) marketId = existing.id;
+    }
+
+    if (!marketId) {
+      // Create a placeholder user for the market (no password/login yet)
+      const [marketUser] = await app.db
+        .insertInto('users')
+        .values({
+          name: data.name,
+          phone: data.phone || `market-${Date.now()}`,
+          role: 'market',
+        })
+        .returningAll()
+        .execute();
+
+      // Create the market
+      const [market] = await app.db
+        .insertInto('markets')
+        .values({
+          user_id: marketUser.id,
+          name: data.name,
+          phone: data.phone ?? null,
+          location: data.location || 'Unknown',
+          type: data.type as any,
+        } as any)
+        .returningAll()
+        .execute();
+
+      marketId = market.id;
+    }
+
+    // Check if relationship already exists
+    const existingRel = await app.db
+      .selectFrom('farm_market_rels')
+      .select(['id'])
+      .where('farm_id', '=', farmId)
+      .where('market_id', '=', marketId)
+      .executeTakeFirst();
+
+    if (existingRel) {
+      return reply.status(409).send({ error: 'This market is already linked to your farm', rel_id: existingRel.id });
+    }
+
+    // Create the relationship
+    const [rel] = await app.db
+      .insertInto('farm_market_rels')
+      .values({
+        farm_id: farmId,
+        market_id: marketId,
+        priority: data.priority,
+        notification_delay_min: data.notification_delay_min,
+      })
+      .returningAll()
+      .execute();
+
+    reply.status(201).send({ market_id: marketId, rel_id: rel.id, name: data.name });
+  });
+
+  // PUT /api/farms/:id/markets/:relId — farmer edits a market relationship
+  app.put<{ Params: { id: string; relId: string } }>('/:id/markets/:relId', {
+    preHandler: [auth, farmerOrAdmin, farmOwner],
+  }, async (request, reply) => {
+    const { relId } = request.params;
+    const { priority, notification_delay_min, active } = request.body as Record<string, unknown>;
+
+    const updates: Record<string, unknown> = {};
+    if (priority !== undefined) updates.priority = priority;
+    if (notification_delay_min !== undefined) updates.notification_delay_min = notification_delay_min;
+    if (active !== undefined) updates.active = active;
+
+    const [updated] = await app.db
+      .updateTable('farm_market_rels')
+      .set(updates)
+      .where('id', '=', relId)
+      .returningAll()
+      .execute();
+
+    if (!updated) return reply.notFound('Relationship not found');
+    return updated;
   });
 }

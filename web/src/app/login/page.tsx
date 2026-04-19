@@ -17,7 +17,7 @@ const TEST_USERS = [
 export default function LoginPage() {
   const { requestOtp, login } = useAuth();
   const router = useRouter();
-  const [step, setStep] = useState<'phone' | 'otp'>('phone');
+  const [step, setStep] = useState<'phone' | 'otp' | 'role-pick'>('phone');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
@@ -61,6 +61,12 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const result = await login(phone, code);
+      if (result.role === 'both') {
+        // User has both roles — let them pick which view
+        setStep('role-pick');
+        setLoading(false);
+        return;
+      }
       if (result.hasFarm) {
         router.push('/farmer');
       } else if (result.hasMarket) {
@@ -92,7 +98,7 @@ export default function LoginPage() {
               Sign in to FarmLink
             </h1>
             <p className="text-white/50 text-xs mt-1">
-              {step === 'phone' ? 'Enter your phone number' : `Welcome back${userName ? `, ${userName}` : ''}`}
+              {step === 'phone' ? 'Enter your phone number' : step === 'role-pick' ? 'Choose your dashboard view' : `Welcome back${userName ? `, ${userName}` : ''}`}
             </p>
           </div>
 
@@ -111,7 +117,40 @@ export default function LoginPage() {
               </div>
             )}
 
-            {step === 'phone' ? (
+            {step === 'role-pick' ? (
+              <div className="space-y-3">
+                {userName && (
+                  <div className="mb-2 p-3 bg-farm-50 rounded-xl text-center">
+                    <div className="text-farm-700 font-bold text-sm">Welcome, {userName}!</div>
+                    <div className="text-earth-500 text-xs mt-1">You have both a farm and a market. Choose a view:</div>
+                  </div>
+                )}
+                <button
+                  onClick={() => router.push('/farmer')}
+                  className="w-full p-4 bg-white border-2 border-earth-200 rounded-xl cursor-pointer hover:border-farm-500 hover:bg-farm-50 transition-all text-left group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center text-xl">🌾</div>
+                    <div>
+                      <div className="font-bold text-sm text-earth-800">Farmer Dashboard</div>
+                      <div className="text-xs text-earth-500 mt-0.5">Manage inventory, orders &amp; market connections</div>
+                    </div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => router.push('/market')}
+                  className="w-full p-4 bg-white border-2 border-earth-200 rounded-xl cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition-all text-left group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center text-xl">🏪</div>
+                    <div>
+                      <div className="font-bold text-sm text-earth-800">Market Dashboard</div>
+                      <div className="text-xs text-earth-500 mt-0.5">Browse farms, place orders &amp; manage deliveries</div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+            ) : step === 'phone' ? (
               <>
                 <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-2">
                   Phone Number

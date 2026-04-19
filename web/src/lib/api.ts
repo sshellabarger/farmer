@@ -78,6 +78,10 @@ export const api = {
   getFarmInventory: (id: string) => request<any>(`/farms/${id}/inventory`),
   getFarmOrders: (id: string) => request<any>(`/farms/${id}/orders`),
   getFarmMarkets: (id: string) => request<any>(`/farms/${id}/markets`),
+  addFarmMarket: (farmId: string, data: { name: string; phone?: string; location?: string; type?: string; priority?: number; notification_delay_min?: number }) =>
+    request<any>(`/farms/${farmId}/markets`, { method: 'POST', body: JSON.stringify(data) }),
+  updateFarmMarket: (farmId: string, relId: string, data: { priority?: number; notification_delay_min?: number; active?: boolean }) =>
+    request<any>(`/farms/${farmId}/markets/${relId}`, { method: 'PUT', body: JSON.stringify(data) }),
   getFarmAnalytics: (id: string) => request<any>(`/farms/${id}/analytics`),
   getFarmMessages: (id: string) => request<any>(`/farms/${id}/messages`),
 
@@ -155,8 +159,12 @@ export const api = {
     request<any>(`/farm-market-rels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   // SMS / Chat
-  getConversations: (role?: string) => {
-    const qs = role ? `?role=${encodeURIComponent(role)}` : '';
+  getConversations: (params?: { role?: string; farm_id?: string; market_id?: string }) => {
+    const sp = new URLSearchParams();
+    if (params?.role) sp.set('role', params.role);
+    if (params?.farm_id) sp.set('farm_id', params.farm_id);
+    if (params?.market_id) sp.set('market_id', params.market_id);
+    const qs = sp.toString() ? `?${sp.toString()}` : '';
     return request<{ conversations: ConversationSummary[] }>(`/sms/conversations${qs}`);
   },
   sendChat: (phone: string, message: string) =>

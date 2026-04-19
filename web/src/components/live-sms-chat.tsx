@@ -46,7 +46,7 @@ export function LiveSMSChat({ roleFilter, title, subtitle }: LiveSMSChatProps) {
   const loadConversations = useCallback(async () => {
     try {
       setError(null);
-      const data = await api.getConversations(roleFilter);
+      const data = await api.getConversations(roleFilter ? { role: roleFilter } : undefined);
       setConversations(data.conversations);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to load conversations';

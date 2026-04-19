@@ -1,5 +1,5 @@
 import type { ToolContext } from './index.js';
-import { sendSms } from '../services/telnyx.js';
+import { sendSms } from '../services/sms.js';
 
 /**
  * Notify all admin users via SMS about new feedback.

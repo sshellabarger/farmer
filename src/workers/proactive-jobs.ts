@@ -3,7 +3,7 @@ import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
 import type { DB } from '../types/schema.js';
 import type { Env } from '../config/env.js';
-import { sendSms } from '../services/telnyx.js';
+import { sendSms } from '../services/sms.js';
 
 // ── In-memory dedup for low-inventory alerts (inventory_id -> timestamp) ──
 const lowInventoryAlertsSent = new Map<string, number>();
