@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole } from '../middleware/rbac.js';
 import { sendSms } from '../services/sms.js';
+import { v4 as uuid } from 'uuid';
 
 const createSchema = z.object({
   type: z.enum(['feature_request', 'bug_report']),
@@ -19,220 +20,147 @@ const updateSchema = z.object({
 });
 
 export async function feedbackRoutes(app: FastifyInstance) {
-  // All feedback routes require authentication
   app.addHook('preHandler', authenticate(app));
 
-  // GET /api/feedback — list feedback
-  // Admins see all; regular users see only their own
+  // GET /api/feedback
   app.get<{ Querystring: Record<string, string> }>('/', async (request) => {
     const { type, status, priority } = request.query;
     const user = request.authUser!;
 
-    let query = app.db
-      .selectFrom('feedback')
-      .innerJoin('users', 'users.id', 'feedback.user_id')
-      .select([
-        'feedback.id',
-        'feedback.user_id',
-        'users.name as user_name',
-        'users.role as user_role',
-        'feedback.type',
-        'feedback.status',
-        'feedback.priority',
-        'feedback.title',
-        'feedback.description',
-        'feedback.source',
-        'feedback.created_at',
-        'feedback.updated_at',
-      ])
-      .orderBy('feedback.created_at', 'desc');
+    let query: FirebaseFirestore.Query = app.db.collection('feedback');
+    if (user.role !== 'admin') query = query.where('user_id', '==', user.id);
+    if (type) query = query.where('type', '==', type);
+    if (status) query = query.where('status', '==', status);
+    if (priority) query = query.where('priority', '==', priority);
 
-    // Non-admins only see their own feedback
-    if (user.role !== 'admin') {
-      query = query.where('feedback.user_id', '=', user.id);
-    } else {
-      // Admins also get admin_notes
-      query = query.select('feedback.admin_notes');
-    }
+    const snapshot = await query.orderBy('created_at', 'desc').get();
 
-    if (type) {
-      query = query.where('feedback.type', '=', type as any);
-    }
-    if (status) {
-      query = query.where('feedback.status', '=', status as any);
-    }
-    if (priority) {
-      query = query.where('feedback.priority', '=', priority as any);
-    }
+    const feedback = await Promise.all(
+      snapshot.docs.map(async (doc) => {
+        const fb = doc.data();
+        const userDoc = await app.db.collection('users').doc(fb.user_id).get();
+        const userData = userDoc.data() || {};
+        const result: any = {
+          id: doc.id,
+          user_id: fb.user_id,
+          user_name: userData.name || 'Unknown',
+          user_role: userData.role,
+          type: fb.type,
+          status: fb.status,
+          priority: fb.priority,
+          title: fb.title,
+          description: fb.description,
+          source: fb.source,
+          created_at: fb.created_at,
+          updated_at: fb.updated_at,
+        };
+        if (user.role === 'admin') result.admin_notes = fb.admin_notes;
+        return result;
+      }),
+    );
 
-    const items = await query.execute();
-    return { feedback: items };
+    return { feedback };
   });
 
-  // POST /api/feedback — create feedback
+  // POST /api/feedback
   app.post('/', async (request, reply) => {
     const parsed = createSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0].message });
-    }
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0].message });
 
     const user = request.authUser!;
     const { type, title, description, source } = parsed.data;
+    const id = uuid();
 
-    const [feedback] = await app.db
-      .insertInto('feedback')
-      .values({
-        user_id: user.id,
-        type,
-        title,
-        description,
-        source: source || 'web',
-      })
-      .returningAll()
-      .execute();
+    const feedback = {
+      user_id: user.id,
+      type,
+      title,
+      description,
+      source: source || 'web',
+      status: 'open',
+      priority: 'medium',
+      admin_notes: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
 
-    // Notify admins via SMS (fire-and-forget)
-    const userName = await app.db
-      .selectFrom('users')
-      .select(['name'])
-      .where('id', '=', user.id)
-      .executeTakeFirst();
+    await app.db.collection('feedback').doc(id).set(feedback);
 
-    const admins = await app.db
-      .selectFrom('users')
-      .select(['phone'])
-      .where('role', '=', 'admin')
-      .execute();
-
+    // Notify admins
+    const userDoc = await app.db.collection('users').doc(user.id).get();
+    const adminsSnap = await app.db.collection('users').where('role', '==', 'admin').get();
     const label = type === 'feature_request' ? 'Feature request' : 'Bug report';
-    const notifMsg = `📋 New ${label} from ${userName?.name || 'User'}:\n"${title}"\n\nReview at farmlink.us/feedback or reply "show feedback" to manage.`;
+    const notifMsg = `New ${label} from ${userDoc.data()?.name || 'User'}:\n"${title}"`;
 
-    for (const admin of admins) {
-      sendSms({ env: app.env, to: admin.phone, body: notifMsg }).catch((err) => {
-        app.log.warn(`Failed to notify admin ${admin.phone}: ${(err as Error).message}`);
+    for (const adminDoc of adminsSnap.docs) {
+      sendSms({ env: app.env, to: adminDoc.data().phone, body: notifMsg }).catch((err) => {
+        app.log.warn(`Failed to notify admin: ${(err as Error).message}`);
       });
     }
 
-    return reply.status(201).send(feedback);
+    return reply.status(201).send({ id, ...feedback });
   });
 
-  // GET /api/feedback/:id — get single feedback item
+  // GET /api/feedback/:id
   app.get<{ Params: { id: string } }>('/:id', async (request, reply) => {
     const user = request.authUser!;
-    const { id } = request.params;
+    const doc = await app.db.collection('feedback').doc(request.params.id).get();
+    if (!doc.exists) return reply.notFound('Feedback not found');
 
-    const feedback = await app.db
-      .selectFrom('feedback')
-      .innerJoin('users', 'users.id', 'feedback.user_id')
-      .select([
-        'feedback.id',
-        'feedback.user_id',
-        'users.name as user_name',
-        'users.role as user_role',
-        'feedback.type',
-        'feedback.status',
-        'feedback.priority',
-        'feedback.title',
-        'feedback.description',
-        'feedback.admin_notes',
-        'feedback.source',
-        'feedback.created_at',
-        'feedback.updated_at',
-      ])
-      .where('feedback.id', '=', id)
-      .executeTakeFirst();
-
-    if (!feedback) {
-      return reply.notFound('Feedback not found');
-    }
-
-    // Non-admins can only view their own feedback
-    if (user.role !== 'admin' && feedback.user_id !== user.id) {
+    const fb = doc.data()!;
+    if (user.role !== 'admin' && fb.user_id !== user.id) {
       return reply.status(403).send({ error: 'Forbidden' });
     }
 
-    // Strip admin_notes for non-admins
-    if (user.role !== 'admin') {
-      const { admin_notes, ...rest } = feedback;
-      return rest;
-    }
-
-    return feedback;
+    const userDoc = await app.db.collection('users').doc(fb.user_id).get();
+    const result: any = {
+      id: doc.id,
+      ...fb,
+      user_name: userDoc.data()?.name || 'Unknown',
+      user_role: userDoc.data()?.role,
+    };
+    if (user.role !== 'admin') delete result.admin_notes;
+    return result;
   });
 
-  // PUT /api/feedback/:id — update feedback
+  // PUT /api/feedback/:id
   app.put<{ Params: { id: string } }>('/:id', async (request, reply) => {
     const parsed = updateSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0].message });
-    }
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0].message });
 
     const user = request.authUser!;
-    const { id } = request.params;
+    const ref = app.db.collection('feedback').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Feedback not found');
 
-    // Look up existing feedback
-    const existing = await app.db
-      .selectFrom('feedback')
-      .select(['user_id'])
-      .where('id', '=', id)
-      .executeTakeFirst();
-
-    if (!existing) {
-      return reply.notFound('Feedback not found');
-    }
-
-    const isOwner = existing.user_id === user.id;
+    const fb = doc.data()!;
+    const isOwner = fb.user_id === user.id;
     const isAdmin = user.role === 'admin';
+    if (!isOwner && !isAdmin) return reply.status(403).send({ error: 'Forbidden' });
 
-    if (!isOwner && !isAdmin) {
-      return reply.status(403).send({ error: 'Forbidden' });
-    }
-
-    // Non-admins can only update title and description on their own items
     const { title, description, status, priority, admin_notes } = parsed.data;
     const updates: Record<string, unknown> = { updated_at: new Date() };
-
     if (title !== undefined) updates.title = title;
     if (description !== undefined) updates.description = description;
-
-    // Admin-only fields
     if (isAdmin) {
       if (status !== undefined) updates.status = status;
       if (priority !== undefined) updates.priority = priority;
       if (admin_notes !== undefined) updates.admin_notes = admin_notes;
     }
 
-    const [updated] = await app.db
-      .updateTable('feedback')
-      .set(updates)
-      .where('id', '=', id)
-      .returningAll()
-      .execute();
-
-    return updated;
+    await ref.update(updates);
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // DELETE /api/feedback/:id — admin only
+  // DELETE /api/feedback/:id (admin only)
   app.delete<{ Params: { id: string } }>('/:id', {
     preHandler: requireRole('admin'),
   }, async (request, reply) => {
-    const { id } = request.params;
-
-    const existing = await app.db
-      .selectFrom('feedback')
-      .select(['id'])
-      .where('id', '=', id)
-      .executeTakeFirst();
-
-    if (!existing) {
-      return reply.notFound('Feedback not found');
-    }
-
-    await app.db
-      .deleteFrom('feedback')
-      .where('id', '=', id)
-      .execute();
-
+    const ref = app.db.collection('feedback').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Feedback not found');
+    await ref.delete();
     return { success: true };
   });
 }

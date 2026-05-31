@@ -158,6 +158,24 @@ export const api = {
   updateRelationship: (id: string, data: any) =>
     request<any>(`/farm-market-rels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
+  // Directory
+  directoryFarms: (params?: { search?: string; market_id?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params as any).toString() : '';
+    return request<any>(`/directory/farms${qs}`);
+  },
+  directoryMarkets: (params?: { search?: string; farm_id?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params as any).toString() : '';
+    return request<any>(`/directory/markets${qs}`);
+  },
+  connectionRequest: (data: { farm_id: string; market_id: string; initiated_by: 'farm' | 'market'; message?: string }) =>
+    request<any>('/directory/connect', { method: 'POST', body: JSON.stringify(data) }),
+  connectionRespond: (relId: string, accept: boolean) =>
+    request<any>(`/directory/connect/${relId}/respond`, { method: 'POST', body: JSON.stringify({ accept }) }),
+  pendingConnections: (params?: { farm_id?: string; market_id?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params as any).toString() : '';
+    return request<any>(`/directory/connect/pending${qs}`);
+  },
+
   // SMS / Chat
   getConversations: (params?: { role?: string; farm_id?: string; market_id?: string }) => {
     const sp = new URLSearchParams();

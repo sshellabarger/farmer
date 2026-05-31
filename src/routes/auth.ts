@@ -1,12 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { signJwt, verifyJwt } from '../utils/jwt.js';
+import { v4 as uuid } from 'uuid';
 
-// In-memory OTP store (use Redis in production)
+// In-memory OTP store (use Firestore TTL docs in production)
 const otpStore = new Map<string, { code: string; expires: number }>();
 
 export async function authRoutes(app: FastifyInstance) {
-  // ─── Signup: create user + farm/market, then send OTP ───
+  // Signup
   app.post('/signup', async (request, reply) => {
     const schema = z.object({
       name: z.string().min(1, 'Name is required'),
@@ -15,142 +16,128 @@ export async function authRoutes(app: FastifyInstance) {
       role: z.enum(['farmer', 'market']),
       businessName: z.string().min(1, 'Business name is required'),
       location: z.string().min(1, 'Location is required'),
-      // Market-specific
       marketType: z.enum(['farmers_market', 'restaurant', 'grocery', 'co_op', 'other']).optional(),
       deliveryPref: z.enum(['pickup', 'delivery', 'both']).optional(),
-      // Farm-specific
       specialty: z.string().optional(),
     });
 
     const data = schema.parse(request.body);
 
     // Check if phone already registered
-    const existing = await app.db
-      .selectFrom('users')
-      .selectAll()
-      .where('phone', '=', data.phone)
-      .executeTakeFirst();
-
-    if (existing) {
-      return reply.status(409).send({
-        error: 'An account with this phone number already exists. Please sign in instead.',
-      });
+    const phoneSnap = await app.db
+      .collection('users')
+      .where('phone', '==', data.phone)
+      .limit(1)
+      .get();
+    if (!phoneSnap.empty) {
+      return reply.status(409).send({ error: 'An account with this phone number already exists.' });
     }
 
     // Check if email already registered
-    const existingEmail = await app.db
-      .selectFrom('users')
-      .selectAll()
-      .where('email', '=', data.email)
-      .executeTakeFirst();
-
-    if (existingEmail) {
-      return reply.status(409).send({
-        error: 'An account with this email already exists. Please sign in instead.',
-      });
+    const emailSnap = await app.db
+      .collection('users')
+      .where('email', '==', data.email)
+      .limit(1)
+      .get();
+    if (!emailSnap.empty) {
+      return reply.status(409).send({ error: 'An account with this email already exists.' });
     }
 
-    // Create user
-    const user = await app.db
-      .insertInto('users')
-      .values({
-        name: data.name,
-        phone: data.phone,
-        email: data.email,
-        role: data.role as any,
-      })
-      .returningAll()
-      .executeTakeFirstOrThrow();
+    const userId = uuid();
+    await app.db.collection('users').doc(userId).set({
+      name: data.name,
+      phone: data.phone,
+      email: data.email,
+      role: data.role,
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
 
     let farm = null;
     let market = null;
 
     if (data.role === 'farmer') {
-      farm = await app.db
-        .insertInto('farms')
-        .values({
-          user_id: user.id,
-          name: data.businessName,
-          location: data.location,
-          specialty: data.specialty || null,
-          phone: data.phone,
-          email: data.email,
-        })
-        .returningAll()
-        .executeTakeFirstOrThrow();
+      const farmId = uuid();
+      const farmData = {
+        user_id: userId,
+        name: data.businessName,
+        location: data.location,
+        specialty: data.specialty || null,
+        phone: data.phone,
+        email: data.email,
+        active: true,
+        timezone: 'America/Chicago',
+        delivery_schedule: [],
+        contacts: [],
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      await app.db.collection('farms').doc(farmId).set(farmData);
+      farm = { id: farmId, name: data.businessName };
     } else {
-      market = await app.db
-        .insertInto('markets')
-        .values({
-          user_id: user.id,
-          name: data.businessName,
-          location: data.location,
-          type: (data.marketType || 'other') as any,
-          delivery_pref: (data.deliveryPref || 'both') as any,
-          phone: data.phone,
-          email: data.email,
-        })
-        .returningAll()
-        .executeTakeFirstOrThrow();
+      const marketId = uuid();
+      const marketData = {
+        user_id: userId,
+        name: data.businessName,
+        location: data.location,
+        type: data.marketType || 'other',
+        delivery_pref: data.deliveryPref || 'both',
+        phone: data.phone,
+        email: data.email,
+        active: true,
+        contacts: [],
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      await app.db.collection('markets').doc(marketId).set(marketData);
+      market = { id: marketId, name: data.businessName };
     }
 
-    // Generate OTP for phone verification
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     otpStore.set(data.phone, { code, expires: Date.now() + 5 * 60 * 1000 });
-    app.log.info({ phone: data.phone, code }, 'Signup OTP generated (dev mode — check logs)');
+    app.log.info({ phone: data.phone, code }, 'Signup OTP generated');
 
-    // In production: send via SMS provider
     reply.status(201).send({
       success: true,
       message: 'Account created. Please verify your phone number.',
-      userId: user.id,
-      farm: farm ? { id: farm.id, name: farm.name } : null,
-      market: market ? { id: market.id, name: market.name } : null,
+      userId,
+      farm,
+      market,
     });
   });
 
-  // ─── Check if phone exists (for login vs signup routing) ───
+  // Check if phone exists
   app.post('/check-phone', async (request, reply) => {
     const schema = z.object({ phone: z.string().min(10) });
     const { phone } = schema.parse(request.body);
 
-    const user = await app.db
-      .selectFrom('users')
-      .select(['id', 'name', 'role'])
-      .where('phone', '=', phone)
-      .executeTakeFirst();
-
-    reply.send({ exists: !!user, user: user ? { name: user.name, role: user.role } : null });
+    const snap = await app.db.collection('users').where('phone', '==', phone).limit(1).get();
+    if (snap.empty) {
+      reply.send({ exists: false, user: null });
+    } else {
+      const user = snap.docs[0].data();
+      reply.send({ exists: true, user: { name: user.name, role: user.role } });
+    }
   });
 
-  // ─── Request OTP ───
+  // Request OTP
   app.post('/otp/request', async (request, reply) => {
     const schema = z.object({ phone: z.string().min(10) });
     const { phone } = schema.parse(request.body);
 
-    // Only allow OTP for registered users
-    const user = await app.db
-      .selectFrom('users')
-      .select(['id'])
-      .where('phone', '=', phone)
-      .executeTakeFirst();
-
-    if (!user) {
-      return reply.status(404).send({
-        error: 'No account found with this phone number. Please sign up first.',
-      });
+    const snap = await app.db.collection('users').where('phone', '==', phone).limit(1).get();
+    if (snap.empty) {
+      return reply.status(404).send({ error: 'No account found. Please sign up first.' });
     }
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     otpStore.set(phone, { code, expires: Date.now() + 5 * 60 * 1000 });
+    app.log.info({ phone, code }, 'OTP generated');
 
-    app.log.info({ phone, code }, 'OTP generated (dev mode — check logs)');
-
-    // In production: send via SMS provider
     reply.send({ success: true, message: 'OTP sent' });
   });
 
-  // ─── Verify OTP and return JWT ───
+  // Verify OTP
   app.post('/otp/verify', async (request, reply) => {
     const schema = z.object({
       phone: z.string().min(10),
@@ -158,7 +145,6 @@ export async function authRoutes(app: FastifyInstance) {
     });
     const { phone, code } = schema.parse(request.body);
 
-    // Verify OTP (dev mode accepts any 6-digit code)
     const stored = otpStore.get(phone);
     const isDev = app.env.NODE_ENV === 'development';
 
@@ -167,42 +153,32 @@ export async function authRoutes(app: FastifyInstance) {
     }
     otpStore.delete(phone);
 
-    const user = await app.db
-      .selectFrom('users')
-      .selectAll()
-      .where('phone', '=', phone)
-      .executeTakeFirst();
-
-    if (!user) {
-      return reply.status(404).send({
-        error: 'No account found. Please sign up first.',
-      });
+    const userSnap = await app.db.collection('users').where('phone', '==', phone).limit(1).get();
+    if (userSnap.empty) {
+      return reply.status(404).send({ error: 'No account found.' });
     }
 
-    const farm = await app.db
-      .selectFrom('farms')
-      .selectAll()
-      .where('user_id', '=', user.id)
-      .executeTakeFirst();
+    const userId = userSnap.docs[0].id;
+    const user = userSnap.docs[0].data();
 
-    const market = await app.db
-      .selectFrom('markets')
-      .selectAll()
-      .where('user_id', '=', user.id)
-      .executeTakeFirst();
+    const farmSnap = await app.db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    const marketSnap = await app.db.collection('markets').where('user_id', '==', userId).limit(1).get();
 
-    const token = signJwt({ sub: user.id, role: user.role }, app.env.JWT_SECRET);
+    const farm = farmSnap.empty ? null : { id: farmSnap.docs[0].id, name: farmSnap.docs[0].data().name };
+    const market = marketSnap.empty ? null : { id: marketSnap.docs[0].id, name: marketSnap.docs[0].data().name };
+
+    const token = signJwt({ sub: userId, role: user.role }, app.env.JWT_SECRET);
 
     reply.send({
       success: true,
       token,
-      user: { id: user.id, name: user.name, role: user.role, phone: user.phone },
-      farm: farm ? { id: farm.id, name: farm.name } : null,
-      market: market ? { id: market.id, name: market.name } : null,
+      user: { id: userId, name: user.name, role: user.role, phone: user.phone },
+      farm,
+      market,
     });
   });
 
-  // Get current user from JWT
+  // Get current user
   app.get('/me', async (request, reply) => {
     const authHeader = request.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
@@ -214,32 +190,22 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid or expired token' });
     }
 
-    const user = await app.db
-      .selectFrom('users')
-      .selectAll()
-      .where('id', '=', payload.sub)
-      .executeTakeFirst();
-
-    if (!user) {
+    const userDoc = await app.db.collection('users').doc(payload.sub).get();
+    if (!userDoc.exists) {
       return reply.status(404).send({ error: 'User not found' });
     }
+    const user = userDoc.data()!;
 
-    const farm = await app.db
-      .selectFrom('farms')
-      .selectAll()
-      .where('user_id', '=', user.id)
-      .executeTakeFirst();
+    const farmSnap = await app.db.collection('farms').where('user_id', '==', payload.sub).limit(1).get();
+    const marketSnap = await app.db.collection('markets').where('user_id', '==', payload.sub).limit(1).get();
 
-    const market = await app.db
-      .selectFrom('markets')
-      .selectAll()
-      .where('user_id', '=', user.id)
-      .executeTakeFirst();
+    const farm = farmSnap.empty ? null : { id: farmSnap.docs[0].id, name: farmSnap.docs[0].data().name };
+    const market = marketSnap.empty ? null : { id: marketSnap.docs[0].id, name: marketSnap.docs[0].data().name };
 
     reply.send({
-      user: { id: user.id, name: user.name, role: user.role, phone: user.phone },
-      farm: farm ? { id: farm.id, name: farm.name } : null,
-      market: market ? { id: market.id, name: market.name } : null,
+      user: { id: userDoc.id, name: user.name, role: user.role, phone: user.phone },
+      farm,
+      market,
     });
   });
 }

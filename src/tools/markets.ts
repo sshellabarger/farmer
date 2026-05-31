@@ -3,55 +3,67 @@ import type { ToolContext } from './index.js';
 export async function marketQuery(input: Record<string, unknown>, ctx: ToolContext) {
   const { db } = ctx;
 
-  // If farm_id provided: return connected markets with priority info
   if (input.farm_id) {
-    const markets = await db
-      .selectFrom('farm_market_rels')
-      .innerJoin('markets', 'markets.id', 'farm_market_rels.market_id')
-      .select([
-        'markets.id',
-        'markets.name',
-        'markets.type',
-        'markets.location',
-        'farm_market_rels.priority',
-        'farm_market_rels.notification_delay_min',
-        'farm_market_rels.active',
-      ])
-      .where('farm_market_rels.farm_id', '=', input.farm_id as string)
-      .where('farm_market_rels.active', '=', true)
-      .orderBy('farm_market_rels.priority', 'asc')
-      .execute();
+    const relsSnap = await db.collection('farm_market_rels')
+      .where('farm_id', '==', input.farm_id)
+      .where('active', '==', true)
+      .orderBy('priority')
+      .get();
+
+    const markets = await Promise.all(
+      relsSnap.docs.map(async (d) => {
+        const rel = d.data();
+        const mDoc = await db.collection('markets').doc(rel.market_id).get();
+        const m = mDoc.data() || {};
+        return {
+          id: mDoc.id,
+          name: m.name,
+          type: m.type,
+          location: m.location,
+          priority: rel.priority,
+          notification_delay_min: rel.notification_delay_min,
+          active: rel.active,
+        };
+      }),
+    );
 
     return { count: markets.length, markets };
   }
 
-  // If market_id provided: return available inventory across connected farms
   if (input.market_id) {
-    const inventory = await db
-      .selectFrom('inventory')
-      .innerJoin('products', 'products.id', 'inventory.product_id')
-      .innerJoin('farms', 'farms.id', 'inventory.farm_id')
-      .innerJoin('farm_market_rels', (join) =>
-        join
-          .onRef('farm_market_rels.farm_id', '=', 'farms.id')
-          .on('farm_market_rels.market_id', '=', input.market_id as string)
-      )
-      .select([
-        'inventory.id',
-        'products.name as product_name',
-        'products.category',
-        'farms.name as farm_name',
-        'inventory.remaining',
-        'products.unit',
-        'inventory.price',
-        'inventory.harvest_date',
-      ])
-      .where('inventory.status', 'in', ['available', 'partial'])
-      .where('inventory.remaining', '>', 0)
-      .where('farm_market_rels.active', '=', true)
-      .orderBy('products.category')
-      .orderBy('inventory.harvest_date', 'desc')
-      .execute();
+    const relsSnap = await db.collection('farm_market_rels')
+      .where('market_id', '==', input.market_id)
+      .where('active', '==', true)
+      .get();
+
+    const farmIds = relsSnap.docs.map((d) => d.data().farm_id);
+    const inventory: any[] = [];
+
+    for (const farmId of farmIds) {
+      const invSnap = await db.collection('inventory')
+        .where('farm_id', '==', farmId)
+        .where('status', 'in', ['available', 'partial'])
+        .get();
+
+      for (const doc of invSnap.docs) {
+        const inv = doc.data();
+        if (inv.remaining <= 0) continue;
+        const prodDoc = await db.collection('products').doc(inv.product_id).get();
+        const product = prodDoc.data() || {};
+        const farmDoc = await db.collection('farms').doc(farmId).get();
+
+        inventory.push({
+          id: doc.id,
+          product_name: product.name || 'Unknown',
+          category: product.category || '',
+          farm_name: farmDoc.data()?.name || 'Unknown',
+          remaining: inv.remaining,
+          unit: product.unit || '',
+          price: inv.price,
+          harvest_date: inv.harvest_date,
+        });
+      }
+    }
 
     return { count: inventory.length, available_inventory: inventory };
   }

@@ -1,100 +1,111 @@
 import type { ToolContext } from './index.js';
-import { getNotificationQueue } from '../workers/notification-queue.js';
+import { v4 as uuid } from 'uuid';
+import { CloudTasksClient } from '@google-cloud/tasks';
 
 export async function notifyMarkets(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, env } = ctx;
   const inventoryId = input.inventory_id as string;
   const specificMarketIds = input.market_ids as string[] | undefined;
 
-  // Get the inventory item with farm info
-  const inv = await db
-    .selectFrom('inventory')
-    .innerJoin('products', 'products.id', 'inventory.product_id')
-    .innerJoin('farms', 'farms.id', 'inventory.farm_id')
-    .select([
-      'inventory.id',
-      'inventory.farm_id',
-      'products.name as product_name',
-      'inventory.remaining',
-      'products.unit',
-      'inventory.price',
-      'farms.name as farm_name',
-    ])
-    .where('inventory.id', '=', inventoryId)
-    .executeTakeFirst();
+  const invDoc = await db.collection('inventory').doc(inventoryId).get();
+  if (!invDoc.exists) throw new Error('Inventory not found');
+  const inv = invDoc.data()!;
 
-  if (!inv) throw new Error('Inventory not found');
+  const prodDoc = await db.collection('products').doc(inv.product_id).get();
+  const product = prodDoc.data() || {};
+  const farmDoc = await db.collection('farms').doc(inv.farm_id).get();
+  const farmName = farmDoc.data()?.name || 'Unknown';
 
-  // Get connected markets with priority/delay settings
-  let marketsQuery = db
-    .selectFrom('farm_market_rels')
-    .innerJoin('markets', 'markets.id', 'farm_market_rels.market_id')
-    .innerJoin('users', 'users.id', 'markets.user_id')
-    .select([
-      'markets.id as market_id',
-      'markets.name as market_name',
-      'users.phone',
-      'farm_market_rels.priority',
-      'farm_market_rels.notification_delay_min',
-    ])
-    .where('farm_market_rels.farm_id', '=', inv.farm_id)
-    .where('farm_market_rels.active', '=', true);
+  // Get connected markets
+  let relsQuery: FirebaseFirestore.Query = db.collection('farm_market_rels')
+    .where('farm_id', '==', inv.farm_id)
+    .where('active', '==', true);
 
-  if (specificMarketIds && specificMarketIds.length > 0) {
-    marketsQuery = marketsQuery.where('markets.id', 'in', specificMarketIds);
+  const relsSnap = await relsQuery.orderBy('priority').get();
+
+  const markets: Array<{ market_id: string; market_name: string; phone: string; priority: number; notification_delay_min: number }> = [];
+
+  for (const relDoc of relsSnap.docs) {
+    const rel = relDoc.data();
+    if (specificMarketIds && !specificMarketIds.includes(rel.market_id)) continue;
+
+    const marketDoc = await db.collection('markets').doc(rel.market_id).get();
+    if (!marketDoc.exists) continue;
+    const market = marketDoc.data()!;
+    const userDoc = await db.collection('users').doc(market.user_id).get();
+
+    markets.push({
+      market_id: rel.market_id,
+      market_name: market.name,
+      phone: userDoc.data()?.phone || '',
+      priority: rel.priority,
+      notification_delay_min: rel.notification_delay_min || 0,
+    });
   }
-
-  const markets = await marketsQuery.orderBy('farm_market_rels.priority', 'asc').execute();
 
   if (markets.length === 0) {
     return { success: false, message: 'No connected markets to notify' };
   }
 
-  // Queue notifications with priority-based delays
-  const queue = getNotificationQueue(env.REDIS_URL);
   const scheduled: Array<{ market: string; delay_min: number }> = [];
 
   for (const market of markets) {
+    const notifId = uuid();
     const delayMs = market.notification_delay_min * 60 * 1000;
+    const scheduledFor = new Date(Date.now() + delayMs);
 
-    // Create notification record in DB
-    const [notification] = await db
-      .insertInto('notifications')
-      .values({
-        market_id: market.market_id,
-        inventory_id: inventoryId,
-        type: 'new_inventory',
-        channel: 'sms',
-        status: 'pending',
-        scheduled_for: new Date(Date.now() + delayMs),
-      })
-      .returningAll()
-      .execute();
-
-    // Queue the BullMQ job
-    await queue.add(
-      'send-notification',
-      {
-        notificationId: notification.id,
-        marketId: market.market_id,
-        phone: market.phone,
-        message: `🌱 New from ${inv.farm_name}: ${inv.remaining} ${inv.unit} of ${inv.product_name} @ $${inv.price}/${inv.unit}. Reply to order!`,
-      },
-      {
-        delay: delayMs,
-        jobId: `notif-${notification.id}`,
-      }
-    );
-
-    scheduled.push({
-      market: market.market_name,
-      delay_min: market.notification_delay_min,
+    await db.collection('notifications').doc(notifId).set({
+      market_id: market.market_id,
+      inventory_id: inventoryId,
+      type: 'new_inventory',
+      channel: 'sms',
+      status: 'pending',
+      scheduled_for: scheduledFor,
+      created_at: new Date(),
     });
+
+    // Queue via Cloud Tasks if configured, otherwise send immediately
+    const message = `New from ${farmName}: ${inv.remaining} ${product.unit} of ${product.name} @ $${inv.price}/${product.unit}. Reply to order!`;
+
+    if (env.CLOUD_FUNCTIONS_URL && env.GCLOUD_PROJECT) {
+      try {
+        const client = new CloudTasksClient();
+        const queuePath = client.queuePath(
+          env.GCLOUD_PROJECT,
+          env.CLOUD_TASKS_LOCATION,
+          env.CLOUD_TASKS_QUEUE,
+        );
+        await client.createTask({
+          parent: queuePath,
+          task: {
+            scheduleTime: { seconds: Math.floor(scheduledFor.getTime() / 1000) },
+            httpRequest: {
+              httpMethod: 'POST',
+              url: `${env.CLOUD_FUNCTIONS_URL}/sendNotification`,
+              headers: { 'Content-Type': 'application/json' },
+              body: Buffer.from(JSON.stringify({ notificationId: notifId, phone: market.phone, message })).toString('base64'),
+            },
+          },
+        });
+      } catch (err) {
+        // Fall back to direct send if Cloud Tasks fails
+        const { sendSms } = await import('../services/sms.js');
+        await sendSms({ env, to: market.phone, body: message });
+        await db.collection('notifications').doc(notifId).update({ status: 'sent', sent_at: new Date() });
+      }
+    } else {
+      // Local dev: send immediately
+      const { sendSms } = await import('../services/sms.js');
+      try {
+        await sendSms({ env, to: market.phone, body: message });
+        await db.collection('notifications').doc(notifId).update({ status: 'sent', sent_at: new Date() });
+      } catch {
+        await db.collection('notifications').doc(notifId).update({ status: 'failed' });
+      }
+    }
+
+    scheduled.push({ market: market.market_name, delay_min: market.notification_delay_min });
   }
 
-  return {
-    success: true,
-    markets_notified: scheduled.length,
-    schedule: scheduled,
-  };
+  return { success: true, markets_notified: scheduled.length, schedule: scheduled };
 }

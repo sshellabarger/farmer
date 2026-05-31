@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { processInboundMessage } from '../services/conversation.js';
 import { sendSms } from '../services/sms.js';
+import { notifyError } from '../services/error-notify.js';
+import { classifyError } from '../utils/errors.js';
 
-// Telnyx webhook payload shape (nested under data.payload)
 const telnyxInboundSchema = z.object({
   data: z.object({
     event_type: z.string(),
@@ -28,11 +29,7 @@ export async function smsRoutes(app: FastifyInstance) {
     }
 
     const { data } = parsed.data;
-
-    // Only process inbound messages
-    if (data.event_type !== 'message.received') {
-      return reply.send({ ok: true });
-    }
+    if (data.event_type !== 'message.received') return reply.send({ ok: true });
 
     const from = data.payload.from.phone_number;
     const body = data.payload.text;
@@ -40,163 +37,65 @@ export async function smsRoutes(app: FastifyInstance) {
 
     app.log.info({ from, body: body.substring(0, 50), messageSid }, 'Inbound SMS');
 
-    // Reject unregistered phone numbers — require signup first
-    const registeredUser = await app.db
-      .selectFrom('users')
-      .select(['id'])
-      .where('phone', '=', from)
-      .executeTakeFirst();
-
-    if (!registeredUser) {
-      await sendSms({
-        env: app.env,
-        to: from,
-        body: '👋 Welcome! To use FarmLink, please create an account first at our website. Visit farmlink.app/signup to get started!',
-      });
+    const userSnap = await app.db.collection('users').where('phone', '==', from).limit(1).get();
+    if (userSnap.empty) {
+      await sendSms({ env: app.env, to: from, body: 'Welcome! Please create an account at farmlink.app/signup to get started.' });
       return reply.send({ ok: true });
     }
 
     try {
-      // Process through conversation engine (AI + tools)
-      const responseText = await processInboundMessage({
-        db: app.db,
-        env: app.env,
-        phone: from,
-        message: body,
-        messageSid,
-      });
-
-      // Send reply via Telnyx
-      await sendSms({
-        env: app.env,
-        to: from,
-        body: responseText,
-      });
-
+      const responseText = await processInboundMessage({ db: app.db, env: app.env, phone: from, message: body, messageSid });
+      await sendSms({ env: app.env, to: from, body: responseText });
       reply.send({ ok: true });
     } catch (err) {
       app.log.error(err, 'Failed to process inbound SMS');
-      // Still return 200 so Telnyx doesn't retry
       reply.send({ ok: true });
     }
   });
 
-  // ── Meta WhatsApp Cloud API webhook verification (GET) ──
+  // WhatsApp webhook verification
   app.get('/whatsapp/inbound', async (request, reply) => {
     const query = request.query as Record<string, string>;
-    const mode = query['hub.mode'];
-    const token = query['hub.verify_token'];
-    const challenge = query['hub.challenge'];
-
-    if (mode === 'subscribe' && token === app.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
-      app.log.info('WhatsApp webhook verified');
-      return reply.type('text/plain').send(challenge);
+    if (query['hub.mode'] === 'subscribe' && query['hub.verify_token'] === app.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+      return reply.type('text/plain').send(query['hub.challenge']);
     }
-
-    app.log.warn({ mode, token }, 'WhatsApp webhook verification failed');
     return reply.status(403).send('Forbidden');
   });
 
-  // ── Meta WhatsApp Cloud API inbound messages (POST) ──
+  // WhatsApp inbound messages
   app.post('/whatsapp/inbound', async (request, reply) => {
-    // Verify signature if META_APP_SECRET is configured
     if (app.env.META_APP_SECRET) {
       const signature = (request.headers['x-hub-signature-256'] as string) || '';
       const rawBody = JSON.stringify(request.body);
       const { verifyWebhookSignature } = await import('../services/whatsapp.js');
       if (!verifyWebhookSignature(app.env.META_APP_SECRET, rawBody, signature)) {
-        app.log.warn('Invalid WhatsApp webhook signature');
         return reply.status(403).send({ error: 'Invalid signature' });
       }
     }
 
-    const payload = request.body as {
-      object?: string;
-      entry?: Array<{
-        changes?: Array<{
-          value?: {
-            messages?: Array<{
-              from: string;
-              id: string;
-              timestamp: string;
-              text?: { body: string };
-              type: string;
-            }>;
-            contacts?: Array<{ profile?: { name?: string }; wa_id: string }>;
-            statuses?: Array<{ id: string; status: string; recipient_id: string }>;
-          };
-          field?: string;
-        }>;
-      }>;
-    };
-
-    // Always return 200 quickly — Meta retries on failure
-    if (payload.object !== 'whatsapp_business_account') {
-      return reply.send({ ok: true });
-    }
+    const payload = request.body as any;
+    if (payload.object !== 'whatsapp_business_account') return reply.send({ ok: true });
 
     const changes = payload.entry?.[0]?.changes?.[0]?.value;
-    if (!changes) return reply.send({ ok: true });
+    if (!changes?.messages) return reply.send({ ok: true });
 
-    // Handle status updates
-    if (changes.statuses) {
-      for (const status of changes.statuses) {
-        app.log.info({ id: status.id, status: status.status }, 'WhatsApp status update');
-      }
-      return reply.send({ ok: true });
-    }
+    for (const msg of changes.messages) {
+      if (msg.type !== 'text' || !msg.text?.body) continue;
 
-    // Handle inbound messages
-    const messages = changes.messages;
-    if (!messages || messages.length === 0) return reply.send({ ok: true });
-
-    for (const msg of messages) {
-      // Only handle text messages for now
-      if (msg.type !== 'text' || !msg.text?.body) {
-        app.log.info({ type: msg.type, from: msg.from }, 'Skipping non-text WhatsApp message');
-        continue;
-      }
-
-      // Meta sends numbers without '+' — normalize to E.164
       const from = msg.from.startsWith('+') ? msg.from : `+${msg.from}`;
       const body = msg.text.body;
-      const messageSid = msg.id;
-      const senderName = changes.contacts?.[0]?.profile?.name;
 
-      app.log.info({ from, body: body.substring(0, 50), messageSid, senderName, channel: 'whatsapp' }, 'Inbound WhatsApp');
-
-      // Check registration
-      const registeredUser = await app.db
-        .selectFrom('users')
-        .select(['id'])
-        .where('phone', '=', from)
-        .executeTakeFirst();
-
-      if (!registeredUser) {
+      const userSnap = await app.db.collection('users').where('phone', '==', from).limit(1).get();
+      if (userSnap.empty) {
         const { sendWhatsApp } = await import('../services/whatsapp.js');
-        await sendWhatsApp({
-          env: app.env,
-          to: from,
-          body: '👋 Welcome to FarmLink! Please create an account first at farmlink.app/signup to get started.',
-        });
+        await sendWhatsApp({ env: app.env, to: from, body: 'Welcome to FarmLink! Please create an account at farmlink.app/signup.' });
         continue;
       }
 
       try {
-        const responseText = await processInboundMessage({
-          db: app.db,
-          env: app.env,
-          phone: from,
-          message: body,
-          messageSid,
-        });
-
+        const responseText = await processInboundMessage({ db: app.db, env: app.env, phone: from, message: body, messageSid: msg.id });
         const { sendWhatsApp } = await import('../services/whatsapp.js');
-        await sendWhatsApp({
-          env: app.env,
-          to: from,
-          body: responseText,
-        });
+        await sendWhatsApp({ env: app.env, to: from, body: responseText });
       } catch (err) {
         app.log.error(err, 'Failed to process inbound WhatsApp');
       }
@@ -205,29 +104,15 @@ export async function smsRoutes(app: FastifyInstance) {
     reply.send({ ok: true });
   });
 
-  // Direct chat endpoint — bypasses Telnyx, for web testing
+  // Direct chat endpoint for web testing
   app.post('/chat', async (request, reply) => {
-    const schema = z.object({
-      phone: z.string().min(10),
-      message: z.string().min(1),
-    });
+    const schema = z.object({ phone: z.string().min(10), message: z.string().min(1) });
     const parsed = schema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: 'Need phone and message' });
-    }
+    if (!parsed.success) return reply.status(400).send({ error: 'Need phone and message' });
 
     const { phone, message } = parsed.data;
-    app.log.info({ phone, message: message.substring(0, 50) }, 'Web chat message');
-
     try {
-      const responseText = await processInboundMessage({
-        db: app.db,
-        env: app.env,
-        phone,
-        message,
-        messageSid: `web-${Date.now()}`,
-      });
-
+      const responseText = await processInboundMessage({ db: app.db, env: app.env, phone, message, messageSid: `web-${Date.now()}` });
       reply.send({ response: responseText });
     } catch (err) {
       app.log.error(err, 'Failed to process web chat message');
@@ -235,34 +120,31 @@ export async function smsRoutes(app: FastifyInstance) {
     }
   });
 
-  // Get conversation history for a phone number
+  // Conversation history
   app.get('/history/:phone', async (request, reply) => {
     const { phone } = request.params as { phone: string };
 
-    const conversation = await app.db
-      .selectFrom('conversations')
-      .selectAll()
-      .where('phone_number', '=', phone)
+    const convoSnap = await app.db
+      .collection('conversations')
+      .where('phone_number', '==', phone)
       .orderBy('last_message_at', 'desc')
-      .executeTakeFirst();
+      .limit(1)
+      .get();
 
-    if (!conversation) {
-      return reply.send({ messages: [] });
-    }
+    if (convoSnap.empty) return reply.send({ messages: [] });
 
-    const messages = await app.db
-      .selectFrom('messages')
-      .selectAll()
-      .where('conversation_id', '=', conversation.id)
+    const convoId = convoSnap.docs[0].id;
+    const msgsSnap = await app.db
+      .collection('conversations').doc(convoId).collection('messages')
       .orderBy('created_at', 'asc')
-      .execute();
+      .get();
 
+    const messages = msgsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
     reply.send({ messages });
   });
 
-  // List conversations — if authenticated, filter to the user's own conversations
+  // List conversations
   app.get('/conversations', async (request, reply) => {
-    // Soft auth: try to extract user from token without failing
     const authHeader = request.headers.authorization;
     let authUserId: string | undefined;
     if (authHeader?.startsWith('Bearer ')) {
@@ -270,80 +152,64 @@ export async function smsRoutes(app: FastifyInstance) {
       const payload = verifyJwt(authHeader.slice(7), app.env.JWT_SECRET);
       if (payload?.sub) authUserId = payload.sub;
     }
-    const { role, farm_id, market_id } = request.query as { role?: string; farm_id?: string; market_id?: string };
 
-    // If farm_id or market_id provided, get conversations for the user AND all their partners
-    let partnerUserIds: string[] = [];
+    const { farm_id, market_id } = request.query as { farm_id?: string; market_id?: string };
+
+    let includeUserIds: string[] = authUserId ? [authUserId] : [];
+
     if (farm_id) {
-      // Get user IDs of all markets related to this farm
-      const rels = await app.db
-        .selectFrom('farm_market_rels')
-        .innerJoin('markets', 'markets.id', 'farm_market_rels.market_id')
-        .select('markets.user_id')
-        .where('farm_market_rels.farm_id', '=', farm_id)
-        .where('farm_market_rels.active', '=', true)
-        .execute();
-      partnerUserIds = rels.map(r => r.user_id).filter(Boolean) as string[];
+      const relsSnap = await app.db.collection('farm_market_rels')
+        .where('farm_id', '==', farm_id).where('active', '==', true).get();
+      for (const d of relsSnap.docs) {
+        const marketDoc = await app.db.collection('markets').doc(d.data().market_id).get();
+        if (marketDoc.exists) includeUserIds.push(marketDoc.data()!.user_id);
+      }
     }
     if (market_id) {
-      // Get user IDs of all farms related to this market
-      const rels = await app.db
-        .selectFrom('farm_market_rels')
-        .innerJoin('farms', 'farms.id', 'farm_market_rels.farm_id')
-        .select('farms.user_id')
-        .where('farm_market_rels.market_id', '=', market_id)
-        .where('farm_market_rels.active', '=', true)
-        .execute();
-      partnerUserIds = rels.map(r => r.user_id).filter(Boolean) as string[];
+      const relsSnap = await app.db.collection('farm_market_rels')
+        .where('market_id', '==', market_id).where('active', '==', true).get();
+      for (const d of relsSnap.docs) {
+        const farmDoc = await app.db.collection('farms').doc(d.data().farm_id).get();
+        if (farmDoc.exists) includeUserIds.push(farmDoc.data()!.user_id);
+      }
     }
 
-    // Build list of user IDs to include: the auth user + partners
-    const includeUserIds = [...(authUserId ? [authUserId] : []), ...partnerUserIds];
+    let query: FirebaseFirestore.Query = app.db.collection('conversations');
+    if (includeUserIds.length > 0 && includeUserIds.length <= 30) {
+      query = query.where('user_id', 'in', includeUserIds);
+    }
 
-    const conversations = await app.db
-      .selectFrom('conversations')
-      .innerJoin('users', 'users.id', 'conversations.user_id')
-      .select([
-        'conversations.id',
-        'conversations.phone_number',
-        'conversations.context',
-        'conversations.last_message_at',
-        'conversations.created_at',
-        'users.name as user_name',
-        'users.role as user_role',
-      ])
-      .orderBy('conversations.last_message_at', 'desc')
-      .$if(includeUserIds.length > 0, (qb) => qb.where('conversations.user_id', 'in', includeUserIds))
-      .$if(!!role, (qb) => qb.where('users.role', '=' as any, role as any))
-      .execute();
+    const snapshot = await query.orderBy('last_message_at', 'desc').limit(50).get();
 
-    // For each conversation, get the last message and message count
     const results = await Promise.all(
-      conversations.map(async (conv) => {
-        const lastMessage = await app.db
-          .selectFrom('messages')
-          .select(['body', 'direction', 'created_at'])
-          .where('conversation_id', '=', conv.id)
-          .orderBy('created_at', 'desc')
-          .executeTakeFirst();
+      snapshot.docs.map(async (doc) => {
+        const conv = doc.data();
+        const userDoc = await app.db.collection('users').doc(conv.user_id).get();
+        const userData = userDoc.data() || {};
 
-        const countResult = await app.db
-          .selectFrom('messages')
-          .select((eb) => eb.fn.count('id').as('count'))
-          .where('conversation_id', '=', conv.id)
-          .executeTakeFirst();
+        const msgsSnap = await app.db
+          .collection('conversations').doc(doc.id).collection('messages')
+          .orderBy('created_at', 'desc')
+          .limit(1)
+          .get();
+
+        const lastMsg = msgsSnap.empty ? null : msgsSnap.docs[0].data();
+
+        const countSnap = await app.db
+          .collection('conversations').doc(doc.id).collection('messages')
+          .count().get();
 
         return {
-          id: conv.id,
+          id: doc.id,
           phone_number: conv.phone_number,
           context: conv.context,
           last_message_at: conv.last_message_at,
           created_at: conv.created_at,
-          user_name: conv.user_name,
-          user_role: conv.user_role,
-          last_message: lastMessage?.body || null,
-          last_message_direction: lastMessage?.direction || null,
-          message_count: Number(countResult?.count || 0),
+          user_name: userData.name || 'Unknown',
+          user_role: userData.role,
+          last_message: lastMsg?.body || null,
+          last_message_direction: lastMsg?.direction || null,
+          message_count: countSnap.data().count,
         };
       }),
     );
@@ -351,56 +217,34 @@ export async function smsRoutes(app: FastifyInstance) {
     reply.send({ conversations: results });
   });
 
-  // voip.ms inbound webhook — handles both GET (query params) and POST (form body)
+  // voip.ms inbound
   const handleVoipmsInbound = async (request: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
-    const params = {
-      ...(request.query as Record<string, string>),
-      ...(request.body as Record<string, string> ?? {}),
-    };
+    const params = { ...(request.query as Record<string, string>), ...(request.body as Record<string, string> ?? {}) };
     const from = params.from;
-    const to = params.to;
     const message = params.message;
     const id = params.id || `voipms-${Date.now()}`;
 
-    if (!from || !message) {
-      app.log.warn({ method: request.method, params }, 'Invalid voip.ms webhook — missing from or message');
-      return reply.type('text/plain').send('ok');
-    }
+    if (!from || !message) return reply.type('text/plain').send('ok');
 
     const normalizedFrom = from.startsWith('+') ? from : `+1${from}`;
-    app.log.info({ from: normalizedFrom, to, body: message.substring(0, 50), id }, 'Inbound SMS (voip.ms)');
 
-    const registeredUser = await app.db
-      .selectFrom('users')
-      .select(['id'])
-      .where('phone', '=', normalizedFrom)
-      .executeTakeFirst();
-
-    if (!registeredUser) {
-      await sendSms({
-        env: app.env,
-        to: normalizedFrom,
-        body: '👋 Welcome! To use FarmLink, please create an account first at our website. Visit farmlink.us/signup to get started!',
-      });
+    const userSnap = await app.db.collection('users').where('phone', '==', normalizedFrom).limit(1).get();
+    if (userSnap.empty) {
+      await sendSms({ env: app.env, to: normalizedFrom, body: 'Welcome! Please create an account at farmlink.us/signup.' });
       return reply.type('text/plain').send('ok');
     }
 
     try {
-      const responseText = await processInboundMessage({
-        db: app.db,
-        env: app.env,
-        phone: normalizedFrom,
-        message,
-        messageSid: id,
-      });
-
-      await sendSms({
-        env: app.env,
-        to: normalizedFrom,
-        body: responseText,
-      });
+      const responseText = await processInboundMessage({ db: app.db, env: app.env, phone: normalizedFrom, message, messageSid: id });
+      await sendSms({ env: app.env, to: normalizedFrom, body: responseText });
     } catch (err) {
       app.log.error(err, 'Failed to process voip.ms inbound SMS');
+      const classified = classifyError(err);
+      const userReply = classified.isAnthropicError
+        ? "Our AI assistant is temporarily unavailable. Please try again in a moment."
+        : "Something went wrong. Our team has been notified. Please try again shortly.";
+      await sendSms({ env: app.env, to: normalizedFrom, body: userReply }).catch(() => null);
+      notifyError({ env: app.env, err, userPhone: normalizedFrom, userMessage: message }).catch(() => null);
     }
 
     return reply.type('text/plain').send('ok');
@@ -409,13 +253,8 @@ export async function smsRoutes(app: FastifyInstance) {
   app.get('/voipms/inbound', handleVoipmsInbound);
   app.post('/voipms/inbound', handleVoipmsInbound);
 
-  // Telnyx delivery status callback
+  // Status callback
   app.post('/status', async (request, reply) => {
-    const body = request.body as { data?: { event_type?: string; payload?: { id?: string; to?: string } } };
-    const eventType = body?.data?.event_type || 'unknown';
-    const msgId = body?.data?.payload?.id || 'unknown';
-    app.log.info({ id: msgId, event: eventType }, 'SMS status update');
-    // TODO: update notification status in DB
     reply.send({ ok: true });
   });
 }

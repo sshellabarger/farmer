@@ -1,0 +1,32 @@
+{
+  "functions": [
+    {
+      "source": ".",
+      "codebase": "default",
+      "runtime": "nodejs20",
+      "ignore": [
+        "node_modules",
+        "web",
+        ".git",
+        "uploads"
+      ]
+    }
+  ],
+  "hosting": {
+    "source": "web",
+    "frameworksBackend": {
+      "region": "us-central1",
+      "memory": "512MiB"
+    },
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "function": "api"
+      }
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}

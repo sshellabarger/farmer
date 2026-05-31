@@ -1,88 +1,66 @@
-import { sql } from 'kysely';
 import type { ToolContext } from './index.js';
 
 export async function analyticsSummary(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
   const period = (input.period as string) || 'week';
 
-  const intervals: Record<string, string> = {
-    today: '1 day',
-    week: '7 days',
-    month: '30 days',
-  };
-  const interval = intervals[period] || '7 days';
+  const periodDays: Record<string, number> = { today: 1, week: 7, month: 30 };
+  const days = periodDays[period] || 7;
+  const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  // Find user's farm
   let farmId: string | undefined;
   if (userId) {
-    const farm = await db.selectFrom('farms').select('id').where('user_id', '=', userId).executeTakeFirst();
-    farmId = farm?.id;
+    const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    if (!farmSnap.empty) farmId = farmSnap.docs[0].id;
+  }
+  if (!farmId && input.farm_id) farmId = input.farm_id as string;
+
+  let query: FirebaseFirestore.Query = db.collection('orders')
+    .where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
+  if (farmId) query = query.where('farm_id', '==', farmId);
+
+  const snapshot = await query.get();
+
+  let revenue = 0;
+  let orderCount = 0;
+  const productMap = new Map<string, { revenue: number; qty: number; unit: string }>();
+
+  for (const doc of snapshot.docs) {
+    const order = doc.data();
+    const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
+    if (orderDate < periodStart) continue;
+
+    revenue += Number(order.total || 0);
+    orderCount++;
+
+    const itemsSnap = await db.collection('orders').doc(doc.id).collection('order_items').get();
+    for (const itemDoc of itemsSnap.docs) {
+      const item = itemDoc.data();
+      const key = `${item.product_name}|${item.unit}`;
+      const entry = productMap.get(key) || { revenue: 0, qty: 0, unit: item.unit };
+      entry.revenue += Number(item.line_total || 0);
+      entry.qty += Number(item.quantity || 0);
+      productMap.set(key, entry);
+    }
   }
 
-  if (!farmId && input.farm_id) {
-    farmId = input.farm_id as string;
-  }
+  const topProducts = Array.from(productMap.entries())
+    .map(([key, data]) => ({ name: key.split('|')[0], ...data }))
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 5);
 
-  // Revenue + order count
-  let revenueQuery = db
-    .selectFrom('orders')
-    .select([
-      sql<number>`coalesce(sum(total), 0)`.as('revenue'),
-      sql<number>`count(*)`.as('order_count'),
-    ])
-    .where('status', 'in', ['confirmed', 'delivered', 'in_transit'])
-    .where('order_date', '>=', sql`CURRENT_DATE - interval '${sql.raw(interval)}'` as any);
-
-  if (farmId) {
-    revenueQuery = revenueQuery.where('farm_id', '=', farmId);
-  }
-
-  const revenue = await revenueQuery.executeTakeFirst();
-
-  // Top products
-  let topQuery = db
-    .selectFrom('order_items')
-    .innerJoin('orders', 'orders.id', 'order_items.order_id')
-    .select([
-      'order_items.product_name',
-      sql<number>`sum(order_items.line_total)`.as('revenue'),
-      sql<number>`sum(order_items.quantity)`.as('qty'),
-      'order_items.unit',
-    ])
-    .where('orders.status', 'in', ['confirmed', 'delivered', 'in_transit'])
-    .where('orders.order_date', '>=', sql`CURRENT_DATE - interval '${sql.raw(interval)}'` as any)
-    .groupBy(['order_items.product_name', 'order_items.unit'])
-    .orderBy(sql`sum(order_items.line_total)`, 'desc')
-    .limit(5);
-
-  if (farmId) {
-    topQuery = topQuery.where('orders.farm_id', '=', farmId);
-  }
-
-  const topProducts = await topQuery.execute();
-
-  // Active inventory count
-  let invCount = db
-    .selectFrom('inventory')
-    .select(sql<number>`count(*)`.as('count'))
+  let activeListings = 0;
+  let invQuery: FirebaseFirestore.Query = db.collection('inventory')
     .where('status', 'in', ['available', 'partial']);
-
-  if (farmId) {
-    invCount = invCount.where('farm_id', '=', farmId);
-  }
-
-  const inv = await invCount.executeTakeFirst();
+  if (farmId) invQuery = invQuery.where('farm_id', '==', farmId);
+  const invSnap = await invQuery.get();
+  activeListings = invSnap.size;
 
   return {
     period,
-    revenue: Number(revenue?.revenue || 0),
-    order_count: Number(revenue?.order_count || 0),
-    active_listings: Number(inv?.count || 0),
-    top_products: topProducts.map((p) => ({
-      name: p.product_name,
-      revenue: Number(p.revenue),
-      qty: Number(p.qty),
-      unit: p.unit,
-    })),
+    revenue,
+    order_count: orderCount,
+    active_listings: activeListings,
+    top_products: topProducts,
   };
 }

@@ -1,8 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Kysely } from 'kysely';
-import type { DB } from '../types/schema.js';
+import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
 import { toolDefinitions, executeTool, type ToolContext } from '../tools/index.js';
+import { v4 as uuid } from 'uuid';
 
 let anthropic: Anthropic | null = null;
 
@@ -40,50 +40,37 @@ DELIVERY SYSTEM:
 - Use delivery_schedule_set to configure a farm's delivery days
 - Use delivery_query to show upcoming deliveries
 
-CONFIRMATION PATTERNS:
-- Always confirm quantities, prices, and recipients before executing
-- Use numbered options for multi-choice
-- Accept shorthand (y/n, numbers, first-name references to markets)
-- Include delivery details (pickup/delivery, day, time) in order confirmations
+DIRECTORY & CONNECTIONS:
+- When a user wants to find or browse farms/markets, use directory_search.
+- When a user wants to connect with a farm or market, use connection_request.
+- When a user replies YES or NO to a connection request, use connection_respond.
+
+WEB LINKS:
+- When a user asks to SEE or LIST data that would produce a long response, call view_link.
+- Keep the SMS short: one sentence + the link.
+
+EMAIL REPORTS:
+- When a user asks to EMAIL a report, use email_send.
 
 FEEDBACK SYSTEM:
-- Any user can submit feature requests or bug reports via text (e.g., "I wish I could..." or "there's a problem with...")
-- Use feedback_submit to record their feedback
-- Users can ask to see their submitted feedback with feedback_query
-- Admins can review all feedback with feedback_query, and triage with feedback_update (set status, priority, add notes)
-- When an admin asks "show feedback" or "any new issues?", use feedback_query to list recent items
+- Use feedback_submit to record feature requests or bug reports.
+- Use feedback_query to list feedback items.
 
 TOOL USE IS MANDATORY FOR ANY ACTION:
-- NEVER claim you added, created, updated, deleted, scheduled, confirmed, cancelled, registered, listed, or saved anything unless you actually invoked the matching tool in this turn.
-- If a user asks for an action (add inventory, place an order, update a price, change order status, set delivery schedule, sign up, submit feedback, etc.), you MUST call the corresponding tool BEFORE replying with confirmation.
-- Adding inventory → inventory_add. Updating inventory → inventory_update. Creating an order → order_create. Updating an order → order_update. Setting delivery schedule → delivery_schedule_set. Signup → user_signup. Recurring orders → recurring_order_create / recurring_order_update. Feedback → feedback_submit / feedback_update.
-- Only after a tool returns success may you confirm the action to the user. If a tool returns an error or needs more info, ask the user — do not pretend it succeeded.
-- Reading/listing data also requires the matching query tool; do not invent data from context alone unless it is already provided in CURRENT CONTEXT.
+- NEVER claim you performed an action unless you actually invoked the matching tool.
+- Only after a tool returns success may you confirm the action to the user.
 
 Always respond naturally and concisely — remember this is SMS.`;
 
-// Tool names that mutate data — used to verify Claude actually performed claimed actions.
 const MUTATING_TOOLS = new Set([
-  'inventory_add',
-  'inventory_update',
-  'order_create',
-  'order_update',
-  'recurring_order_create',
-  'recurring_order_update',
-  'delivery_schedule_set',
-  'user_signup',
-  'feedback_submit',
-  'feedback_update',
-  'notify_markets',
+  'inventory_add', 'inventory_update', 'order_create', 'order_update',
+  'recurring_order_create', 'recurring_order_update', 'delivery_schedule_set',
+  'user_signup', 'feedback_submit', 'feedback_update', 'notify_markets',
 ]);
 
-// Past-tense action phrases that imply a mutation was performed.
-// If any of these appear in the final reply but no mutating tool was called this turn,
-// we force Claude to either actually call the tool or rewrite its reply.
 const ACTION_CLAIM_PATTERNS: RegExp[] = [
   /\b(added|listed|posted|created|placed|submitted|recorded|saved|logged|registered|signed[- ]?up|set\s+up|set\s+your|scheduled|booked|confirmed|cancell?ed|updated|changed|removed|deleted|reserved|marked\s+as)\b/i,
   /\b(i\s+(?:have|just|now)\s+(?:added|created|updated|placed|set|scheduled|registered|cancell?ed|removed|saved|recorded))\b/i,
-  /\b(your\s+(?:order|inventory|listing|delivery\s+schedule|account|feedback)\s+(?:is|has\s+been|was)\s+(?:created|added|updated|saved|placed|confirmed|set|recorded|submitted))\b/i,
   /\b(done|all\s+set|got\s+it\s+saved)\b/i,
 ];
 
@@ -92,7 +79,7 @@ function responseClaimsAction(text: string): boolean {
 }
 
 interface ProcessMessageInput {
-  db: Kysely<DB>;
+  db: Firestore;
   env: Env;
   phone: string;
   message: string;
@@ -103,90 +90,49 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
   const { db, env, phone, message } = input;
 
   // 1. Look up user by phone
-  const user = await db
-    .selectFrom('users')
-    .selectAll()
-    .where('phone', '=', phone)
-    .executeTakeFirst();
+  const userSnap = await db.collection('users').where('phone', '==', phone).limit(1).get();
+  const user = userSnap.empty ? null : { id: userSnap.docs[0].id, ...userSnap.docs[0].data() as any };
 
   // 2. Get or create conversation
-  let conversation = await db
-    .selectFrom('conversations')
-    .selectAll()
-    .where('phone_number', '=', phone)
+  const convoSnap = await db.collection('conversations')
+    .where('phone_number', '==', phone)
     .orderBy('last_message_at', 'desc')
-    .executeTakeFirst();
+    .limit(1)
+    .get();
 
-  if (!conversation) {
-    if (user) {
-      const [newConv] = await db
-        .insertInto('conversations')
-        .values({ user_id: user.id, phone_number: phone, context: 'general' })
-        .returningAll()
-        .execute();
-      conversation = newConv;
-    } else {
-      // Create a temporary anonymous conversation so pre-signup messages are stored
-      // The user_signup tool will update this with the real user_id
-      // Use a placeholder user_id — we'll need to allow nullable or use a system user
-      // For now, create without user_id by using the first admin or a placeholder
-      const systemUser = await db
-        .selectFrom('users')
-        .select('id')
-        .where('role', '=', 'admin')
-        .executeTakeFirst();
+  let convoId: string;
+  let convoData: any;
 
-      if (!systemUser) {
-        // Create a system user for anonymous conversations
-        const [sysUser] = await db
-          .insertInto('users')
-          .values({ name: 'System', phone: '+10000000000', role: 'admin' })
-          .onConflict((oc) => oc.column('phone').doNothing())
-          .returningAll()
-          .execute();
-
-        if (sysUser) {
-          const [newConv] = await db
-            .insertInto('conversations')
-            .values({ user_id: sysUser.id, phone_number: phone, context: 'general' })
-            .returningAll()
-            .execute();
-          conversation = newConv;
-        }
-      } else {
-        const [newConv] = await db
-          .insertInto('conversations')
-          .values({ user_id: systemUser.id, phone_number: phone, context: 'general' })
-          .returningAll()
-          .execute();
-        conversation = newConv;
-      }
-    }
+  if (!convoSnap.empty) {
+    convoId = convoSnap.docs[0].id;
+    convoData = convoSnap.docs[0].data();
+  } else {
+    convoId = uuid();
+    convoData = {
+      user_id: user?.id || 'system',
+      phone_number: phone,
+      context: 'general',
+      last_message_at: new Date(),
+      created_at: new Date(),
+    };
+    await db.collection('conversations').doc(convoId).set(convoData);
   }
 
   // 3. Store inbound message
-  if (conversation) {
-    await db
-      .insertInto('messages')
-      .values({
-        conversation_id: conversation.id,
-        direction: 'inbound',
-        body: message,
-        source: 'sms',
-      })
-      .execute();
-  }
+  await db.collection('conversations').doc(convoId).collection('messages').doc(uuid()).set({
+    direction: 'inbound',
+    body: message,
+    source: 'sms',
+    created_at: new Date(),
+  });
 
   // 4. Load conversation history (last 20 messages)
-  const history = conversation
-    ? await db
-        .selectFrom('messages')
-        .selectAll()
-        .where('conversation_id', '=', conversation.id)
-        .orderBy('created_at', 'desc')
-        .limit(20)
-        .execute()
-    : [];
+  const historySnap = await db.collection('conversations').doc(convoId).collection('messages')
+    .orderBy('created_at', 'desc')
+    .limit(20)
+    .get();
+
+  const history = historySnap.docs.map((d) => d.data()).reverse();
 
   // 5. Build context for Claude
   const contextParts: string[] = [];
@@ -195,118 +141,90 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     contextParts.push(`USER: ${user.name} (${user.role}), phone: ${user.phone}`);
 
     if (user.role === 'farmer' || user.role === 'both') {
-      const farm = await db
-        .selectFrom('farms')
-        .selectAll()
-        .where('user_id', '=', user.id)
-        .executeTakeFirst();
-      if (farm) {
+      const farmSnap = await db.collection('farms').where('user_id', '==', user.id).limit(1).get();
+      if (!farmSnap.empty) {
+        const farm = { id: farmSnap.docs[0].id, ...farmSnap.docs[0].data() as any };
         contextParts.push(`FARM: ${farm.name} (id: ${farm.id}), ${farm.location}, specialty: ${farm.specialty || 'general'}`);
 
-        // Delivery schedule
-        if (farm.delivery_schedule && Array.isArray(farm.delivery_schedule) && (farm.delivery_schedule as any[]).length > 0) {
-          const slots = farm.delivery_schedule as Array<{ day: string; time_window: string; areas?: string[] }>;
-          contextParts.push(
-            `DELIVERY SCHEDULE:\n${slots.map((s) => `  - ${s.day}: ${s.time_window}${s.areas?.length ? ` (${s.areas.join(', ')})` : ''}`).join('\n')}`
-          );
-        } else {
-          contextParts.push('DELIVERY SCHEDULE: Not set up yet. Farmer can text "I deliver on Monday mornings" to set it up.');
+        if (farm.delivery_schedule?.length > 0) {
+          contextParts.push(`DELIVERY SCHEDULE:\n${farm.delivery_schedule.map((s: any) => `  - ${s.day}: ${s.time_window}${s.areas?.length ? ` (${s.areas.join(', ')})` : ''}`).join('\n')}`);
         }
 
-        // Active inventory
-        const inventory = await db
-          .selectFrom('inventory')
-          .innerJoin('products', 'products.id', 'inventory.product_id')
-          .select([
-            'inventory.id',
-            'products.name as product_name',
-            'inventory.remaining',
-            'products.unit',
-            'inventory.price',
-            'inventory.status',
-          ])
-          .where('inventory.farm_id', '=', farm.id)
-          .where('inventory.status', 'in', ['available', 'partial'])
-          .execute();
+        const invSnap = await db.collection('inventory')
+          .where('farm_id', '==', farm.id)
+          .where('status', 'in', ['available', 'partial'])
+          .get();
 
-        if (inventory.length > 0) {
-          contextParts.push(
-            `ACTIVE INVENTORY:\n${inventory.map((i) => `  - ${i.product_name}: ${i.remaining} ${i.unit} @ $${i.price}/${i.unit} [${i.status}] (inventory_id: ${i.id})`).join('\n')}`
-          );
+        if (invSnap.size > 0) {
+          const items = await Promise.all(invSnap.docs.map(async (d) => {
+            const inv = d.data();
+            const prodDoc = await db.collection('products').doc(inv.product_id).get();
+            const prod = prodDoc.data() || {};
+            return `  - ${prod.name}: ${inv.remaining} ${prod.unit} @ $${inv.price}/${prod.unit} [${inv.status}] (inventory_id: ${d.id})`;
+          }));
+          contextParts.push(`ACTIVE INVENTORY:\n${items.join('\n')}`);
         }
 
-        // Connected markets
-        const markets = await db
-          .selectFrom('farm_market_rels')
-          .innerJoin('markets', 'markets.id', 'farm_market_rels.market_id')
-          .select(['markets.id', 'markets.name', 'farm_market_rels.priority'])
-          .where('farm_market_rels.farm_id', '=', farm.id)
-          .orderBy('farm_market_rels.priority', 'asc')
-          .execute();
+        const relsSnap = await db.collection('farm_market_rels')
+          .where('farm_id', '==', farm.id)
+          .where('active', '==', true)
+          .orderBy('priority')
+          .get();
 
-        if (markets.length > 0) {
-          contextParts.push(
-            `CONNECTED MARKETS:\n${markets.map((m) => `  - ${m.name} (market_id: ${m.id}, priority: ${m.priority})`).join('\n')}`
-          );
+        if (relsSnap.size > 0) {
+          const markets = await Promise.all(relsSnap.docs.map(async (d) => {
+            const rel = d.data();
+            const mDoc = await db.collection('markets').doc(rel.market_id).get();
+            return `  - ${mDoc.data()?.name} (market_id: ${rel.market_id}, priority: ${rel.priority})`;
+          }));
+          contextParts.push(`CONNECTED MARKETS:\n${markets.join('\n')}`);
         }
       }
     }
 
     if (user.role === 'market' || user.role === 'both') {
-      const market = await db
-        .selectFrom('markets')
-        .selectAll()
-        .where('user_id', '=', user.id)
-        .executeTakeFirst();
-      if (market) {
-        contextParts.push(`MARKET: ${market.name} (id: ${market.id}), ${market.location}, type: ${market.type}, delivery preference: ${market.delivery_pref}`);
+      const marketSnap = await db.collection('markets').where('user_id', '==', user.id).limit(1).get();
+      if (!marketSnap.empty) {
+        const market = { id: marketSnap.docs[0].id, ...marketSnap.docs[0].data() as any };
+        contextParts.push(`MARKET: ${market.name} (id: ${market.id}), ${market.location}, type: ${market.type}`);
 
-        // Connected farms with available inventory
-        const farms = await db
-          .selectFrom('farm_market_rels')
-          .innerJoin('farms', 'farms.id', 'farm_market_rels.farm_id')
-          .select(['farms.id', 'farms.name', 'farm_market_rels.priority'])
-          .where('farm_market_rels.market_id', '=', market.id)
-          .orderBy('farm_market_rels.priority', 'asc')
-          .execute();
+        const relsSnap = await db.collection('farm_market_rels')
+          .where('market_id', '==', market.id)
+          .where('active', '==', true)
+          .orderBy('priority')
+          .get();
 
-        if (farms.length > 0) {
-          contextParts.push(
-            `CONNECTED FARMS:\n${farms.map((f) => `  - ${f.name} (farm_id: ${f.id}, priority: ${f.priority})`).join('\n')}`
-          );
+        if (relsSnap.size > 0) {
+          const farms = await Promise.all(relsSnap.docs.map(async (d) => {
+            const rel = d.data();
+            const fDoc = await db.collection('farms').doc(rel.farm_id).get();
+            return `  - ${fDoc.data()?.name} (farm_id: ${rel.farm_id}, priority: ${rel.priority})`;
+          }));
+          contextParts.push(`CONNECTED FARMS:\n${farms.join('\n')}`);
         }
       }
     }
   } else {
-    contextParts.push(
-      `NEW USER: This phone number is not registered. Welcome them to FarmLink and ask for all signup info in one message: (1) their name, (2) role — farmer, market buyer, or both, (3) their city/location, and optionally their farm or business name. Once you have all info, call the user_signup tool. Keep it warm and concise — this is SMS.`
-    );
+    contextParts.push('NEW USER: This phone number is not registered. Welcome them and ask for signup info: name, role (farmer/market), location, business name. Then call user_signup.');
   }
 
-  // 6. Call Claude with tools
+  // 6. Call Claude
   const client = getAnthropic(env.ANTHROPIC_API_KEY);
 
   const messages: Anthropic.MessageParam[] = [
-    // Include conversation history (oldest first)
-    ...history.reverse().map((m) => ({
+    ...history.map((m: any) => ({
       role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
       content: m.body,
     })),
-    // Current message
     { role: 'user', content: message },
   ];
 
-  // Deduplicate if the last history message IS the current message
-  if (
-    history.length > 0 &&
-    history[history.length - 1]?.direction === 'inbound' &&
-    history[history.length - 1]?.body === message
-  ) {
+  // Deduplicate if last history message is the current message
+  if (history.length > 0 && history[history.length - 1]?.direction === 'inbound' && history[history.length - 1]?.body === message) {
     messages.pop();
   }
 
   const contextBlock = contextParts.length > 0 ? `\n\nCURRENT CONTEXT:\n${contextParts.join('\n')}` : '';
-
   const toolContext: ToolContext = { db, env, userId: user?.id, phone };
 
   let response = await client.messages.create({
@@ -317,46 +235,31 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     tools: toolDefinitions,
   });
 
-  // Track which tools (especially mutating ones) were called this turn so we can
-  // verify Claude actually performed any action it claims in its final reply.
   const calledTools = new Set<string>();
   const successfulMutations = new Set<string>();
 
-  // 7. Process tool calls in a loop (supports multi-step)
+  // 7. Process tool calls
   while (response.stop_reason === 'tool_use') {
     const toolUseBlocks = response.content.filter(
       (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
     );
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
     for (const toolUse of toolUseBlocks) {
       calledTools.add(toolUse.name);
       try {
         const result = await executeTool(toolUse.name, toolUse.input as Record<string, unknown>, toolContext);
         if (MUTATING_TOOLS.has(toolUse.name)) {
-          // Treat as successful only if the tool didn't return an explicit error/needs_more flag
           const r = result as Record<string, unknown> | null | undefined;
-          const failed =
-            r && typeof r === 'object' && (('error' in r && r.error) || ('needs_price' in r && r.needs_price));
+          const failed = r && typeof r === 'object' && (('error' in r && r.error) || ('needs_price' in r && r.needs_price));
           if (!failed) successfulMutations.add(toolUse.name);
         }
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: JSON.stringify(result),
-        });
+        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
       } catch (err) {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
-          is_error: true,
-        });
+        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, is_error: true });
       }
     }
 
-    // Continue the conversation with tool results
     messages.push({ role: 'assistant', content: response.content });
     messages.push({ role: 'user', content: toolResults });
 
@@ -369,126 +272,66 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     });
   }
 
-  // 7c. Verification pass: if Claude's final reply claims an action was taken
-  // but no mutating tool was successfully invoked this turn, force a corrective
-  // round so it actually calls the tool (or rewrites the message). We allow up
-  // to 2 corrective attempts to avoid infinite loops if Claude refuses.
+  // Verification pass
   let correctionAttempts = 0;
   while (correctionAttempts < 2) {
     const finalText = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n');
-
+      .map((b) => b.text).join('\n');
     if (!finalText || !responseClaimsAction(finalText)) break;
     if (successfulMutations.size > 0) break;
 
     correctionAttempts++;
-
     messages.push({ role: 'assistant', content: response.content });
-    messages.push({
-      role: 'user',
-      content:
-        'SYSTEM CHECK: Your previous reply implies you performed an action (added/created/updated/scheduled/etc.), but you did not actually call any data-modifying tool this turn. You MUST either: (1) call the appropriate tool right now to actually perform the action, then confirm only after it succeeds; or (2) if you do not have enough information, ask the user for what is missing instead of claiming success. Do not fabricate confirmations.',
-    });
+    messages.push({ role: 'user', content: 'SYSTEM CHECK: Your reply claims an action was performed but no tool was called. Call the appropriate tool or ask the user for missing info.' });
 
     response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 500,
-      system: SYSTEM_PROMPT + contextBlock,
-      messages,
-      tools: toolDefinitions,
-      tool_choice: { type: 'any' },
+      model: 'claude-sonnet-4-20250514', max_tokens: 500,
+      system: SYSTEM_PROMPT + contextBlock, messages, tools: toolDefinitions, tool_choice: { type: 'any' },
     });
 
-    // Drain any new tool calls triggered by the correction
     while (response.stop_reason === 'tool_use') {
-      const toolUseBlocks = response.content.filter(
-        (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
-      );
+      const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const toolUse of toolUseBlocks) {
         calledTools.add(toolUse.name);
         try {
-          const result = await executeTool(
-            toolUse.name,
-            toolUse.input as Record<string, unknown>,
-            toolContext
-          );
+          const result = await executeTool(toolUse.name, toolUse.input as Record<string, unknown>, toolContext);
           if (MUTATING_TOOLS.has(toolUse.name)) {
             const r = result as Record<string, unknown> | null | undefined;
-            const failed =
-              r && typeof r === 'object' && (('error' in r && r.error) || ('needs_price' in r && r.needs_price));
+            const failed = r && typeof r === 'object' && (('error' in r && r.error) || ('needs_price' in r && r.needs_price));
             if (!failed) successfulMutations.add(toolUse.name);
           }
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: JSON.stringify(result),
-          });
+          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
         } catch (err) {
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
-            is_error: true,
-          });
+          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, is_error: true });
         }
       }
       messages.push({ role: 'assistant', content: response.content });
       messages.push({ role: 'user', content: toolResults });
-      response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 500,
-        system: SYSTEM_PROMPT + contextBlock,
-        messages,
-        tools: toolDefinitions,
-      });
+      response = await client.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 500, system: SYSTEM_PROMPT + contextBlock, messages, tools: toolDefinitions });
     }
   }
 
-  // 7b. If signup just created a conversation, pick it up so we can store the response
-  if (!conversation) {
-    conversation = await db
-      .selectFrom('conversations')
-      .selectAll()
-      .where('phone_number', '=', phone)
-      .orderBy('last_message_at', 'desc')
-      .executeTakeFirst();
-  }
-
   // 8. Extract text response
-  const textBlocks = response.content.filter(
-    (block): block is Anthropic.TextBlock => block.type === 'text'
-  );
+  const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === 'text');
   const responseText = textBlocks.map((b) => b.text).join('\n') || "I'm sorry, I couldn't process that. Try again?";
 
   // 9. Store outbound message
-  if (conversation) {
-    await db
-      .insertInto('messages')
-      .values({
-        conversation_id: conversation.id,
-        direction: 'outbound',
-        body: responseText,
-        source: 'sms',
-        ai_metadata: JSON.stringify({
-          model: response.model,
-          usage: response.usage,
-          stop_reason: response.stop_reason,
-          tools_called: Array.from(calledTools),
-          mutations_succeeded: Array.from(successfulMutations),
-          correction_attempts: correctionAttempts,
-        }),
-      })
-      .execute();
+  await db.collection('conversations').doc(convoId).collection('messages').doc(uuid()).set({
+    direction: 'outbound',
+    body: responseText,
+    source: 'sms',
+    ai_metadata: {
+      model: response.model,
+      usage: response.usage,
+      tools_called: Array.from(calledTools),
+      mutations_succeeded: Array.from(successfulMutations),
+    },
+    created_at: new Date(),
+  });
 
-    await db
-      .updateTable('conversations')
-      .set({ last_message_at: new Date(), context: conversation.context })
-      .where('id', '=', conversation.id)
-      .execute();
-  }
+  await db.collection('conversations').doc(convoId).update({ last_message_at: new Date() });
 
   return responseText;
 }

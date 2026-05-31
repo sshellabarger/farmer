@@ -1,204 +1,108 @@
 import type { ToolContext } from './index.js';
 import { sendSms } from '../services/sms.js';
+import { v4 as uuid } from 'uuid';
 
-/**
- * Notify all admin users via SMS about new feedback.
- */
 async function notifyAdmins(ctx: ToolContext, feedbackType: string, title: string, userName: string) {
   const { db, env } = ctx;
-
-  const admins = await db
-    .selectFrom('users')
-    .select(['phone'])
-    .where('role', '=', 'admin')
-    .execute();
-
+  const adminsSnap = await db.collection('users').where('role', '==', 'admin').get();
   const label = feedbackType === 'feature_request' ? 'Feature request' : 'Bug report';
-  const message = `📋 New ${label} from ${userName}:\n"${title}"\n\nReview at farmlink.us/feedback or reply "show feedback" to manage.`;
+  const message = `New ${label} from ${userName}:\n"${title}"\n\nReply "show feedback" to manage.`;
 
-  for (const admin of admins) {
-    try {
-      await sendSms({ env, to: admin.phone, body: message });
-    } catch (err) {
-      console.warn(`[feedback] Failed to notify admin ${admin.phone}:`, (err as Error).message);
-    }
+  for (const doc of adminsSnap.docs) {
+    sendSms({ env, to: doc.data().phone, body: message }).catch(() => {});
   }
 }
 
 export async function feedbackSubmit(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
-
-  if (!userId) {
-    return { error: 'You need to be registered to submit feedback. Would you like to sign up first?' };
-  }
+  if (!userId) return { error: 'You need to be registered to submit feedback.' };
 
   const type = input.type as string;
   const title = input.title as string;
   const description = input.description as string;
+  if (!type || !title || !description) return { error: 'Missing required fields: type, title, and description.' };
 
-  if (!type || !title || !description) {
-    return { error: 'Missing required fields: type, title, and description.' };
-  }
+  const id = uuid();
+  await db.collection('feedback').doc(id).set({
+    user_id: userId, type, title, description, source: 'sms',
+    status: 'open', priority: 'medium', admin_notes: null,
+    created_at: new Date(), updated_at: new Date(),
+  });
 
-  const [feedback] = await db
-    .insertInto('feedback')
-    .values({
-      user_id: userId,
-      type: type as any,
-      title,
-      description,
-      source: 'sms',
-    })
-    .returningAll()
-    .execute();
-
-  // Get submitter name for admin notification
-  const user = await db
-    .selectFrom('users')
-    .select(['name'])
-    .where('id', '=', userId)
-    .executeTakeFirst();
-
-  // Notify admins (fire-and-forget)
-  notifyAdmins(ctx, type, title, user?.name || 'Unknown').catch(() => {});
+  const userDoc = await db.collection('users').doc(userId).get();
+  notifyAdmins(ctx, type, title, userDoc.data()?.name || 'Unknown').catch(() => {});
 
   const label = type === 'feature_request' ? 'Feature request' : 'Bug report';
-
-  return {
-    success: true,
-    feedback_id: feedback.id,
-    message: `${label} submitted: "${title}". Our team will review it. Thank you for helping us improve FarmLink!`,
-  };
+  return { success: true, feedback_id: id, message: `${label} submitted: "${title}". Thank you!` };
 }
 
 export async function feedbackQuery(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
+  if (!userId) return { error: 'You must be logged in to view feedback.' };
 
-  if (!userId) {
-    return { error: 'You must be logged in to view feedback.' };
-  }
+  const userDoc = await db.collection('users').doc(userId).get();
+  const isAdmin = userDoc.data()?.role === 'admin';
 
-  // Check if user is admin
-  const user = await db
-    .selectFrom('users')
-    .select(['role'])
-    .where('id', '=', userId)
-    .executeTakeFirst();
+  let query: FirebaseFirestore.Query = db.collection('feedback');
+  if (!isAdmin) query = query.where('user_id', '==', userId);
+  if (input.type) query = query.where('type', '==', input.type);
+  if (input.status) query = query.where('status', '==', input.status);
+  if (input.priority) query = query.where('priority', '==', input.priority);
 
-  const isAdmin = user?.role === 'admin';
+  const snapshot = await query.orderBy('created_at', 'desc').limit(20).get();
 
-  let query = db
-    .selectFrom('feedback')
-    .innerJoin('users', 'users.id', 'feedback.user_id')
-    .select([
-      'feedback.id',
-      'feedback.type',
-      'feedback.status',
-      'feedback.priority',
-      'feedback.title',
-      'feedback.description',
-      'users.name as submitted_by',
-      'feedback.source',
-      'feedback.created_at',
-    ])
-    .orderBy('feedback.created_at', 'desc');
+  const items = await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const fb = doc.data();
+      const submitterDoc = await db.collection('users').doc(fb.user_id).get();
+      return {
+        id: doc.id,
+        type: fb.type,
+        status: fb.status,
+        priority: fb.priority,
+        title: fb.title,
+        submitted_by: submitterDoc.data()?.name || 'Unknown',
+        source: fb.source,
+        created: fb.created_at,
+        ...(isAdmin ? { admin_notes: fb.admin_notes } : {}),
+      };
+    }),
+  );
 
-  // Non-admins see only their own
-  if (!isAdmin) {
-    query = query.where('feedback.user_id', '=', userId);
-  }
-
-  // Apply filters
-  if (input.type) {
-    query = query.where('feedback.type', '=', input.type as any);
-  }
-  if (input.status) {
-    query = query.where('feedback.status', '=', input.status as any);
-  }
-  if (input.priority) {
-    query = query.where('feedback.priority', '=', input.priority as any);
-  }
-
-  // Admins also get admin_notes
-  if (isAdmin) {
-    query = query.select('feedback.admin_notes');
-  }
-
-  const items = await query.limit(20).execute();
-
-  if (items.length === 0) {
-    return { items: [], message: 'No feedback items found.' };
-  }
-
-  return {
-    total: items.length,
-    items: items.map((f) => ({
-      id: f.id,
-      type: f.type,
-      status: f.status,
-      priority: f.priority,
-      title: f.title,
-      submitted_by: f.submitted_by,
-      source: f.source,
-      created: f.created_at,
-      ...(isAdmin && 'admin_notes' in f ? { admin_notes: f.admin_notes } : {}),
-    })),
-  };
+  if (items.length === 0) return { items: [], message: 'No feedback items found.' };
+  return { total: items.length, items };
 }
 
 export async function feedbackUpdate(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
+  if (!userId) return { error: 'You must be logged in to update feedback.' };
 
-  if (!userId) {
-    return { error: 'You must be logged in to update feedback.' };
-  }
-
-  // Only admins can update feedback status/priority
-  const user = await db
-    .selectFrom('users')
-    .select(['role'])
-    .where('id', '=', userId)
-    .executeTakeFirst();
-
-  if (user?.role !== 'admin') {
-    return { error: 'Only admins can update feedback status and priority.' };
-  }
+  const userDoc = await db.collection('users').doc(userId).get();
+  if (userDoc.data()?.role !== 'admin') return { error: 'Only admins can update feedback.' };
 
   const feedbackId = input.feedback_id as string;
-  if (!feedbackId) {
-    return { error: 'Missing feedback_id.' };
-  }
+  if (!feedbackId) return { error: 'Missing feedback_id.' };
 
-  const existing = await db
-    .selectFrom('feedback')
-    .selectAll()
-    .where('id', '=', feedbackId)
-    .executeTakeFirst();
-
-  if (!existing) {
-    return { error: 'Feedback item not found.' };
-  }
+  const ref = db.collection('feedback').doc(feedbackId);
+  const doc = await ref.get();
+  if (!doc.exists) return { error: 'Feedback item not found.' };
 
   const updates: Record<string, unknown> = { updated_at: new Date() };
-
   if (input.status) updates.status = input.status;
   if (input.priority) updates.priority = input.priority;
   if (input.admin_notes !== undefined) updates.admin_notes = input.admin_notes;
 
-  const [updated] = await db
-    .updateTable('feedback')
-    .set(updates)
-    .where('id', '=', feedbackId)
-    .returningAll()
-    .execute();
+  await ref.update(updates);
+  const updated = await ref.get();
+  const data = updated.data()!;
 
   return {
     success: true,
     feedback_id: updated.id,
-    title: updated.title,
-    status: updated.status,
-    priority: updated.priority,
-    admin_notes: updated.admin_notes,
-    message: `Feedback "${updated.title}" updated — status: ${updated.status}, priority: ${updated.priority}.`,
+    title: data.title,
+    status: data.status,
+    priority: data.priority,
+    admin_notes: data.admin_notes,
+    message: `Feedback "${data.title}" updated — status: ${data.status}, priority: ${data.priority}.`,
   };
 }

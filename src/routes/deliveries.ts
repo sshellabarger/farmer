@@ -2,37 +2,45 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 export async function deliveryRoutes(app: FastifyInstance) {
-  // GET /api/deliveries?date=&farm_id=&market_id=
+  // GET /api/deliveries?farm_id=&market_id=
   app.get<{ Querystring: Record<string, string> }>('/', async (request) => {
-    let query = app.db
-      .selectFrom('deliveries')
-      .innerJoin('orders', 'orders.id', 'deliveries.order_id')
-      .innerJoin('farms', 'farms.id', 'orders.farm_id')
-      .innerJoin('markets', 'markets.id', 'orders.market_id')
-      .select([
-        'deliveries.id',
-        'deliveries.type',
-        'deliveries.scheduled_at',
-        'deliveries.completed_at',
-        'deliveries.status',
-        'deliveries.notes',
-        'orders.id as order_id',
-        'orders.order_number',
-        'orders.total',
-        'farms.name as farm_name',
-        'markets.name as market_name',
-      ]);
+    const { farm_id, market_id } = request.query;
 
-    const { date, farm_id, market_id } = request.query;
-    if (date) {
-      query = query.where('deliveries.scheduled_at', '>=', `${date}T00:00:00Z` as any);
-      query = query.where('deliveries.scheduled_at', '<', `${date}T23:59:59Z` as any);
-    }
-    if (farm_id) query = query.where('orders.farm_id', '=', farm_id);
-    if (market_id) query = query.where('orders.market_id', '=', market_id);
+    let query: FirebaseFirestore.Query = app.db.collection('deliveries');
+    query = query.orderBy('scheduled_at', 'asc');
 
-    const deliveries = await query.orderBy('deliveries.scheduled_at', 'asc').execute();
-    return { deliveries };
+    const snapshot = await query.get();
+
+    const deliveries = await Promise.all(
+      snapshot.docs.map(async (doc) => {
+        const deliv = doc.data();
+        const orderDoc = await app.db.collection('orders').doc(deliv.order_id).get();
+        if (!orderDoc.exists) return null;
+        const order = orderDoc.data()!;
+
+        if (farm_id && order.farm_id !== farm_id) return null;
+        if (market_id && order.market_id !== market_id) return null;
+
+        const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+        const marketDoc = await app.db.collection('markets').doc(order.market_id).get();
+
+        return {
+          id: doc.id,
+          type: deliv.type,
+          scheduled_at: deliv.scheduled_at,
+          completed_at: deliv.completed_at,
+          status: deliv.status,
+          notes: deliv.notes,
+          order_id: deliv.order_id,
+          order_number: order.order_number,
+          total: order.total,
+          farm_name: farmDoc.data()?.name || 'Unknown',
+          market_name: marketDoc.data()?.name || 'Unknown',
+        };
+      }),
+    );
+
+    return { deliveries: deliveries.filter(Boolean) };
   });
 
   // PUT /api/deliveries/:id/status
@@ -40,22 +48,17 @@ export async function deliveryRoutes(app: FastifyInstance) {
     const schema = z.object({
       status: z.enum(['scheduled', 'in_transit', 'completed', 'failed']),
     });
-
     const { status } = schema.parse(request.body);
 
+    const ref = app.db.collection('deliveries').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Delivery not found');
+
     const updates: Record<string, unknown> = { status };
-    if (status === 'completed') {
-      updates.completed_at = new Date();
-    }
+    if (status === 'completed') updates.completed_at = new Date();
 
-    const [updated] = await app.db
-      .updateTable('deliveries')
-      .set(updates)
-      .where('id', '=', request.params.id)
-      .returningAll()
-      .execute();
-
-    if (!updated) return reply.notFound('Delivery not found');
-    return updated;
+    await ref.update(updates);
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 }

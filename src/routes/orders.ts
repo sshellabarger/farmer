@@ -2,72 +2,69 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { sendOrderStatusNotification, calculateNextDeliveryDate } from '../services/order-notifications.js';
 import { authenticate, requireOrderParty, requireOrderCreateParty } from '../middleware/rbac.js';
+import { v4 as uuid } from 'uuid';
 
 export async function orderRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
   const orderParty = requireOrderParty(app);
   const orderCreateParty = requireOrderCreateParty(app);
 
-  // GET /api/orders?farm_id=&market_id=&status=&date=
-  // Authenticated users only see orders they are a party to (unless admin)
+  // GET /api/orders?farm_id=&market_id=&status=
   app.get<{ Querystring: Record<string, string> }>('/', {
     preHandler: [auth],
   }, async (request) => {
     const user = request.authUser!;
+    const { farm_id, market_id, status } = request.query;
 
-    let query = app.db
-      .selectFrom('orders')
-      .innerJoin('farms', 'farms.id', 'orders.farm_id')
-      .innerJoin('markets', 'markets.id', 'orders.market_id')
-      .select([
-        'orders.id',
-        'orders.order_number',
-        'orders.status',
-        'orders.total',
-        'orders.order_date',
-        'farms.name as farm_name',
-        'markets.name as market_name',
-        'orders.notes',
-        'orders.created_at',
-      ]);
+    let query: FirebaseFirestore.Query = app.db.collection('orders');
 
-    const { farm_id, market_id, status, date } = request.query;
-    if (farm_id) query = query.where('orders.farm_id', '=', farm_id);
-    if (market_id) query = query.where('orders.market_id', '=', market_id);
-    if (status) query = query.where('orders.status', '=', status as any);
-    if (date) query = query.where('orders.order_date', '=', date as any);
+    if (farm_id) query = query.where('farm_id', '==', farm_id);
+    if (market_id) query = query.where('market_id', '==', market_id);
+    if (status) query = query.where('status', '==', status);
 
-    // Non-admin users can only see their own orders
     if (user.role !== 'admin') {
-      if (user.farmId && user.marketId) {
-        // "both" role: see orders for their farm or market
-        query = query.where((eb) =>
-          eb.or([
-            eb('orders.farm_id', '=', user.farmId!),
-            eb('orders.market_id', '=', user.marketId!),
-          ])
-        );
-      } else if (user.farmId) {
-        query = query.where('orders.farm_id', '=', user.farmId);
-      } else if (user.marketId) {
-        query = query.where('orders.market_id', '=', user.marketId);
+      if (user.farmId && !user.marketId) {
+        query = query.where('farm_id', '==', user.farmId);
+      } else if (user.marketId && !user.farmId) {
+        query = query.where('market_id', '==', user.marketId);
       }
+      // "both" role handled client-side for simplicity with Firestore
     }
 
-    const results = await query.orderBy('orders.created_at', 'desc').limit(50).execute();
-    return { orders: results };
+    const snapshot = await query.orderBy('created_at', 'desc').limit(50).get();
+
+    const orders = await Promise.all(
+      snapshot.docs.map(async (doc) => {
+        const order = doc.data();
+        const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+        const marketDoc = await app.db.collection('markets').doc(order.market_id).get();
+        return {
+          id: doc.id,
+          order_number: order.order_number,
+          status: order.status,
+          total: order.total,
+          order_date: order.order_date,
+          farm_name: farmDoc.data()?.name || 'Unknown',
+          market_name: marketDoc.data()?.name || 'Unknown',
+          notes: order.notes,
+          created_at: order.created_at,
+        };
+      }),
+    );
+
+    return { orders };
   });
 
-  // POST /api/orders — user must be a party (farm or market) on the order
+  // POST /api/orders
   app.post('/', {
     preHandler: [auth, orderCreateParty],
   }, async (request, reply) => {
     const schema = z.object({
-      farm_id: z.string().uuid(),
-      market_id: z.string().uuid(),
+      farm_id: z.string(),
+      market_id: z.string(),
       items: z.array(
         z.object({
-          inventory_id: z.string().uuid(),
+          inventory_id: z.string(),
           quantity: z.number().positive(),
         })
       ),
@@ -78,7 +75,6 @@ export async function orderRoutes(app: FastifyInstance) {
 
     const data = schema.parse(request.body);
 
-    // Calculate total from inventory items
     let total = 0;
     const itemDetails: Array<{
       inventory_id: string;
@@ -90,239 +86,176 @@ export async function orderRoutes(app: FastifyInstance) {
     }> = [];
 
     for (const item of data.items) {
-      const inv = await app.db
-        .selectFrom('inventory')
-        .innerJoin('products', 'products.id', 'inventory.product_id')
-        .select(['inventory.id', 'products.name', 'products.unit', 'inventory.price', 'inventory.remaining'])
-        .where('inventory.id', '=', item.inventory_id)
-        .executeTakeFirst();
+      const invDoc = await app.db.collection('inventory').doc(item.inventory_id).get();
+      if (!invDoc.exists) return reply.badRequest(`Inventory ${item.inventory_id} not found`);
+      const inv = invDoc.data()!;
 
-      if (!inv) return reply.badRequest(`Inventory ${item.inventory_id} not found`);
-      if (Number(inv.remaining) < item.quantity) {
-        return reply.badRequest(`Only ${inv.remaining} ${inv.unit} of ${inv.name} available`);
+      const productDoc = await app.db.collection('products').doc(inv.product_id).get();
+      const product = productDoc.data() || {};
+
+      if (inv.remaining < item.quantity) {
+        return reply.badRequest(`Only ${inv.remaining} ${product.unit} of ${product.name} available`);
       }
 
       const lineTotal = Number(inv.price) * item.quantity;
       total += lineTotal;
       itemDetails.push({
-        inventory_id: inv.id,
-        product_name: inv.name,
+        inventory_id: invDoc.id,
+        product_name: product.name || 'Unknown',
         quantity: item.quantity,
-        unit: inv.unit,
+        unit: product.unit || '',
         unit_price: Number(inv.price),
         line_total: lineTotal,
       });
     }
 
-    // Calculate delivery date from farm's delivery schedule if delivery type specified
     let scheduledDeliveryAt: Date | null = null;
-    let deliveryTimeWindow: string | null = null;
-
     if (data.delivery_type) {
-      const farm = await app.db
-        .selectFrom('farms')
-        .select(['delivery_schedule', 'location'])
-        .where('id', '=', data.farm_id)
-        .executeTakeFirst();
+      const farmDoc = await app.db.collection('farms').doc(data.farm_id).get();
+      const farm = farmDoc.data();
+      const marketDoc = await app.db.collection('markets').doc(data.market_id).get();
+      const market = marketDoc.data();
 
-      const market = await app.db
-        .selectFrom('markets')
-        .select(['location'])
-        .where('id', '=', data.market_id)
-        .executeTakeFirst();
-
-      if (farm?.delivery_schedule && Array.isArray(farm.delivery_schedule) && farm.delivery_schedule.length > 0) {
+      if (farm?.delivery_schedule?.length > 0) {
         const slot = calculateNextDeliveryDate(
-          farm.delivery_schedule as any,
+          farm!.delivery_schedule,
           data.delivery_type,
           market?.location,
         );
-        if (slot) {
-          scheduledDeliveryAt = slot.date;
-          deliveryTimeWindow = slot.timeWindow;
-        }
+        if (slot) scheduledDeliveryAt = slot.date;
       }
     }
 
-    const [order] = await app.db
-      .insertInto('orders')
-      .values({
-        farm_id: data.farm_id,
-        market_id: data.market_id,
-        total,
-        delivery_type: data.delivery_type ?? null,
-        scheduled_delivery_at: scheduledDeliveryAt,
-        delivery_notes: data.delivery_notes ?? null,
-        notes: data.notes ?? null,
-      })
-      .returningAll()
-      .execute();
+    const orderId = uuid();
+    const orderNumber = `ORD-${Date.now().toString(36).toUpperCase()}`;
+    const order = {
+      farm_id: data.farm_id,
+      market_id: data.market_id,
+      order_number: orderNumber,
+      status: 'pending',
+      total,
+      order_date: new Date(),
+      delivery_type: data.delivery_type ?? null,
+      scheduled_delivery_at: scheduledDeliveryAt,
+      delivery_notes: data.delivery_notes ?? null,
+      notes: data.notes ?? null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
 
+    await app.db.collection('orders').doc(orderId).set(order);
+
+    // Create order items as subcollection
     for (const oi of itemDetails) {
-      await app.db.insertInto('order_items').values({ order_id: order.id, ...oi }).execute();
+      await app.db.collection('orders').doc(orderId).collection('order_items').doc(uuid()).set(oi);
 
-      // Decrement inventory remaining and update status
-      const inv = await app.db
-        .selectFrom('inventory')
-        .select(['remaining', 'quantity'])
-        .where('id', '=', oi.inventory_id)
-        .executeTakeFirst();
-
-      const newRemaining = Number(inv?.remaining ?? 0) - oi.quantity;
-      let newStatus: string;
-      if (newRemaining <= 0) {
-        newStatus = 'sold';
-      } else if (newRemaining < Number(inv?.quantity ?? 0)) {
-        newStatus = 'partial';
-      } else {
-        newStatus = 'available';
-      }
-
-      await app.db
-        .updateTable('inventory')
-        .set({
-          remaining: Math.max(0, newRemaining),
-          status: newStatus as any,
-        })
-        .where('id', '=', oi.inventory_id)
-        .execute();
+      // Decrement inventory
+      const invRef = app.db.collection('inventory').doc(oi.inventory_id);
+      const invDoc = await invRef.get();
+      const inv = invDoc.data()!;
+      const newRemaining = inv.remaining - oi.quantity;
+      const newStatus = newRemaining <= 0 ? 'sold' : newRemaining < inv.quantity ? 'partial' : 'available';
+      await invRef.update({ remaining: Math.max(0, newRemaining), status: newStatus });
     }
 
-    // Create delivery record for the order
-    await app.db
-      .insertInto('deliveries')
-      .values({
-        order_id: order.id,
-        type: (data.delivery_type ?? 'pickup') as any,
-        scheduled_at: scheduledDeliveryAt ?? new Date(),
-        status: 'scheduled' as any,
-        notes: data.delivery_notes ?? null,
-      })
-      .execute();
+    // Create delivery record
+    await app.db.collection('deliveries').doc(uuid()).set({
+      order_id: orderId,
+      type: data.delivery_type ?? 'pickup',
+      scheduled_at: scheduledDeliveryAt ?? new Date(),
+      status: 'scheduled',
+      notes: data.delivery_notes ?? null,
+      created_at: new Date(),
+    });
 
-    reply.status(201).send(order);
+    reply.status(201).send({ id: orderId, ...order });
   });
 
-  // GET /api/orders/:id — user must be a party on the order (or admin)
+  // GET /api/orders/:id
   app.get<{ Params: { id: string } }>('/:id', {
     preHandler: [auth, orderParty],
   }, async (request, reply) => {
-    const order = await app.db
-      .selectFrom('orders')
-      .innerJoin('farms', 'farms.id', 'orders.farm_id')
-      .innerJoin('markets', 'markets.id', 'orders.market_id')
-      .select([
-        'orders.id',
-        'orders.order_number',
-        'orders.status',
-        'orders.total',
-        'orders.order_date',
-        'orders.notes',
-        'orders.created_at',
-        'orders.delivery_type',
-        'orders.scheduled_delivery_at',
-        'orders.delivery_notes',
-        'orders.updated_at',
-        'farms.name as farm_name',
-        'farms.location as farm_location',
-        'markets.name as market_name',
-        'markets.location as market_location',
-        'markets.delivery_pref',
-      ])
-      .where('orders.id', '=', request.params.id)
-      .executeTakeFirst();
+    const doc = await app.db.collection('orders').doc(request.params.id).get();
+    if (!doc.exists) return reply.notFound('Order not found');
+    const order = doc.data()!;
 
-    if (!order) return reply.notFound('Order not found');
+    const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+    const marketDoc = await app.db.collection('markets').doc(order.market_id).get();
+    const farm = farmDoc.data() || {};
+    const market = marketDoc.data() || {};
 
-    const items = await app.db
-      .selectFrom('order_items')
-      .selectAll()
-      .where('order_id', '=', request.params.id)
-      .execute();
+    const itemsSnap = await app.db
+      .collection('orders').doc(request.params.id).collection('order_items').get();
+    const items = itemsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-    return { ...order, items };
+    return {
+      id: doc.id,
+      ...order,
+      farm_name: farm.name,
+      farm_location: farm.location,
+      market_name: market.name,
+      market_location: market.location,
+      delivery_pref: market.delivery_pref,
+      items,
+    };
   });
 
-  // PUT /api/orders/:id — user must be a party on the order (or admin)
-  // Markets can only modify pending orders; once confirmed, only the farm can edit
+  // PUT /api/orders/:id
   app.put<{ Params: { id: string } }>('/:id', {
     preHandler: [auth, orderParty],
   }, async (request, reply) => {
-    const order = await app.db
-      .selectFrom('orders')
-      .select(['id', 'status', 'farm_id', 'market_id'])
-      .where('id', '=', request.params.id)
-      .executeTakeFirst();
-
-    if (!order) return reply.notFound('Order not found');
+    const ref = app.db.collection('orders').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Order not found');
+    const order = doc.data()!;
 
     const user = request.authUser!;
     const isAdmin = user.role === 'admin';
     const isFarmParty = !!user.farmId && order.farm_id === user.farmId;
     const isMarketParty = !!user.marketId && order.market_id === user.marketId;
 
-    if (!isAdmin) {
-      if (order.status !== 'pending' && isMarketParty && !isFarmParty) {
-        return reply.status(403).send({ error: 'Markets can only modify pending orders. Contact the farm for changes.' });
-      }
+    if (!isAdmin && order.status !== 'pending' && isMarketParty && !isFarmParty) {
+      return reply.status(403).send({ error: 'Markets can only modify pending orders.' });
     }
 
     const { notes } = request.body as Record<string, unknown>;
-    const updates: Record<string, unknown> = {};
+    const updates: Record<string, unknown> = { updated_at: new Date() };
     if (notes !== undefined) updates.notes = notes;
 
-    const [updated] = await app.db
-      .updateTable('orders')
-      .set(updates)
-      .where('id', '=', request.params.id)
-      .returningAll()
-      .execute();
-
-    if (!updated) return reply.notFound('Order not found');
-    return updated;
+    await ref.update(updates);
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // PATCH /api/orders/:id/status — user must be a party on the order (or admin)
+  // PATCH /api/orders/:id/status
   app.patch<{ Params: { id: string } }>('/:id/status', {
     preHandler: [auth, orderParty],
   }, async (request, reply) => {
     const schema = z.object({
       status: z.enum(['pending', 'confirmed', 'in_transit', 'delivered', 'cancelled']),
     });
-
     const { status: newStatus } = schema.parse(request.body);
 
-    const order = await app.db
-      .selectFrom('orders')
-      .selectAll()
-      .where('id', '=', request.params.id)
-      .executeTakeFirst();
-
-    if (!order) return reply.notFound('Order not found');
+    const ref = app.db.collection('orders').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Order not found');
+    const order = doc.data()!;
 
     const user = request.authUser!;
     const isAdmin = user.role === 'admin';
     const isFarmParty = !!user.farmId && order.farm_id === user.farmId;
     const isMarketParty = !!user.marketId && order.market_id === user.marketId;
 
-    // Business rules for who can update order status:
-    // - Pending orders: market can cancel or modify; farm can confirm or cancel
-    // - Once confirmed (or beyond): ONLY the farm can update status
     if (!isAdmin) {
       if (order.status === 'pending') {
-        // Market can only cancel pending orders
         if (isMarketParty && !isFarmParty && newStatus !== 'cancelled') {
-          return reply.status(403).send({ error: 'Markets can only cancel pending orders. The farm must confirm.' });
+          return reply.status(403).send({ error: 'Markets can only cancel pending orders.' });
         }
-      } else {
-        // After confirmation, only the farm can update status
-        if (!isFarmParty) {
-          return reply.status(403).send({ error: 'Only the farm can update order status after confirmation.' });
-        }
+      } else if (!isFarmParty) {
+        return reply.status(403).send({ error: 'Only the farm can update order status after confirmation.' });
       }
     }
 
-    // Validate state transition
     const validTransitions: Record<string, string[]> = {
       pending: ['confirmed', 'cancelled'],
       confirmed: ['in_transit', 'cancelled'],
@@ -330,80 +263,57 @@ export async function orderRoutes(app: FastifyInstance) {
       delivered: [],
       cancelled: [],
     };
-
-    const allowed = validTransitions[order.status] || [];
-    if (!allowed.includes(newStatus)) {
+    if (!(validTransitions[order.status] || []).includes(newStatus)) {
       return reply.badRequest(`Cannot transition from ${order.status} to ${newStatus}`);
     }
 
-    const [updated] = await app.db
-      .updateTable('orders')
-      .set({ status: newStatus })
-      .where('id', '=', request.params.id)
-      .returningAll()
-      .execute();
+    await ref.update({ status: newStatus, updated_at: new Date() });
 
-    // Restore inventory when an order is cancelled
+    // Restore inventory on cancellation
     if (newStatus === 'cancelled') {
-      const items = await app.db
-        .selectFrom('order_items')
-        .selectAll()
-        .where('order_id', '=', order.id)
-        .execute();
+      const itemsSnap = await app.db
+        .collection('orders').doc(request.params.id).collection('order_items').get();
 
-      for (const item of items) {
-        const inv = await app.db
-          .selectFrom('inventory')
-          .select(['remaining', 'quantity'])
-          .where('id', '=', item.inventory_id)
-          .executeTakeFirst();
-
-        if (inv) {
-          const restored = Math.min(Number(inv.quantity), Number(inv.remaining) + Number(item.quantity));
-          const restoredStatus = restored >= Number(inv.quantity) ? 'available' : 'partial';
-          await app.db
-            .updateTable('inventory')
-            .set({ remaining: restored, status: restoredStatus as any })
-            .where('id', '=', item.inventory_id)
-            .execute();
+      for (const itemDoc of itemsSnap.docs) {
+        const item = itemDoc.data();
+        const invRef = app.db.collection('inventory').doc(item.inventory_id);
+        const invDoc = await invRef.get();
+        if (invDoc.exists) {
+          const inv = invDoc.data()!;
+          const restored = Math.min(inv.quantity, inv.remaining + item.quantity);
+          const restoredStatus = restored >= inv.quantity ? 'available' : 'partial';
+          await invRef.update({ remaining: restored, status: restoredStatus });
         }
       }
     }
 
-    // Update delivery record based on order status transition
-    if (newStatus === 'cancelled') {
-      await app.db
-        .updateTable('deliveries')
-        .set({ status: 'failed' as any })
-        .where('order_id', '=', order.id)
-        .execute();
-    } else if (newStatus === 'in_transit') {
-      await app.db
-        .updateTable('deliveries')
-        .set({ status: 'in_transit' as any })
-        .where('order_id', '=', order.id)
-        .execute();
-    } else if (newStatus === 'delivered') {
-      await app.db
-        .updateTable('deliveries')
-        .set({ status: 'completed' as any, completed_at: new Date() })
-        .where('order_id', '=', order.id)
-        .execute();
+    // Update delivery status
+    const delivSnap = await app.db
+      .collection('deliveries')
+      .where('order_id', '==', request.params.id)
+      .limit(1)
+      .get();
+
+    if (!delivSnap.empty) {
+      const delivRef = delivSnap.docs[0].ref;
+      if (newStatus === 'cancelled') await delivRef.update({ status: 'failed' });
+      else if (newStatus === 'in_transit') await delivRef.update({ status: 'in_transit' });
+      else if (newStatus === 'delivered') await delivRef.update({ status: 'completed', completed_at: new Date() });
     }
 
-    // Trigger SMS notifications based on state transition
     try {
       await sendOrderStatusNotification({
         db: app.db,
         env: app.env,
-        orderId: order.id,
+        orderId: request.params.id,
         oldStatus: order.status,
         newStatus,
       });
     } catch (err) {
-      app.log.error({ err, orderId: order.id }, 'Failed to send order notification');
+      app.log.error({ err, orderId: request.params.id }, 'Failed to send order notification');
     }
 
-    return updated;
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 }

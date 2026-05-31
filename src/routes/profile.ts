@@ -25,35 +25,25 @@ function getUserId(request: any, env: any): string | null {
 }
 
 export async function profileRoutes(app: FastifyInstance) {
-  // GET /api/profile — full profile for logged-in user
+  // GET /api/profile
   app.get('/', async (request, reply) => {
     const userId = getUserId(request, app.env);
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
 
-    const user = await app.db
-      .selectFrom('users')
-      .selectAll()
-      .where('id', '=', userId)
-      .executeTakeFirst();
+    const userDoc = await app.db.collection('users').doc(userId).get();
+    if (!userDoc.exists) return reply.status(404).send({ error: 'User not found' });
 
-    if (!user) return reply.status(404).send({ error: 'User not found' });
+    const farmSnap = await app.db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    const marketSnap = await app.db.collection('markets').where('user_id', '==', userId).limit(1).get();
 
-    const farm = await app.db
-      .selectFrom('farms')
-      .selectAll()
-      .where('user_id', '=', userId)
-      .executeTakeFirst();
-
-    const market = await app.db
-      .selectFrom('markets')
-      .selectAll()
-      .where('user_id', '=', userId)
-      .executeTakeFirst();
+    const user = { id: userDoc.id, ...userDoc.data() };
+    const farm = farmSnap.empty ? null : { id: farmSnap.docs[0].id, ...farmSnap.docs[0].data() };
+    const market = marketSnap.empty ? null : { id: marketSnap.docs[0].id, ...marketSnap.docs[0].data() };
 
     return { user, farm, market };
   });
 
-  // PUT /api/profile/user — update user fields
+  // PUT /api/profile/user
   app.put('/user', async (request, reply) => {
     const userId = getUserId(request, app.env);
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
@@ -65,26 +55,19 @@ export async function profileRoutes(app: FastifyInstance) {
     });
 
     const data = schema.parse(request.body);
-    const updates: Record<string, unknown> = {};
+    const updates: Record<string, unknown> = { updated_at: new Date() };
     if (data.name !== undefined) updates.name = data.name;
     if (data.email !== undefined) updates.email = data.email;
     if (data.logo_url !== undefined) updates.logo_url = data.logo_url;
 
-    if (Object.keys(updates).length === 0) {
-      return reply.badRequest('No fields to update');
-    }
+    if (Object.keys(updates).length <= 1) return reply.badRequest('No fields to update');
 
-    const [updated] = await app.db
-      .updateTable('users')
-      .set(updates)
-      .where('id', '=', userId)
-      .returningAll()
-      .execute();
-
-    return updated;
+    await app.db.collection('users').doc(userId).update(updates);
+    const updated = await app.db.collection('users').doc(userId).get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // PUT /api/profile/farm — update farm profile
+  // PUT /api/profile/farm
   app.put('/farm', async (request, reply) => {
     const userId = getUserId(request, app.env);
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
@@ -108,35 +91,23 @@ export async function profileRoutes(app: FastifyInstance) {
     });
 
     const data = schema.parse(request.body);
-    const updates: Record<string, unknown> = {};
-
+    const updates: Record<string, unknown> = { updated_at: new Date() };
     for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) {
-        // JSONB columns need JSON.stringify
-        if (['physical_address', 'billing_address', 'contacts', 'delivery_schedule'].includes(key)) {
-          updates[key] = JSON.stringify(value);
-        } else {
-          updates[key] = value;
-        }
-      }
+      if (value !== undefined) updates[key] = value;
     }
 
-    if (Object.keys(updates).length === 0) {
-      return reply.badRequest('No fields to update');
-    }
+    if (Object.keys(updates).length <= 1) return reply.badRequest('No fields to update');
 
-    const [updated] = await app.db
-      .updateTable('farms')
-      .set(updates)
-      .where('user_id', '=', userId)
-      .returningAll()
-      .execute();
+    const farmSnap = await app.db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    if (farmSnap.empty) return reply.notFound('Farm not found');
 
-    if (!updated) return reply.notFound('Farm not found');
-    return updated;
+    const farmRef = farmSnap.docs[0].ref;
+    await farmRef.update(updates);
+    const updated = await farmRef.get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // PUT /api/profile/market — update market profile
+  // PUT /api/profile/market
   app.put('/market', async (request, reply) => {
     const userId = getUserId(request, app.env);
     if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
@@ -156,30 +127,19 @@ export async function profileRoutes(app: FastifyInstance) {
     });
 
     const data = schema.parse(request.body);
-    const updates: Record<string, unknown> = {};
-
+    const updates: Record<string, unknown> = { updated_at: new Date() };
     for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) {
-        if (['physical_address', 'billing_address', 'contacts'].includes(key)) {
-          updates[key] = JSON.stringify(value);
-        } else {
-          updates[key] = value;
-        }
-      }
+      if (value !== undefined) updates[key] = value;
     }
 
-    if (Object.keys(updates).length === 0) {
-      return reply.badRequest('No fields to update');
-    }
+    if (Object.keys(updates).length <= 1) return reply.badRequest('No fields to update');
 
-    const [updated] = await app.db
-      .updateTable('markets')
-      .set(updates)
-      .where('user_id', '=', userId)
-      .returningAll()
-      .execute();
+    const marketSnap = await app.db.collection('markets').where('user_id', '==', userId).limit(1).get();
+    if (marketSnap.empty) return reply.notFound('Market not found');
 
-    if (!updated) return reply.notFound('Market not found');
-    return updated;
+    const marketRef = marketSnap.docs[0].ref;
+    await marketRef.update(updates);
+    const updated = await marketRef.get();
+    return { id: updated.id, ...updated.data() };
   });
 }

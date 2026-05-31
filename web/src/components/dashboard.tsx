@@ -74,14 +74,27 @@ function toDisplayMessages(msgs: ChatMessage[]): DisplayMessage[] {
 /* ─── Dashboard Component ─── */
 interface DashboardProps {
   viewAs?: 'farmer' | 'market';
+  initialTab?: string;
 }
 
-export function Dashboard({ viewAs }: DashboardProps) {
+function resolveInitialPanel(tab: string | undefined): 'orders' | 'inventory' | 'markets' | 'directory' {
+  if (tab === 'inventory') return 'inventory';
+  if (tab === 'markets') return 'markets';
+  if (tab === 'directory') return 'directory';
+  return 'orders';
+}
+
+export function Dashboard({ viewAs, initialTab }: DashboardProps) {
   const router = useRouter();
   const { user, farm, market, isAuthenticated, isLoading: authLoading } = useAuth();
   const [conversations, setConversations] = useState<Convo[]>([]);
   const [activeConvo, setActiveConvo] = useState<Convo | null>(null);
-  const [sidePanel, setSidePanel] = useState<'orders' | 'inventory' | 'markets'>('orders');
+  const [sidePanel, setSidePanel] = useState<'orders' | 'inventory' | 'markets' | 'directory'>(resolveInitialPanel(initialTab));
+  const [directorySearch, setDirectorySearch] = useState('');
+  const [directoryResults, setDirectoryResults] = useState<any[]>([]);
+  const [directoryLoading, setDirectoryLoading] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<DisplayMessage[]>([]);
   const [convoFilter, setConvoFilter] = useState('All');
@@ -439,7 +452,8 @@ export function Dashboard({ viewAs }: DashboardProps) {
             {[
               { id: 'orders' as const, icon: 'order', label: 'Orders' },
               { id: 'inventory' as const, icon: 'package', label: isFarmer ? 'Inventory' : 'Available' },
-              { id: 'markets' as const, icon: 'market', label: isFarmer ? 'Markets' : 'Farms' },
+              { id: 'markets' as const, icon: 'market', label: isFarmer ? 'My Markets' : 'My Farms' },
+              { id: 'directory' as const, icon: 'search', label: 'Directory' },
             ].map(tab => (
               <button key={tab.id} onClick={() => setSidePanel(tab.id)} className="flex-1 py-3 border-none cursor-pointer flex flex-col items-center gap-0.5 transition-all duration-150"
                 style={{
@@ -456,6 +470,7 @@ export function Dashboard({ viewAs }: DashboardProps) {
             {sidePanel === 'orders' && <OrdersPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} />}
             {sidePanel === 'inventory' && <InventoryPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} isFarmer={!!isFarmer} />}
             {sidePanel === 'markets' && (isFarmer ? <MarketsPanel farmId={farm?.id} /> : <FarmsPanel marketId={market?.id} />)}
+            {sidePanel === 'directory' && <DirectoryPanel isFarmer={!!isFarmer} farmId={farm?.id} marketId={market?.id} />}
           </div>
         </div>
       </div>
@@ -560,6 +575,7 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
   const [editing, setEditing] = useState<string | null>(null);
   const [editQty, setEditQty] = useState('');
   const [editPrice, setEditPrice] = useState('');
+  const [clearConfirm, setClearConfirm] = useState(false);
 
   const loadInventory = useCallback(() => {
     const fetcher = farmId
@@ -584,8 +600,8 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
   const saveEdit = async (id: string) => {
     try {
       await api.updateInventory(id, {
-        quantity_available: Number(editQty),
-        price_per_unit: Number(editPrice),
+        remaining: Number(editQty),
+        price: Number(editPrice),
       });
       setEditing(null);
       loadInventory();
@@ -593,6 +609,40 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
       console.error('Failed to update inventory:', err);
     }
   };
+
+  const clearItem = async (id: string) => {
+    try {
+      await api.updateInventory(id, { remaining: 0, status: 'sold' });
+      loadInventory();
+    } catch (err) {
+      console.error('Failed to clear inventory item:', err);
+    }
+  };
+
+  const deleteItem = async (id: string) => {
+    try {
+      await api.deleteInventory(id);
+      loadInventory();
+    } catch (err) {
+      console.error('Failed to delete inventory:', err);
+    }
+  };
+
+  const clearAll = async () => {
+    try {
+      await Promise.all(
+        inventory.map(item =>
+          api.updateInventory(item.id, { remaining: 0, status: 'sold' })
+        )
+      );
+      setClearConfirm(false);
+      loadInventory();
+    } catch (err) {
+      console.error('Failed to clear inventory:', err);
+    }
+  };
+
+  const activeInventory = inventory.filter(i => i.status !== 'sold');
 
   const statusStyles: Record<string, { bg: string; color: string; label: string }> = {
     available: { bg: '#E8F5E3', color: '#2E6B34', label: 'Available' },
@@ -604,7 +654,24 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
     <div className="p-5">
       <div className="flex justify-between items-center mb-4">
         <h3 className="font-display font-bold text-lg text-text m-0">{isFarmer ? 'Your Inventory' : 'Available Items'}</h3>
+        {isFarmer && activeInventory.length > 0 && !clearConfirm && (
+          <button
+            onClick={() => setClearConfirm(true)}
+            className="text-[11px] font-semibold font-sans text-red-600 border border-red-200 bg-red-50 rounded-md px-2.5 py-1 cursor-pointer hover:bg-red-100 transition-colors"
+          >
+            Clear All
+          </button>
+        )}
       </div>
+      {clearConfirm && (
+        <div className="mb-4 p-3 rounded-lg border border-red-200 bg-red-50">
+          <p className="font-sans text-xs text-red-700 m-0 mb-2">Mark all {activeInventory.length} active items as sold (qty 0)?</p>
+          <div className="flex gap-2">
+            <button onClick={clearAll} className="flex-1 py-1.5 rounded-md bg-red-600 text-white border-none font-sans text-[11px] font-semibold cursor-pointer">Yes, clear all</button>
+            <button onClick={() => setClearConfirm(false)} className="flex-1 py-1.5 rounded-md bg-white border border-red-200 font-sans text-[11px] font-semibold text-red-600 cursor-pointer">Cancel</button>
+          </div>
+        </div>
+      )}
       {loading ? (
         <div className="text-center text-text-muted text-sm py-6">Loading...</div>
       ) : inventory.length === 0 ? (
@@ -648,9 +715,19 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
                     </div>
                     {item.harvest_date && <div className="font-sans text-[10px] text-text-muted mt-1">Harvested {new Date(item.harvest_date).toLocaleDateString()}</div>}
                     {isFarmer && (
-                      <button onClick={() => startEdit(item)} className="mt-2 w-full py-1 rounded-md bg-bg border border-border-light font-sans text-[11px] font-semibold text-text-soft cursor-pointer hover:bg-earth-25 transition-colors">
-                        <Icon name="edit" size={11} className="text-text-muted inline-block mr-1" style={{ verticalAlign: '-1px' }} /> Edit
-                      </button>
+                      <div className="flex gap-1.5 mt-2">
+                        <button onClick={() => startEdit(item)} className="flex-1 py-1 rounded-md bg-bg border border-border-light font-sans text-[11px] font-semibold text-text-soft cursor-pointer hover:bg-earth-25 transition-colors">
+                          <Icon name="edit" size={11} className="text-text-muted inline-block mr-1" style={{ verticalAlign: '-1px' }} /> Edit
+                        </button>
+                        {item.status !== 'sold' && (
+                          <button onClick={() => clearItem(item.id)} className="py-1 px-2.5 rounded-md bg-bg border border-orange-200 font-sans text-[11px] font-semibold text-orange-500 cursor-pointer hover:bg-orange-50 transition-colors" title="Clear (set to 0)">
+                            0
+                          </button>
+                        )}
+                        <button onClick={() => deleteItem(item.id)} className="py-1 px-2.5 rounded-md bg-bg border border-red-200 font-sans text-[11px] font-semibold text-red-500 cursor-pointer hover:bg-red-50 transition-colors" title="Delete">
+                          ✕
+                        </button>
+                      </div>
                     )}
                   </>
                 )}
@@ -908,6 +985,171 @@ function FarmsPanel({ marketId }: { marketId?: string }) {
               {f.active === false && <span className="font-sans text-[10px] text-text-muted mt-1 block">Inactive</span>}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; farmId?: string; marketId?: string }) {
+  const [tab, setTab] = useState<'browse' | 'pending'>('browse');
+  const [search, setSearch] = useState('');
+  const [entities, setEntities] = useState<any[]>([]);
+  const [pending, setPending] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [actionMsg, setActionMsg] = useState('');
+
+  const fetchEntities = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: Record<string, string> = {};
+      if (search) params.search = search;
+      if (isFarmer && farmId) params.farm_id = farmId;
+      if (!isFarmer && marketId) params.market_id = marketId;
+      const res = isFarmer
+        ? await api.directoryMarkets(params)
+        : await api.directoryFarms(params);
+      setEntities(res.markets ?? res.farms ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, [isFarmer, farmId, marketId, search]);
+
+  const fetchPending = useCallback(async () => {
+    const params: Record<string, string> = {};
+    if (farmId) params.farm_id = farmId;
+    if (marketId) params.market_id = marketId;
+    const res = await api.pendingConnections(params);
+    setPending(res.pending ?? []);
+  }, [farmId, marketId]);
+
+  useEffect(() => { fetchEntities(); }, [fetchEntities]);
+  useEffect(() => { fetchPending(); }, [fetchPending]);
+
+  const handleConnect = async (entityId: string) => {
+    try {
+      setActionMsg('');
+      await api.connectionRequest({
+        farm_id: isFarmer ? farmId! : entityId,
+        market_id: isFarmer ? entityId : marketId!,
+        initiated_by: isFarmer ? 'farm' : 'market',
+      });
+      setActionMsg('Connection request sent!');
+      fetchEntities();
+      fetchPending();
+    } catch (e: any) {
+      setActionMsg(e.message || 'Error sending request');
+    }
+  };
+
+  const handleRespond = async (relId: string, accept: boolean) => {
+    try {
+      setActionMsg('');
+      await api.connectionRespond(relId, accept);
+      setActionMsg(accept ? 'Connection accepted!' : 'Request declined.');
+      fetchPending();
+      fetchEntities();
+    } catch (e: any) {
+      setActionMsg(e.message || 'Error responding');
+    }
+  };
+
+  const statusBadge = (status: string | undefined) => {
+    if (status === 'active') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans" style={{ background: '#e6f4ea', color: '#2E6B34' }}>Connected</span>;
+    if (status === 'pending') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans bg-yellow-100 text-yellow-800">Pending</span>;
+    if (status === 'declined') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans bg-gray-100 text-gray-500">Declined</span>;
+    return null;
+  };
+
+  return (
+    <div className="h-full flex flex-col gap-4">
+      <div className="flex gap-2">
+        {(['browse', 'pending'] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`font-sans text-sm px-3 py-1.5 rounded-lg capitalize transition-colors ${tab === t ? 'bg-[#2E6B34] text-white' : 'bg-surface-raised text-text-muted hover:text-text'}`}>
+            {t}{t === 'pending' && pending.length > 0 ? ` (${pending.length})` : ''}
+          </button>
+        ))}
+      </div>
+
+      {actionMsg && <div className="font-sans text-sm text-[#2E6B34] bg-[#e6f4ea] px-3 py-2 rounded-lg">{actionMsg}</div>}
+
+      {tab === 'browse' && (
+        <div className="flex flex-col gap-3 flex-1 overflow-auto">
+          <input
+            className="font-sans text-sm border border-border-light rounded-lg px-3 py-2 bg-surface-raised text-text placeholder:text-text-muted focus:outline-none focus:border-[#2E6B34]"
+            placeholder={`Search ${isFarmer ? 'markets' : 'farms'}…`}
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && fetchEntities()}
+          />
+          {loading ? (
+            <div className="font-sans text-sm text-text-muted">Loading…</div>
+          ) : entities.length === 0 ? (
+            <div className="font-sans text-sm text-text-muted">No results found.</div>
+          ) : (
+            entities.map((e: any) => (
+              <div key={e.id} className="bg-surface-raised rounded-xl p-3 flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-sans text-sm font-semibold text-text">{e.name}</span>
+                    {statusBadge(e.connection_status)}
+                  </div>
+                  {e.location && <div className="font-sans text-xs text-text-muted mt-0.5">{e.location}</div>}
+                  {e.specialty && <div className="font-sans text-xs text-text-muted">{e.specialty}</div>}
+                  {e.type && <div className="font-sans text-xs text-text-muted">{e.type}</div>}
+                </div>
+                {e.connection_status !== 'active' && (
+                  <button
+                    onClick={() => handleConnect(e.id)}
+                    className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-[#2E6B34] text-white shrink-0 hover:opacity-90 transition-opacity"
+                  >
+                    {e.connection_status === 'pending' ? 'Pending' : e.connection_status === 'declined' ? 'Re-request' : 'Connect'}
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {tab === 'pending' && (
+        <div className="flex flex-col gap-3 flex-1 overflow-auto">
+          {pending.length === 0 ? (
+            <div className="font-sans text-sm text-text-muted">No pending requests.</div>
+          ) : (
+            pending.map((r: any) => {
+              const myId = isFarmer ? farmId : marketId;
+              const initiatorId = isFarmer ? r.farm?.id : r.market?.id;
+              const isIncoming = initiatorId !== myId;
+              const otherName = isFarmer ? r.market?.name : r.farm?.name;
+              return (
+                <div key={r.rel_id} className="bg-surface-raised rounded-xl p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <span className="font-sans text-sm font-semibold text-text">{otherName}</span>
+                      <div className="font-sans text-xs text-text-muted mt-0.5">
+                        {isIncoming ? 'Wants to connect with you' : 'Waiting for their response'}
+                      </div>
+                      {r.message && <div className="font-sans text-xs text-text-muted italic mt-1">"{r.message}"</div>}
+                    </div>
+                    {isIncoming && (
+                      <div className="flex gap-2 shrink-0">
+                        <button onClick={() => handleRespond(r.rel_id, true)}
+                          className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-[#2E6B34] text-white hover:opacity-90 transition-opacity">
+                          Accept
+                        </button>
+                        <button onClick={() => handleRespond(r.rel_id, false)}
+                          className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-surface border border-border-light text-text-muted hover:text-text transition-colors">
+                          Decline
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       )}
     </div>

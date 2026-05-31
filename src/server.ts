@@ -1,14 +1,11 @@
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import formbody from '@fastify/formbody';
 import sensible from '@fastify/sensible';
 import multipart from '@fastify/multipart';
-import fastifyStatic from '@fastify/static';
 import rateLimit from '@fastify/rate-limit';
 import { getEnv } from './config/env.js';
-import { getDb } from './db/database.js';
+import { getDb } from './db/firestore.js';
 import { smsRoutes } from './routes/sms.js';
 import { farmRoutes } from './routes/farms.js';
 import { marketRoutes } from './routes/markets.js';
@@ -23,12 +20,11 @@ import { productRoutes } from './routes/products.js';
 import { uploadRoutes } from './routes/uploads.js';
 import { profileRoutes } from './routes/profile.js';
 import { feedbackRoutes } from './routes/feedback.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { directoryRoutes } from './routes/directory.js';
 
 async function start() {
   const env = getEnv();
-  const db = getDb(env.DATABASE_URL);
+  const db = getDb();
 
   const app = Fastify({
     logger: {
@@ -36,45 +32,19 @@ async function start() {
     },
   });
 
-  // Plugins
   await app.register(cors, { origin: true });
   await app.register(formbody);
   await app.register(sensible);
-  await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
+  await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });
+  await app.register(rateLimit, { max: 100, timeWindow: '1 minute', keyGenerator: (req) => req.ip });
 
-  // Rate limiting — global: 100 req/min per IP
-  await app.register(rateLimit, {
-    max: 100,
-    timeWindow: '1 minute',
-    keyGenerator: (req) => req.ip,
-  });
-
-  // Serve uploaded files
-  const uploadsDir = path.join(__dirname, '..', 'uploads');
-  await app.register(fastifyStatic, {
-    root: uploadsDir,
-    prefix: '/uploads/',
-    decorateReply: false,
-  });
-
-  // Decorate with shared deps
   app.decorate('db', db);
   app.decorate('env', env);
 
-  // Health check
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 
-  // Routes
   await app.register(authRoutes, { prefix: '/api/auth' });
-  // SMS routes with rate limit: 60 req/min per IP (dashboard loads convos + history)
-  await app.register(async (scope) => {
-    await scope.register(rateLimit, {
-      max: 60,
-      timeWindow: '1 minute',
-      keyGenerator: (req) => req.ip,
-    });
-    await scope.register(smsRoutes);
-  }, { prefix: '/api/sms' });
+  await app.register(smsRoutes, { prefix: '/api/sms' });
   await app.register(farmRoutes, { prefix: '/api/farms' });
   await app.register(marketRoutes, { prefix: '/api/markets' });
   await app.register(inventoryRoutes, { prefix: '/api/inventory' });
@@ -87,9 +57,26 @@ async function start() {
   await app.register(uploadRoutes, { prefix: '/api/uploads' });
   await app.register(profileRoutes, { prefix: '/api/profile' });
   await app.register(feedbackRoutes, { prefix: '/api/feedback' });
+  await app.register(directoryRoutes, { prefix: '/api/directory' });
 
-  await app.listen({ port: env.PORT, host: env.HOST });
-  console.log(`🌱 FarmLink API running on ${env.HOST}:${env.PORT}`);
+  // View link redirect
+  app.get('/api/view/:token', async (request, reply) => {
+    const { token } = request.params as { token: string };
+    const doc = await db.collection('view_links').doc(token).get();
+    if (!doc.exists) return reply.status(410).send('Link expired or invalid.');
+
+    const data = doc.data()!;
+    const expiresAt = data.expires_at?.toDate?.() || new Date(data.expires_at);
+    if (expiresAt < new Date()) return reply.status(410).send('Link expired.');
+
+    const { signJwt } = await import('./utils/jwt.js');
+    const jwt = signJwt({ sub: data.userId, role: data.role }, env.JWT_SECRET);
+    const page = data.role === 'market' ? 'market' : 'farmer';
+    return reply.redirect(`/${page}?token=${jwt}&tab=${data.tab}`);
+  });
+
+  await app.listen({ port: env.LOCAL_PORT, host: env.HOST });
+  console.log(`FarmLink API running on ${env.HOST}:${env.LOCAL_PORT}`);
 }
 
 start().catch((err) => {

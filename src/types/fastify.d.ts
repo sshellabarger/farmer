@@ -1,11 +1,10 @@
-import type { Kysely } from 'kysely';
-import type { DB } from './schema.js';
+import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
 import type { AuthUser } from '../middleware/rbac.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    db: Kysely<DB>;
+    db: Firestore;
     env: Env;
   }
 

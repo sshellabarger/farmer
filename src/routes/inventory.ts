@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole, requireInventoryFarmOwner } from '../middleware/rbac.js';
+import { v4 as uuid } from 'uuid';
 
 export async function inventoryRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
@@ -9,41 +10,53 @@ export async function inventoryRoutes(app: FastifyInstance) {
 
   // GET /api/inventory?farm_id=&category=&status= (public read)
   app.get<{ Querystring: Record<string, string> }>('/', async (request) => {
-    let query = app.db
-      .selectFrom('inventory')
-      .innerJoin('products', 'products.id', 'inventory.product_id')
-      .innerJoin('farms', 'farms.id', 'inventory.farm_id')
-      .select([
-        'inventory.id',
-        'products.name as product_name',
-        'products.category',
-        'farms.name as farm_name',
-        'inventory.quantity',
-        'inventory.remaining',
-        'products.unit',
-        'inventory.price',
-        'inventory.status',
-        'inventory.harvest_date',
-        'inventory.listed_at',
-        'inventory.image_url',
-      ]);
-
     const { farm_id, category, status } = request.query;
-    if (farm_id) query = query.where('inventory.farm_id', '=', farm_id);
-    if (category) query = query.where('products.category', 'ilike', `%${category}%`);
-    if (status) query = query.where('inventory.status', '=', status as any);
 
-    const results = await query.orderBy('inventory.listed_at', 'desc').execute();
-    return { inventory: results };
+    let query: FirebaseFirestore.Query = app.db.collection('inventory');
+    if (farm_id) query = query.where('farm_id', '==', farm_id);
+    if (status) query = query.where('status', '==', status);
+
+    const snapshot = await query.orderBy('listed_at', 'desc').get();
+
+    const inventory = await Promise.all(
+      snapshot.docs.map(async (doc) => {
+        const inv = doc.data();
+        const productDoc = await app.db.collection('products').doc(inv.product_id).get();
+        const product = productDoc.data() || {};
+        const farmDoc = await app.db.collection('farms').doc(inv.farm_id).get();
+        const farm = farmDoc.data() || {};
+
+        if (category && !product.category?.toLowerCase().includes(category.toLowerCase())) {
+          return null;
+        }
+
+        return {
+          id: doc.id,
+          product_name: product.name || 'Unknown',
+          category: product.category || '',
+          farm_name: farm.name || 'Unknown',
+          quantity: inv.quantity,
+          remaining: inv.remaining,
+          unit: product.unit || '',
+          price: inv.price,
+          status: inv.status,
+          harvest_date: inv.harvest_date,
+          listed_at: inv.listed_at,
+          image_url: inv.image_url,
+        };
+      }),
+    );
+
+    return { inventory: inventory.filter(Boolean) };
   });
 
-  // POST /api/inventory — farmer must own the farm (or admin)
+  // POST /api/inventory
   app.post('/', {
     preHandler: [auth, farmerOrAdmin, invFarmOwner],
   }, async (request, reply) => {
     const schema = z.object({
-      farm_id: z.string().uuid(),
-      product_id: z.string().uuid(),
+      farm_id: z.string(),
+      product_id: z.string(),
       quantity: z.number().positive(),
       price: z.number().positive(),
       harvest_date: z.string().optional(),
@@ -51,25 +64,25 @@ export async function inventoryRoutes(app: FastifyInstance) {
     });
 
     const data = schema.parse(request.body);
+    const id = uuid();
 
-    const [inv] = await app.db
-      .insertInto('inventory')
-      .values({
-        farm_id: data.farm_id,
-        product_id: data.product_id,
-        quantity: data.quantity,
-        remaining: data.quantity,
-        price: data.price,
-        harvest_date: data.harvest_date ? new Date(data.harvest_date) : null,
-        image_url: data.image_url || null,
-      })
-      .returningAll()
-      .execute();
+    const inv = {
+      farm_id: data.farm_id,
+      product_id: data.product_id,
+      quantity: data.quantity,
+      remaining: data.quantity,
+      price: data.price,
+      harvest_date: data.harvest_date ? new Date(data.harvest_date) : null,
+      image_url: data.image_url || null,
+      status: 'available',
+      listed_at: new Date(),
+    };
 
-    reply.status(201).send(inv);
+    await app.db.collection('inventory').doc(id).set(inv);
+    reply.status(201).send({ id, ...inv });
   });
 
-  // PUT /api/inventory/:id — farmer must own the farm (or admin)
+  // PUT /api/inventory/:id
   app.put<{ Params: { id: string } }>('/:id', {
     preHandler: [auth, farmerOrAdmin, invFarmOwner],
   }, async (request, reply) => {
@@ -80,22 +93,20 @@ export async function inventoryRoutes(app: FastifyInstance) {
     if (status !== undefined) updates.status = status;
     if (image_url !== undefined) updates.image_url = image_url;
 
-    const [updated] = await app.db
-      .updateTable('inventory')
-      .set(updates)
-      .where('id', '=', request.params.id)
-      .returningAll()
-      .execute();
+    const ref = app.db.collection('inventory').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Inventory not found');
 
-    if (!updated) return reply.notFound('Inventory not found');
-    return updated;
+    await ref.update(updates);
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // DELETE /api/inventory/:id — farmer must own the farm (or admin)
+  // DELETE /api/inventory/:id
   app.delete<{ Params: { id: string } }>('/:id', {
     preHandler: [auth, farmerOrAdmin, invFarmOwner],
   }, async (request, reply) => {
-    await app.db.deleteFrom('inventory').where('id', '=', request.params.id).execute();
+    await app.db.collection('inventory').doc(request.params.id).delete();
     reply.status(204).send();
   });
 }

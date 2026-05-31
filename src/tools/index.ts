@@ -1,8 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Kysely } from 'kysely';
-import type { DB } from '../types/schema.js';
+import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { inventoryAdd, inventoryUpdate, inventoryQuery } from './inventory.js';
+import { inventoryAdd, inventoryUpdate, inventoryQuery, inventoryClearAll } from './inventory.js';
 import { orderCreate, orderUpdate, orderQuery } from './orders.js';
 import { marketQuery } from './markets.js';
 import { notifyMarkets } from './notifications.js';
@@ -11,9 +10,12 @@ import { analyticsSummary } from './analytics.js';
 import { userSignup } from './signup.js';
 import { deliveryScheduleSet, deliveryQuery } from './delivery.js';
 import { feedbackSubmit, feedbackQuery, feedbackUpdate } from './feedback.js';
+import { emailSend } from './email.js';
+import { generateViewLink } from '../utils/view-link.js';
+import { directorySearch, connectionRequest, connectionRespond, pendingConnections } from './connections.js';
 
 export interface ToolContext {
-  db: Kysely<DB>;
+  db: Firestore;
   env: Env;
   userId?: string;
   phone: string;
@@ -64,18 +66,26 @@ export const toolDefinitions: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'inventory_clear_all',
+    description: 'Clear all active inventory for the farm at once — sets every available/partial item to quantity 0 and status "sold". Use when the farmer reports spoilage, a bad harvest, or wants to wipe all listings in one go.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  {
     name: 'inventory_update',
-    description: 'Update an existing inventory listing (price, quantity, status).',
+    description: 'Update an existing inventory listing (price, quantity, status). Also use this to clear a single item due to spoilage or selling out — set remaining to 0 and status to "sold". To find the inventory_id, call inventory_query first.',
     input_schema: {
       type: 'object' as const,
       properties: {
         inventory_id: { type: 'string', description: 'UUID of the inventory record' },
-        remaining: { type: 'number', description: 'Updated remaining quantity' },
+        remaining: { type: 'number', description: 'Updated remaining quantity (use 0 to clear/zero out an item)' },
         price: { type: 'number', description: 'Updated price per unit' },
         status: {
           type: 'string',
           enum: ['available', 'partial', 'reserved', 'sold'],
-          description: 'Updated status',
+          description: 'Updated status (use "sold" to mark as cleared/sold out)',
         },
       },
       required: ['inventory_id'],
@@ -291,6 +301,89 @@ export const toolDefinitions: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'directory_search',
+    description: 'Search the FarmLink directory of all farms or markets. Use when a user wants to browse, discover, or find farms/markets to connect with.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: { type: 'string', enum: ['farms', 'markets'], description: 'Whether to search farms or markets' },
+        search: { type: 'string', description: 'Optional search term (name, location, specialty)' },
+      },
+      required: ['type'],
+    },
+  },
+  {
+    name: 'connection_request',
+    description: 'Send a connection request from a farm to a market (or vice versa). Either side can initiate. Works even if a previous request was declined — allows re-requesting. The other party is notified by SMS.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        farm_id: { type: 'string', description: 'Farm UUID' },
+        market_id: { type: 'string', description: 'Market UUID' },
+        message: { type: 'string', description: 'Optional personal note to include with the request (max 280 chars)' },
+      },
+      required: ['farm_id', 'market_id'],
+    },
+  },
+  {
+    name: 'connection_respond',
+    description: 'Accept or decline a pending connection request. Use when a user replies YES/NO to a connection request SMS.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        rel_id: { type: 'string', description: 'The farm_market_rel UUID from the pending request' },
+        accept: { type: 'boolean', description: 'true to accept, false to decline' },
+      },
+      required: ['rel_id', 'accept'],
+    },
+  },
+  {
+    name: 'pending_connections',
+    description: 'List all pending connection requests for the current user (as farmer, market, or both).',
+    input_schema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'view_link',
+    description:
+      'Generate a secure web link for the user to view detailed data (inventory, orders, deliveries, markets, analytics) on the FarmLink web dashboard. Use this instead of listing lengthy data over SMS — send the link so they can review it in their browser. The link auto-logs them in and opens the correct tab.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        tab: {
+          type: 'string',
+          enum: ['inventory', 'orders', 'deliveries', 'markets', 'analytics', 'recurring'],
+          description: 'Which dashboard tab to open',
+        },
+      },
+      required: ['tab'],
+    },
+  },
+  {
+    name: 'email_send',
+    description:
+      'Send an email report or document to the user. Use when they ask to email their inventory, orders, invoice, or a daily/weekly summary. Supported report types: inventory, orders, invoice, custom.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        report_type: {
+          type: 'string',
+          enum: ['inventory', 'orders', 'invoice', 'custom'],
+          description: 'Type of report to send',
+        },
+        period: {
+          type: 'string',
+          enum: ['day', 'week'],
+          description: 'For orders reports: day = today, week = this week (default: week)',
+        },
+        order_id: { type: 'string', description: 'Order UUID — required for invoice reports' },
+        to_email: { type: 'string', description: "Override recipient email (default: user's email on file)" },
+        subject: { type: 'string', description: 'Subject line — required for custom emails' },
+        message: { type: 'string', description: 'Body text — required for custom emails' },
+      },
+      required: ['report_type'],
+    },
+  },
+  {
     name: 'feedback_submit',
     description:
       'Submit a feature request or bug report from a user. Use when a user says they want to request a feature, suggest an improvement, report a bug or issue, or provide feedback about the platform.',
@@ -374,6 +467,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   inventory_add: inventoryAdd,
   inventory_update: inventoryUpdate,
   inventory_query: inventoryQuery,
+  inventory_clear_all: inventoryClearAll,
   order_create: orderCreate,
   order_update: orderUpdate,
   order_query: orderQuery,
@@ -384,6 +478,24 @@ const toolHandlers: Record<string, ToolHandler> = {
   delivery_schedule_set: deliveryScheduleSet,
   delivery_query: deliveryQuery,
   analytics_summary: analyticsSummary,
+  directory_search: directorySearch,
+  connection_request: connectionRequest,
+  connection_respond: connectionRespond,
+  pending_connections: pendingConnections,
+  view_link: async (input: Record<string, unknown>, ctx: ToolContext) => {
+    if (!ctx.userId) return { error: 'No user found for this session.' };
+    const userDoc = await ctx.db.collection('users').doc(ctx.userId).get();
+    if (!userDoc.exists) return { error: 'No user found for this session.' };
+    const user = userDoc.data()!;
+    const url = await generateViewLink({
+      env: ctx.env,
+      userId: ctx.userId,
+      role: user.role,
+      tab: input.tab as import('../utils/view-link.js').ViewTab,
+    });
+    return { url };
+  },
+  email_send: emailSend,
   feedback_submit: feedbackSubmit,
   feedback_query: feedbackQuery,
   feedback_update: feedbackUpdate,

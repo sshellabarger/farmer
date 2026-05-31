@@ -1,27 +1,19 @@
 import type { ToolContext } from './index.js';
 
-/**
- * Set up or update a farm's delivery schedule.
- */
 export async function deliveryScheduleSet(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
-
   if (!userId) throw new Error('User not found');
 
-  const farm = await db
-    .selectFrom('farms')
-    .select(['id', 'name', 'delivery_schedule'])
-    .where('user_id', '=', userId)
-    .executeTakeFirst();
-
-  if (!farm) throw new Error('No farm found for this user');
+  const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+  if (farmSnap.empty) throw new Error('No farm found for this user');
+  const farmRef = farmSnap.docs[0].ref;
+  const farm = farmSnap.docs[0].data();
 
   const schedule = input.schedule as Array<{ day: string; time_window: string; areas?: string[] }>;
   if (!schedule || !Array.isArray(schedule) || schedule.length === 0) {
     throw new Error('Please provide a delivery schedule with at least one day');
   }
 
-  // Validate days
   const validDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
   for (const slot of schedule) {
     if (!validDays.includes(slot.day.toLowerCase())) {
@@ -29,18 +21,13 @@ export async function deliveryScheduleSet(input: Record<string, unknown>, ctx: T
     }
   }
 
-  // Normalize days to lowercase
   const normalized = schedule.map((s) => ({
     day: s.day.toLowerCase(),
     time_window: s.time_window,
     areas: s.areas || [],
   }));
 
-  await db
-    .updateTable('farms')
-    .set({ delivery_schedule: JSON.stringify(normalized) as any })
-    .where('id', '=', farm.id)
-    .execute();
+  await farmRef.update({ delivery_schedule: normalized });
 
   return {
     success: true,
@@ -50,68 +37,57 @@ export async function deliveryScheduleSet(input: Record<string, unknown>, ctx: T
   };
 }
 
-/**
- * Query deliveries for a specific date or range.
- */
 export async function deliveryQuery(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
 
-  // Get user's farm and/or market
-  const farm = userId
-    ? await db.selectFrom('farms').select(['id', 'name', 'delivery_schedule', 'location']).where('user_id', '=', userId).executeTakeFirst()
-    : null;
-  const market = userId
-    ? await db.selectFrom('markets').select(['id', 'name', 'location']).where('user_id', '=', userId).executeTakeFirst()
-    : null;
+  let farmId: string | undefined;
+  let farmData: any = null;
 
-  const date = input.date as string | undefined;
-
-  let query = db
-    .selectFrom('orders')
-    .innerJoin('farms', 'farms.id', 'orders.farm_id')
-    .innerJoin('markets', 'markets.id', 'orders.market_id')
-    .select([
-      'orders.id',
-      'orders.order_number',
-      'orders.status',
-      'orders.total',
-      'orders.delivery_type',
-      'orders.scheduled_delivery_at',
-      'orders.delivery_notes',
-      'orders.order_date',
-      'farms.name as farm_name',
-      'farms.location as farm_location',
-      'markets.name as market_name',
-      'markets.location as market_location',
-    ])
-    .where('orders.status', 'in', ['confirmed', 'in_transit', 'pending']);
-
-  // Scope to user
-  if (input.farm_id) {
-    query = query.where('orders.farm_id', '=', input.farm_id as string);
-  } else if (input.market_id) {
-    query = query.where('orders.market_id', '=', input.market_id as string);
-  } else if (farm) {
-    query = query.where('orders.farm_id', '=', farm.id);
-  } else if (market) {
-    query = query.where('orders.market_id', '=', market.id);
+  if (userId) {
+    const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    if (!farmSnap.empty) { farmId = farmSnap.docs[0].id; farmData = farmSnap.docs[0].data(); }
   }
 
-  // Filter by date
-  if (date) {
-    query = query.where('orders.order_date', '=', date as any);
+  if (input.farm_id) farmId = input.farm_id as string;
+  const marketId = input.market_id as string | undefined;
+
+  let query: FirebaseFirestore.Query = db.collection('orders')
+    .where('status', 'in', ['confirmed', 'in_transit', 'pending']);
+
+  if (farmId) query = query.where('farm_id', '==', farmId);
+  else if (marketId) query = query.where('market_id', '==', marketId);
+  else if (!farmId && userId) {
+    const marketSnap = await db.collection('markets').where('user_id', '==', userId).limit(1).get();
+    if (!marketSnap.empty) query = query.where('market_id', '==', marketSnap.docs[0].id);
   }
 
-  const orders = await query.orderBy('orders.scheduled_delivery_at', 'asc').limit(20).execute();
+  const snapshot = await query.orderBy('order_date', 'desc').limit(20).get();
 
-  // Also return the farm's delivery schedule if applicable
-  const scheduleInfo = farm?.delivery_schedule
-    ? { farm_delivery_schedule: farm.delivery_schedule, farm_location: farm.location }
+  const deliveries = await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const order = doc.data();
+      const fDoc = await db.collection('farms').doc(order.farm_id).get();
+      const mDoc = await db.collection('markets').doc(order.market_id).get();
+      return {
+        id: doc.id,
+        order_number: order.order_number,
+        status: order.status,
+        total: order.total,
+        delivery_type: order.delivery_type,
+        scheduled_delivery_at: order.scheduled_delivery_at,
+        delivery_notes: order.delivery_notes,
+        order_date: order.order_date,
+        farm_name: fDoc.data()?.name || 'Unknown',
+        farm_location: fDoc.data()?.location,
+        market_name: mDoc.data()?.name || 'Unknown',
+        market_location: mDoc.data()?.location,
+      };
+    }),
+  );
+
+  const scheduleInfo = farmData?.delivery_schedule
+    ? { farm_delivery_schedule: farmData.delivery_schedule, farm_location: farmData.location }
     : null;
 
-  return {
-    count: orders.length,
-    deliveries: orders,
-    ...scheduleInfo,
-  };
+  return { count: deliveries.length, deliveries, ...scheduleInfo };
 }

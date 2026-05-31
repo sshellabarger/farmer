@@ -6,171 +6,147 @@ export async function marketRoutes(app: FastifyInstance) {
   const marketOwner = requireMarketOwner(app);
   const marketOrAdmin = requireRole('market', 'admin');
 
-  // GET /api/markets — list all markets (public)
-  app.get('/', async (request) => {
-    const markets = await app.db
-      .selectFrom('markets')
-      .selectAll()
-      .orderBy('name', 'asc')
-      .execute();
+  // GET /api/markets (public)
+  app.get('/', async () => {
+    const snapshot = await app.db.collection('markets').orderBy('name').get();
+    const markets = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
     return { markets };
   });
 
   // GET /api/markets/:id (public)
   app.get<{ Params: { id: string } }>('/:id', async (request, reply) => {
-    const market = await app.db
-      .selectFrom('markets')
-      .selectAll()
-      .where('id', '=', request.params.id)
-      .executeTakeFirst();
-
-    if (!market) return reply.notFound('Market not found');
-    return market;
+    const doc = await app.db.collection('markets').doc(request.params.id).get();
+    if (!doc.exists) return reply.notFound('Market not found');
+    return { id: doc.id, ...doc.data() };
   });
 
-  // PUT /api/markets/:id — market must own it (or admin)
+  // PUT /api/markets/:id
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>('/:id', {
     preHandler: [auth, marketOrAdmin, marketOwner],
   }, async (request, reply) => {
     const { name, location, type, delivery_pref } = request.body as any;
-    const updates: Record<string, unknown> = {};
+    const updates: Record<string, unknown> = { updated_at: new Date() };
     if (name) updates.name = name;
     if (location) updates.location = location;
     if (type) updates.type = type;
     if (delivery_pref) updates.delivery_pref = delivery_pref;
 
-    const [updated] = await app.db
-      .updateTable('markets')
-      .set(updates)
-      .where('id', '=', request.params.id)
-      .returningAll()
-      .execute();
+    const ref = app.db.collection('markets').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Market not found');
 
-    if (!updated) return reply.notFound('Market not found');
-    return updated;
+    await ref.update(updates);
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // GET /api/markets/:id/available — market must own it (or admin)
+  // GET /api/markets/:id/available
   app.get<{ Params: { id: string } }>('/:id/available', {
     preHandler: [auth, marketOrAdmin, marketOwner],
   }, async (request) => {
-    const inventory = await app.db
-      .selectFrom('inventory')
-      .innerJoin('products', 'products.id', 'inventory.product_id')
-      .innerJoin('farms', 'farms.id', 'inventory.farm_id')
-      .innerJoin('farm_market_rels', (join) =>
-        join
-          .onRef('farm_market_rels.farm_id', '=', 'farms.id')
-          .on('farm_market_rels.market_id', '=', request.params.id)
-      )
-      .select([
-        'inventory.id',
-        'products.name as product_name',
-        'products.category',
-        'farms.name as farm_name',
-        'farms.id as farm_id',
-        'inventory.remaining',
-        'products.unit',
-        'inventory.price',
-        'inventory.status',
-        'inventory.harvest_date',
-        'inventory.image_url',
-      ])
-      .where('inventory.status', 'in', ['available', 'partial'])
-      .where('inventory.remaining', '>', 0)
-      .where('farm_market_rels.active', '=', true)
-      .orderBy('products.category')
-      .orderBy('inventory.harvest_date', 'desc')
-      .execute();
+    const marketId = request.params.id;
+
+    // Get farms connected to this market
+    const relsSnap = await app.db
+      .collection('farm_market_rels')
+      .where('market_id', '==', marketId)
+      .where('active', '==', true)
+      .get();
+
+    const farmIds = relsSnap.docs.map((d) => d.data().farm_id);
+    if (farmIds.length === 0) return { inventory: [] };
+
+    // Get available inventory from connected farms
+    const inventory: any[] = [];
+    for (const farmId of farmIds) {
+      const invSnap = await app.db
+        .collection('inventory')
+        .where('farm_id', '==', farmId)
+        .where('status', 'in', ['available', 'partial'])
+        .get();
+
+      for (const doc of invSnap.docs) {
+        const inv = doc.data();
+        if (inv.remaining <= 0) continue;
+        const productDoc = await app.db.collection('products').doc(inv.product_id).get();
+        const product = productDoc.data() || {};
+        const farmDoc = await app.db.collection('farms').doc(farmId).get();
+        const farm = farmDoc.data() || {};
+
+        inventory.push({
+          id: doc.id,
+          product_name: product.name || 'Unknown',
+          category: product.category || '',
+          farm_name: farm.name || 'Unknown',
+          farm_id: farmId,
+          remaining: inv.remaining,
+          unit: product.unit || '',
+          price: inv.price,
+          status: inv.status,
+          harvest_date: inv.harvest_date,
+          image_url: inv.image_url,
+        });
+      }
+    }
 
     return { inventory };
   });
 
-  // GET /api/markets/:id/messages — market must own it (or admin)
+  // GET /api/markets/:id/messages
   app.get<{ Params: { id: string } }>('/:id/messages', {
     preHandler: [auth, marketOrAdmin, marketOwner],
   }, async (request) => {
     const marketId = request.params.id;
 
-    // Get recent orders with farm names
-    const recentOrders = await app.db
-      .selectFrom('orders')
-      .innerJoin('farms', 'farms.id', 'orders.farm_id')
-      .select([
-        'orders.id',
-        'orders.order_number',
-        'orders.status',
-        'orders.total',
-        'orders.order_date',
-        'orders.created_at',
-        'orders.updated_at',
-        'farms.name as farm_name',
-      ])
-      .where('orders.market_id', '=', marketId)
-      .orderBy('orders.updated_at', 'desc')
+    const ordersSnap = await app.db
+      .collection('orders')
+      .where('market_id', '==', marketId)
+      .orderBy('created_at', 'desc')
       .limit(50)
-      .execute();
+      .get();
 
-    // Get notifications for this market
-    const notifications = await app.db
-      .selectFrom('notifications')
-      .leftJoin('inventory', 'inventory.id', 'notifications.inventory_id')
-      .leftJoin('products', 'products.id', 'inventory.product_id')
-      .leftJoin('farms', 'farms.id', 'inventory.farm_id')
-      .select([
-        'notifications.id',
-        'notifications.type',
-        'notifications.status',
-        'notifications.created_at',
-        'notifications.sent_at',
-        'farms.name as farm_name',
-        'products.name as product_name',
-      ])
-      .where('notifications.market_id', '=', marketId)
-      .orderBy('notifications.created_at', 'desc')
-      .limit(50)
-      .execute();
-
-    // Combine into a unified activity feed
     const messages: any[] = [];
 
-    for (const order of recentOrders) {
-      let title = '';
-      let description = '';
+    for (const doc of ordersSnap.docs) {
+      const order = doc.data();
+      const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+      const farmName = farmDoc.data()?.name || 'Unknown';
       const amount = `$${Number(order.total).toFixed(2)}`;
 
+      let title = '';
+      let description = '';
       switch (order.status) {
         case 'pending':
-          title = `Order placed with ${order.farm_name}`;
+          title = `Order placed with ${farmName}`;
           description = `${order.order_number} for ${amount} — awaiting confirmation`;
           break;
         case 'confirmed':
-          title = `${order.farm_name} confirmed ${order.order_number}`;
+          title = `${farmName} confirmed ${order.order_number}`;
           description = `Order for ${amount} confirmed by farm`;
           break;
         case 'cancelled':
           title = `Order cancelled — ${order.order_number}`;
-          description = `${order.farm_name} order for ${amount} was cancelled`;
+          description = `${farmName} order for ${amount} was cancelled`;
           break;
         case 'in_transit':
-          title = `${order.farm_name} shipped ${order.order_number}`;
+          title = `${farmName} shipped ${order.order_number}`;
           description = `Order for ${amount} is on the way`;
           break;
         case 'delivered':
           title = `Order delivered — ${order.order_number}`;
-          description = `${order.farm_name} order for ${amount} delivered`;
+          description = `${farmName} order for ${amount} delivered`;
           break;
         default:
           title = `Order update — ${order.order_number}`;
-          description = `${order.farm_name} order for ${amount} — ${order.status}`;
+          description = `${farmName} order for ${amount} — ${order.status}`;
       }
 
       messages.push({
-        id: order.id,
+        id: doc.id,
         type: 'order',
         title,
         description,
-        from: order.farm_name,
+        from: farmName,
         status: order.status,
         amount: order.total,
         order_number: order.order_number,
@@ -178,136 +154,153 @@ export async function marketRoutes(app: FastifyInstance) {
       });
     }
 
-    for (const notif of notifications) {
-      const desc =
-        notif.type === 'new_inventory'
-          ? `New listing: ${notif.product_name || 'item'} from ${notif.farm_name || 'farm'}`
-          : notif.type === 'price_change'
-          ? `Price changed: ${notif.product_name || 'item'} from ${notif.farm_name || 'farm'}`
-          : notif.type === 'order_update'
-          ? 'Order update'
-          : 'Reminder';
+    const notifsSnap = await app.db
+      .collection('notifications')
+      .where('market_id', '==', marketId)
+      .orderBy('created_at', 'desc')
+      .limit(50)
+      .get();
+
+    for (const doc of notifsSnap.docs) {
+      const notif = doc.data();
+      let farmName = 'Unknown';
+      let productName = '';
+
+      if (notif.inventory_id) {
+        const invDoc = await app.db.collection('inventory').doc(notif.inventory_id).get();
+        if (invDoc.exists) {
+          const inv = invDoc.data()!;
+          const farmDoc = await app.db.collection('farms').doc(inv.farm_id).get();
+          farmName = farmDoc.data()?.name || 'Unknown';
+          const prodDoc = await app.db.collection('products').doc(inv.product_id).get();
+          productName = prodDoc.data()?.name || '';
+        }
+      }
 
       messages.push({
-        id: notif.id,
+        id: doc.id,
         type: 'notification',
-        title: notif.type === 'new_inventory'
-          ? `New inventory from ${notif.farm_name || 'farm'}`
-          : notif.type === 'price_change'
-          ? `Price update from ${notif.farm_name || 'farm'}`
-          : `Notification from ${notif.farm_name || 'farm'}`,
-        description: desc,
-        from: notif.farm_name || 'Unknown',
+        title: `New inventory from ${farmName}`,
+        description: `New listing: ${productName || 'item'} from ${farmName}`,
+        from: farmName,
         status: notif.status,
         notification_type: notif.type,
-        product_name: notif.product_name,
+        product_name: productName,
         timestamp: notif.sent_at || notif.created_at,
       });
     }
 
-    // Sort by timestamp descending
-    messages.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    messages.sort((a, b) => {
+      const aTime = a.timestamp?.toDate?.() || new Date(a.timestamp);
+      const bTime = b.timestamp?.toDate?.() || new Date(b.timestamp);
+      return bTime.getTime() - aTime.getTime();
+    });
 
     return { messages: messages.slice(0, 50) };
   });
 
-  // GET /api/markets/:id/farms — market must own it (or admin)
+  // GET /api/markets/:id/farms
   app.get<{ Params: { id: string } }>('/:id/farms', {
     preHandler: [auth, marketOrAdmin, marketOwner],
   }, async (request) => {
     const marketId = request.params.id;
 
-    const farms = await app.db
-      .selectFrom('farm_market_rels')
-      .innerJoin('farms', 'farms.id', 'farm_market_rels.farm_id')
-      .select([
-        'farms.id',
-        'farms.name',
-        'farms.location',
-        'farms.specialty',
-        'farm_market_rels.id as rel_id',
-        'farm_market_rels.priority',
-        'farm_market_rels.notification_delay_min',
-        'farm_market_rels.active',
-      ])
-      .where('farm_market_rels.market_id', '=', marketId)
-      .orderBy('farm_market_rels.priority', 'asc')
-      .execute();
+    const relsSnap = await app.db
+      .collection('farm_market_rels')
+      .where('market_id', '==', marketId)
+      .orderBy('priority')
+      .get();
 
-    // Enrich each farm with available items, pending orders, and order history
-    const enriched = await Promise.all(
-      farms.map(async (farm) => {
-        // Available items count
-        const availResult = await app.db
-          .selectFrom('inventory')
-          .select((eb) => eb.fn.countAll().as('count'))
-          .where('farm_id', '=', farm.id)
+    const farms = await Promise.all(
+      relsSnap.docs.map(async (relDoc) => {
+        const rel = relDoc.data();
+        const farmDoc = await app.db.collection('farms').doc(rel.farm_id).get();
+        const farm = farmDoc.data() || {};
+
+        const invSnap = await app.db
+          .collection('inventory')
+          .where('farm_id', '==', rel.farm_id)
           .where('status', 'in', ['available', 'partial'])
-          .where('remaining', '>', 0)
-          .executeTakeFirst();
+          .get();
+        const availableItems = invSnap.docs.filter((d) => d.data().remaining > 0).length;
 
-        // Pending orders from this market to this farm
-        const pendingResult = await app.db
-          .selectFrom('orders')
-          .select((eb) => [eb.fn.countAll().as('count'), eb.fn.sum('total').as('total')])
-          .where('farm_id', '=', farm.id)
-          .where('market_id', '=', marketId)
-          .where('status', '=', 'pending')
-          .executeTakeFirst();
+        const ordersSnap = await app.db
+          .collection('orders')
+          .where('farm_id', '==', rel.farm_id)
+          .where('market_id', '==', marketId)
+          .get();
 
-        // Order history (completed/confirmed)
-        const historyResult = await app.db
-          .selectFrom('orders')
-          .select((eb) => [eb.fn.countAll().as('count'), eb.fn.sum('total').as('total')])
-          .where('farm_id', '=', farm.id)
-          .where('market_id', '=', marketId)
-          .where('status', 'in', ['confirmed', 'delivered', 'in_transit'])
-          .executeTakeFirst();
+        let pendingCount = 0, pendingTotal = 0;
+        let historyCount = 0, historyTotal = 0;
+        const recentOrders: any[] = [];
 
-        // Recent orders for timeline
-        const recentOrders = await app.db
-          .selectFrom('orders')
-          .select(['id', 'order_number', 'status', 'total', 'order_date', 'created_at'])
-          .where('farm_id', '=', farm.id)
-          .where('market_id', '=', marketId)
-          .orderBy('created_at', 'desc')
-          .limit(5)
-          .execute();
+        for (const oDoc of ordersSnap.docs) {
+          const o = oDoc.data();
+          if (o.status === 'pending') { pendingCount++; pendingTotal += Number(o.total || 0); }
+          else if (['confirmed', 'delivered', 'in_transit'].includes(o.status)) { historyCount++; historyTotal += Number(o.total || 0); }
+          recentOrders.push({ id: oDoc.id, ...o });
+        }
+
+        recentOrders.sort((a, b) => {
+          const aTime = a.created_at?.toDate?.() || new Date(a.created_at);
+          const bTime = b.created_at?.toDate?.() || new Date(b.created_at);
+          return bTime.getTime() - aTime.getTime();
+        });
 
         return {
-          ...farm,
-          available_items: Number(availResult?.count || 0),
-          pending_orders: Number(pendingResult?.count || 0),
-          pending_total: Number(pendingResult?.total || 0),
-          history_orders: Number(historyResult?.count || 0),
-          history_total: Number(historyResult?.total || 0),
-          recent_orders: recentOrders,
+          id: farmDoc.id,
+          name: farm.name,
+          location: farm.location,
+          specialty: farm.specialty,
+          rel_id: relDoc.id,
+          priority: rel.priority,
+          notification_delay_min: rel.notification_delay_min,
+          active: rel.active,
+          available_items: availableItems,
+          pending_orders: pendingCount,
+          pending_total: pendingTotal,
+          history_orders: historyCount,
+          history_total: historyTotal,
+          recent_orders: recentOrders.slice(0, 5).map((o) => ({
+            id: o.id,
+            order_number: o.order_number,
+            status: o.status,
+            total: o.total,
+            order_date: o.order_date,
+            created_at: o.created_at,
+          })),
         };
       }),
     );
 
-    return { farms: enriched };
+    return { farms };
   });
 
-  // GET /api/markets/:id/orders — market must own it (or admin)
+  // GET /api/markets/:id/orders
   app.get<{ Params: { id: string } }>('/:id/orders', {
     preHandler: [auth, marketOrAdmin, marketOwner],
   }, async (request) => {
-    const orders = await app.db
-      .selectFrom('orders')
-      .innerJoin('farms', 'farms.id', 'orders.farm_id')
-      .select([
-        'orders.id',
-        'orders.order_number',
-        'orders.status',
-        'orders.total',
-        'orders.order_date',
-        'farms.name as farm_name',
-      ])
-      .where('orders.market_id', '=', request.params.id)
-      .orderBy('orders.created_at', 'desc')
+    const snapshot = await app.db
+      .collection('orders')
+      .where('market_id', '==', request.params.id)
+      .orderBy('created_at', 'desc')
       .limit(50)
-      .execute();
+      .get();
+
+    const orders = await Promise.all(
+      snapshot.docs.map(async (doc) => {
+        const order = doc.data();
+        const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+        return {
+          id: doc.id,
+          order_number: order.order_number,
+          status: order.status,
+          total: order.total,
+          order_date: order.order_date,
+          farm_name: farmDoc.data()?.name || 'Unknown',
+        };
+      }),
+    );
 
     return { orders };
   });

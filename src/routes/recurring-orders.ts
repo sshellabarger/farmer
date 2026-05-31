@@ -1,50 +1,54 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { v4 as uuid } from 'uuid';
 
 export async function recurringOrderRoutes(app: FastifyInstance) {
   // GET /api/recurring-orders?farm_id=&market_id=
   app.get<{ Querystring: Record<string, string> }>('/', async (request) => {
-    let query = app.db
-      .selectFrom('recurring_orders')
-      .innerJoin('farms', 'farms.id', 'recurring_orders.farm_id')
-      .innerJoin('markets', 'markets.id', 'recurring_orders.market_id')
-      .select([
-        'recurring_orders.id',
-        'recurring_orders.farm_id',
-        'recurring_orders.market_id',
-        'farms.name as farm_name',
-        'markets.name as market_name',
-        'recurring_orders.frequency',
-        'recurring_orders.schedule_days',
-        'recurring_orders.next_delivery',
-        'recurring_orders.active',
-        'recurring_orders.created_at',
-      ]);
-
     const { farm_id, market_id } = request.query;
-    if (farm_id) query = query.where('recurring_orders.farm_id', '=', farm_id);
-    if (market_id) query = query.where('recurring_orders.market_id', '=', market_id);
+    let query: FirebaseFirestore.Query = app.db.collection('recurring_orders');
+    if (farm_id) query = query.where('farm_id', '==', farm_id);
+    if (market_id) query = query.where('market_id', '==', market_id);
 
-    const orders = await query.orderBy('recurring_orders.next_delivery', 'asc').execute();
+    const snapshot = await query.orderBy('next_delivery').get();
 
-    // Load items for each recurring order
     const result = await Promise.all(
-      orders.map(async (ro) => {
-        const items = await app.db
-          .selectFrom('recurring_order_items')
-          .innerJoin('products', 'products.id', 'recurring_order_items.product_id')
-          .select([
-            'recurring_order_items.id',
-            'recurring_order_items.product_id',
-            'products.name as product_name',
-            'recurring_order_items.quantity',
-            'recurring_order_items.unit',
-          ])
-          .where('recurring_order_items.recurring_order_id', '=', ro.id)
-          .execute();
+      snapshot.docs.map(async (doc) => {
+        const ro = doc.data();
+        const farmDoc = await app.db.collection('farms').doc(ro.farm_id).get();
+        const marketDoc = await app.db.collection('markets').doc(ro.market_id).get();
 
-        return { ...ro, items };
-      })
+        const itemsSnap = await app.db
+          .collection('recurring_orders').doc(doc.id).collection('recurring_order_items').get();
+
+        const items = await Promise.all(
+          itemsSnap.docs.map(async (itemDoc) => {
+            const item = itemDoc.data();
+            const prodDoc = await app.db.collection('products').doc(item.product_id).get();
+            return {
+              id: itemDoc.id,
+              product_id: item.product_id,
+              product_name: prodDoc.data()?.name || 'Unknown',
+              quantity: item.quantity,
+              unit: item.unit,
+            };
+          }),
+        );
+
+        return {
+          id: doc.id,
+          farm_id: ro.farm_id,
+          market_id: ro.market_id,
+          farm_name: farmDoc.data()?.name || 'Unknown',
+          market_name: marketDoc.data()?.name || 'Unknown',
+          frequency: ro.frequency,
+          schedule_days: ro.schedule_days,
+          next_delivery: ro.next_delivery,
+          active: ro.active,
+          created_at: ro.created_at,
+          items,
+        };
+      }),
     );
 
     return { recurring_orders: result };
@@ -53,14 +57,14 @@ export async function recurringOrderRoutes(app: FastifyInstance) {
   // POST /api/recurring-orders
   app.post('/', async (request, reply) => {
     const schema = z.object({
-      farm_id: z.string().uuid(),
-      market_id: z.string().uuid(),
+      farm_id: z.string(),
+      market_id: z.string(),
       frequency: z.enum(['daily', 'twice_weekly', 'weekly', 'biweekly', 'monthly']),
       schedule_days: z.string().min(1),
-      next_delivery: z.string(), // YYYY-MM-DD
+      next_delivery: z.string(),
       items: z.array(
         z.object({
-          product_id: z.string().uuid(),
+          product_id: z.string(),
           quantity: z.number().positive(),
           unit: z.string().min(1),
         })
@@ -68,38 +72,35 @@ export async function recurringOrderRoutes(app: FastifyInstance) {
     });
 
     const data = schema.parse(request.body);
+    const id = uuid();
+    const ro = {
+      farm_id: data.farm_id,
+      market_id: data.market_id,
+      frequency: data.frequency,
+      schedule_days: data.schedule_days,
+      next_delivery: new Date(data.next_delivery),
+      active: true,
+      created_at: new Date(),
+    };
 
-    const [ro] = await app.db
-      .insertInto('recurring_orders')
-      .values({
-        farm_id: data.farm_id,
-        market_id: data.market_id,
-        frequency: data.frequency,
-        schedule_days: data.schedule_days,
-        next_delivery: new Date(data.next_delivery),
-      })
-      .returningAll()
-      .execute();
+    await app.db.collection('recurring_orders').doc(id).set(ro);
 
-    // Insert items
     for (const item of data.items) {
       await app.db
-        .insertInto('recurring_order_items')
-        .values({
-          recurring_order_id: ro.id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          unit: item.unit,
-        })
-        .execute();
+        .collection('recurring_orders').doc(id).collection('recurring_order_items')
+        .doc(uuid()).set(item);
     }
 
-    reply.status(201).send(ro);
+    reply.status(201).send({ id, ...ro });
   });
 
   // PUT /api/recurring-orders/:id
   app.put<{ Params: { id: string } }>('/:id', async (request, reply) => {
     const { frequency, schedule_days, next_delivery, active, items } = request.body as Record<string, any>;
+
+    const ref = app.db.collection('recurring_orders').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Recurring order not found');
 
     const updates: Record<string, unknown> = {};
     if (frequency !== undefined) updates.frequency = frequency;
@@ -107,34 +108,14 @@ export async function recurringOrderRoutes(app: FastifyInstance) {
     if (next_delivery !== undefined) updates.next_delivery = new Date(next_delivery);
     if (active !== undefined) updates.active = active;
 
-    if (Object.keys(updates).length > 0) {
-      const [updated] = await app.db
-        .updateTable('recurring_orders')
-        .set(updates)
-        .where('id', '=', request.params.id)
-        .returningAll()
-        .execute();
+    if (Object.keys(updates).length > 0) await ref.update(updates);
 
-      if (!updated) return reply.notFound('Recurring order not found');
-    }
-
-    // Replace items if provided
     if (items && Array.isArray(items)) {
-      await app.db
-        .deleteFrom('recurring_order_items')
-        .where('recurring_order_id', '=', request.params.id)
-        .execute();
+      const itemsSnap = await ref.collection('recurring_order_items').get();
+      for (const d of itemsSnap.docs) await d.ref.delete();
 
       for (const item of items) {
-        await app.db
-          .insertInto('recurring_order_items')
-          .values({
-            recurring_order_id: request.params.id,
-            product_id: item.product_id,
-            quantity: item.quantity,
-            unit: item.unit,
-          })
-          .execute();
+        await ref.collection('recurring_order_items').doc(uuid()).set(item);
       }
     }
 
@@ -143,7 +124,10 @@ export async function recurringOrderRoutes(app: FastifyInstance) {
 
   // DELETE /api/recurring-orders/:id
   app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
-    await app.db.deleteFrom('recurring_orders').where('id', '=', request.params.id).execute();
+    const ref = app.db.collection('recurring_orders').doc(request.params.id);
+    const itemsSnap = await ref.collection('recurring_order_items').get();
+    for (const d of itemsSnap.docs) await d.ref.delete();
+    await ref.delete();
     reply.status(204).send();
   });
 }

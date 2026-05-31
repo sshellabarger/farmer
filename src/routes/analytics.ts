@@ -1,141 +1,146 @@
 import type { FastifyInstance } from 'fastify';
-import { sql } from 'kysely';
 
-function dateFilter(interval: string) {
-  return sql`CURRENT_DATE - interval '${sql.raw(interval)}'`;
+function getPeriodStart(period: string): Date {
+  const now = new Date();
+  switch (period) {
+    case 'week': return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    case 'quarter': return new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    default: return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  }
 }
 
 export async function analyticsRoutes(app: FastifyInstance) {
   // GET /api/analytics/revenue?farm_id=&period=week|month|quarter
   app.get<{ Querystring: Record<string, string> }>('/revenue', async (request) => {
     const { farm_id, period = 'week' } = request.query;
+    const periodStart = getPeriodStart(period);
+    const periodMs = new Date().getTime() - periodStart.getTime();
+    const prevStart = new Date(periodStart.getTime() - periodMs);
 
-    const intervals: Record<string, string> = {
-      week: '7 days',
-      month: '30 days',
-      quarter: '90 days',
-    };
-    const interval = intervals[period] || '7 days';
+    let query: FirebaseFirestore.Query = app.db.collection('orders');
+    if (farm_id) query = query.where('farm_id', '==', farm_id);
+    query = query.where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
 
-    let query = app.db
-      .selectFrom('orders')
-      .select([
-        sql<string>`date_trunc('day', orders.order_date)`.as('day'),
-        sql<number>`sum(orders.total)`.as('revenue'),
-        sql<number>`count(*)`.as('order_count'),
-      ])
-      .where('orders.status', 'in', ['confirmed', 'delivered', 'in_transit'])
-      .where('orders.order_date', '>=', dateFilter(interval) as any)
-      .groupBy(sql`date_trunc('day', orders.order_date)`)
-      .orderBy(sql`date_trunc('day', orders.order_date)`, 'asc');
+    const snapshot = await query.get();
 
-    if (farm_id) {
-      query = query.where('orders.farm_id', '=', farm_id);
+    let totalRevenue = 0;
+    let totalOrders = 0;
+    let prevRevenue = 0;
+    const dailyMap = new Map<string, { revenue: number; order_count: number }>();
+
+    for (const doc of snapshot.docs) {
+      const order = doc.data();
+      const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
+
+      if (orderDate >= periodStart) {
+        totalRevenue += Number(order.total || 0);
+        totalOrders++;
+        const dayKey = orderDate.toISOString().slice(0, 10);
+        const entry = dailyMap.get(dayKey) || { revenue: 0, order_count: 0 };
+        entry.revenue += Number(order.total || 0);
+        entry.order_count++;
+        dailyMap.set(dayKey, entry);
+      } else if (orderDate >= prevStart && orderDate < periodStart) {
+        prevRevenue += Number(order.total || 0);
+      }
     }
 
-    const daily = await query.execute();
+    const changePercent = prevRevenue > 0
+      ? Math.round(((totalRevenue - prevRevenue) / prevRevenue) * 1000) / 10
+      : 0;
 
-    // Totals
-    let totalsQuery = app.db
-      .selectFrom('orders')
-      .select([
-        sql<number>`coalesce(sum(total), 0)`.as('total_revenue'),
-        sql<number>`count(*)`.as('total_orders'),
-        sql<number>`coalesce(avg(total), 0)`.as('avg_order_value'),
-      ])
-      .where('status', 'in', ['confirmed', 'delivered', 'in_transit'])
-      .where('order_date', '>=', dateFilter(interval) as any);
-
-    if (farm_id) {
-      totalsQuery = totalsQuery.where('farm_id', '=', farm_id);
-    }
-
-    const totals = await totalsQuery.executeTakeFirst();
-
-    // Previous period for comparison
-    let prevQuery = app.db
-      .selectFrom('orders')
-      .select([sql<number>`coalesce(sum(total), 0)`.as('total_revenue')])
-      .where('status', 'in', ['confirmed', 'delivered', 'in_transit'])
-      .where('order_date', '>=', sql`CURRENT_DATE - interval '${sql.raw(interval)}' * 2` as any)
-      .where('order_date', '<', dateFilter(interval) as any);
-
-    if (farm_id) {
-      prevQuery = prevQuery.where('farm_id', '=', farm_id);
-    }
-
-    const prev = await prevQuery.executeTakeFirst();
-
-    const currentRev = Number(totals?.total_revenue || 0);
-    const prevRev = Number(prev?.total_revenue || 0);
-    const changePercent = prevRev > 0 ? ((currentRev - prevRev) / prevRev) * 100 : 0;
+    const daily = Array.from(dailyMap.entries())
+      .map(([day, data]) => ({ day, ...data }))
+      .sort((a, b) => a.day.localeCompare(b.day));
 
     return {
       period,
-      ...totals,
-      previous_revenue: prevRev,
-      change_percent: Math.round(changePercent * 10) / 10,
+      total_revenue: totalRevenue,
+      total_orders: totalOrders,
+      avg_order_value: totalOrders > 0 ? Math.round((totalRevenue / totalOrders) * 100) / 100 : 0,
+      previous_revenue: prevRevenue,
+      change_percent: changePercent,
       daily,
     };
   });
 
-  // GET /api/analytics/top-products?farm_id=&period=week|month
+  // GET /api/analytics/top-products?farm_id=&period=month
   app.get<{ Querystring: Record<string, string> }>('/top-products', async (request) => {
     const { farm_id, period = 'month' } = request.query;
-    const interval = period === 'week' ? '7 days' : '30 days';
+    const periodStart = getPeriodStart(period);
 
-    let query = app.db
-      .selectFrom('order_items')
-      .innerJoin('orders', 'orders.id', 'order_items.order_id')
-      .select([
-        'order_items.product_name',
-        sql<number>`sum(order_items.line_total)`.as('revenue'),
-        sql<number>`sum(order_items.quantity)`.as('total_quantity'),
-        'order_items.unit',
-      ])
-      .where('orders.status', 'in', ['confirmed', 'delivered', 'in_transit'])
-      .where('orders.order_date', '>=', dateFilter(interval) as any)
-      .groupBy(['order_items.product_name', 'order_items.unit'])
-      .orderBy(sql`sum(order_items.line_total)`, 'desc')
-      .limit(10);
+    let query: FirebaseFirestore.Query = app.db.collection('orders');
+    if (farm_id) query = query.where('farm_id', '==', farm_id);
+    query = query.where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
 
-    if (farm_id) {
-      query = query.where('orders.farm_id', '=', farm_id);
+    const ordersSnap = await query.get();
+    const productMap = new Map<string, { revenue: number; total_quantity: number; unit: string }>();
+
+    for (const orderDoc of ordersSnap.docs) {
+      const order = orderDoc.data();
+      const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
+      if (orderDate < periodStart) continue;
+
+      const itemsSnap = await app.db
+        .collection('orders').doc(orderDoc.id).collection('order_items').get();
+
+      for (const itemDoc of itemsSnap.docs) {
+        const item = itemDoc.data();
+        const key = `${item.product_name}|${item.unit}`;
+        const entry = productMap.get(key) || { revenue: 0, total_quantity: 0, unit: item.unit };
+        entry.revenue += Number(item.line_total || 0);
+        entry.total_quantity += Number(item.quantity || 0);
+        productMap.set(key, entry);
+      }
     }
 
-    const products = await query.execute();
+    const products = Array.from(productMap.entries())
+      .map(([key, data]) => ({ product_name: key.split('|')[0], ...data }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
     return { period, products };
   });
 
   // GET /api/analytics/market-breakdown?farm_id=&period=month
   app.get<{ Querystring: Record<string, string> }>('/market-breakdown', async (request) => {
     const { farm_id, period = 'month' } = request.query;
-    const interval = period === 'week' ? '7 days' : period === 'quarter' ? '90 days' : '30 days';
+    const periodStart = getPeriodStart(period);
 
-    let query = app.db
-      .selectFrom('orders')
-      .innerJoin('markets', 'markets.id', 'orders.market_id')
-      .select([
-        'markets.id as market_id',
-        'markets.name as market_name',
-        sql<number>`sum(orders.total)`.as('revenue'),
-        sql<number>`count(*)`.as('order_count'),
-      ])
-      .where('orders.status', 'in', ['confirmed', 'delivered', 'in_transit'])
-      .where('orders.order_date', '>=', dateFilter(interval) as any)
-      .groupBy(['markets.id', 'markets.name'])
-      .orderBy(sql`sum(orders.total)`, 'desc');
+    let query: FirebaseFirestore.Query = app.db.collection('orders');
+    if (farm_id) query = query.where('farm_id', '==', farm_id);
+    query = query.where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
 
-    if (farm_id) {
-      query = query.where('orders.farm_id', '=', farm_id);
+    const snapshot = await query.get();
+    const marketMap = new Map<string, { revenue: number; order_count: number }>();
+
+    for (const doc of snapshot.docs) {
+      const order = doc.data();
+      const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
+      if (orderDate < periodStart) continue;
+
+      const entry = marketMap.get(order.market_id) || { revenue: 0, order_count: 0 };
+      entry.revenue += Number(order.total || 0);
+      entry.order_count++;
+      marketMap.set(order.market_id, entry);
     }
 
-    const markets = await query.execute();
+    const marketsData = await Promise.all(
+      Array.from(marketMap.entries()).map(async ([marketId, data]) => {
+        const marketDoc = await app.db.collection('markets').doc(marketId).get();
+        return {
+          market_id: marketId,
+          market_name: marketDoc.data()?.name || 'Unknown',
+          ...data,
+        };
+      }),
+    );
 
-    const totalRevenue = markets.reduce((sum, m) => sum + Number(m.revenue), 0);
-    const withPercent = markets.map((m) => ({
+    marketsData.sort((a, b) => b.revenue - a.revenue);
+    const totalRevenue = marketsData.reduce((sum, m) => sum + m.revenue, 0);
+    const withPercent = marketsData.map((m) => ({
       ...m,
-      percent: totalRevenue > 0 ? Math.round((Number(m.revenue) / totalRevenue) * 100) : 0,
+      percent: totalRevenue > 0 ? Math.round((m.revenue / totalRevenue) * 100) : 0,
     }));
 
     return { period, total_revenue: totalRevenue, markets: withPercent };

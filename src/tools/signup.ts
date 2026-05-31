@@ -1,9 +1,7 @@
 import type { ToolContext } from './index.js';
+import { v4 as uuid } from 'uuid';
 
-export async function userSignup(
-  input: Record<string, unknown>,
-  ctx: ToolContext,
-): Promise<unknown> {
+export async function userSignup(input: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
   const { db, phone } = ctx;
 
   const name = input.name as string;
@@ -18,92 +16,47 @@ export async function userSignup(
     return { error: 'missing_fields', message: 'Need name, role, and location to sign up.' };
   }
 
-  // Check if phone is already registered
-  const existing = await db
-    .selectFrom('users')
-    .select(['id', 'name'])
-    .where('phone', '=', phone)
-    .executeTakeFirst();
-
-  if (existing) {
-    return {
-      error: 'already_registered',
-      user_id: existing.id,
-      name: existing.name,
-      message: `This phone is already registered to ${existing.name}.`,
-    };
+  const existingSnap = await db.collection('users').where('phone', '==', phone).limit(1).get();
+  if (!existingSnap.empty) {
+    const existing = existingSnap.docs[0];
+    return { error: 'already_registered', user_id: existing.id, name: existing.data().name, message: `This phone is already registered to ${existing.data().name}.` };
   }
 
-  // Create user
-  const [user] = await db
-    .insertInto('users')
-    .values({
-      name,
-      phone,
-      role: role as any,
-      email: null,
-    })
-    .returningAll()
-    .execute();
+  const userId = uuid();
+  await db.collection('users').doc(userId).set({
+    name, phone, role, email: null, created_at: new Date(), updated_at: new Date(),
+  });
 
-  const result: Record<string, unknown> = {
-    success: true,
-    user: { id: user.id, name: user.name, role: user.role },
-  };
+  const result: Record<string, unknown> = { success: true, user: { id: userId, name, role } };
 
-  // Create farm if farmer or both
   if (role === 'farmer' || role === 'both') {
-    const [farm] = await db
-      .insertInto('farms')
-      .values({
-        user_id: user.id,
-        name: farmName,
-        location,
-        specialty,
-      })
-      .returningAll()
-      .execute();
-    result.farm = { id: farm.id, name: farm.name };
+    const farmId = uuid();
+    await db.collection('farms').doc(farmId).set({
+      user_id: userId, name: farmName, location, specialty,
+      active: true, timezone: 'America/Chicago', delivery_schedule: [], contacts: [],
+      created_at: new Date(), updated_at: new Date(),
+    });
+    result.farm = { id: farmId, name: farmName };
   }
 
-  // Create market if market or both
   if (role === 'market' || role === 'both') {
-    const [market] = await db
-      .insertInto('markets')
-      .values({
-        user_id: user.id,
-        name: marketName,
-        location,
-        type: marketType as any,
-        delivery_pref: 'either' as any,
-      })
-      .returningAll()
-      .execute();
-    result.market = { id: market.id, name: market.name };
+    const marketId = uuid();
+    await db.collection('markets').doc(marketId).set({
+      user_id: userId, name: marketName, location, type: marketType, delivery_pref: 'either',
+      active: true, contacts: [], created_at: new Date(), updated_at: new Date(),
+    });
+    result.market = { id: marketId, name: marketName };
   }
 
-  // Take ownership of existing anonymous conversation, or create a new one
-  const existingConv = await db
-    .selectFrom('conversations')
-    .select('id')
-    .where('phone_number', '=', phone)
-    .executeTakeFirst();
-
-  if (existingConv) {
-    await db
-      .updateTable('conversations')
-      .set({ user_id: user.id })
-      .where('id', '=', existingConv.id)
-      .execute();
+  // Take ownership of existing conversation
+  const convoSnap = await db.collection('conversations').where('phone_number', '==', phone).limit(1).get();
+  if (!convoSnap.empty) {
+    await convoSnap.docs[0].ref.update({ user_id: userId });
   } else {
-    await db
-      .insertInto('conversations')
-      .values({
-        user_id: user.id,
-        phone_number: phone,
-        context: 'general' as any,
-      })
-      .execute();
+    await db.collection('conversations').doc(uuid()).set({
+      user_id: userId, phone_number: phone, context: 'general',
+      last_message_at: new Date(), created_at: new Date(),
+    });
   }
 
   result.message = `Welcome to FarmLink, ${name}! Account created as ${role}.`;

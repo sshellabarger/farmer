@@ -1,11 +1,14 @@
 import type { ToolContext } from './index.js';
+import { v4 as uuid } from 'uuid';
 
 export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
   if (!userId) throw new Error('User not registered');
 
-  const farm = await db.selectFrom('farms').selectAll().where('user_id', '=', userId).executeTakeFirst();
-  if (!farm) throw new Error('No farm found for this user');
+  const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+  if (farmSnap.empty) throw new Error('No farm found for this user');
+  const farmId = farmSnap.docs[0].id;
+  const farm = farmSnap.docs[0].data();
 
   const productName = input.product as string;
   const quantity = input.quantity as number;
@@ -15,51 +18,54 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
   const harvestDate = input.harvest_date as string | undefined;
 
   // Find or create product
-  let product = await db
-    .selectFrom('products')
-    .selectAll()
-    .where('farm_id', '=', farm.id)
-    .where('name', 'ilike', productName)
-    .executeTakeFirst();
+  const prodSnap = await db.collection('products')
+    .where('farm_id', '==', farmId)
+    .get();
 
-  if (!product) {
-    const [newProduct] = await db
-      .insertInto('products')
-      .values({
-        farm_id: farm.id,
-        name: productName,
-        category,
-        unit,
-        default_price: price ?? null,
-        seasonal: false,
-      })
-      .returningAll()
-      .execute();
-    product = newProduct;
+  let productId: string | undefined;
+  let defaultPrice: number | null = null;
+
+  for (const doc of prodSnap.docs) {
+    if (doc.data().name.toLowerCase() === productName.toLowerCase()) {
+      productId = doc.id;
+      defaultPrice = doc.data().default_price;
+      break;
+    }
   }
 
-  const finalPrice = price ?? (product.default_price ? Number(product.default_price) : undefined);
+  if (!productId) {
+    productId = uuid();
+    await db.collection('products').doc(productId).set({
+      farm_id: farmId,
+      name: productName,
+      category,
+      unit,
+      default_price: price ?? null,
+      seasonal: false,
+      created_at: new Date(),
+    });
+  }
+
+  const finalPrice = price ?? (defaultPrice ? Number(defaultPrice) : undefined);
   if (!finalPrice) {
     return { needs_price: true, product_name: productName, message: 'What price per ' + unit + '?' };
   }
 
-  const [inventory] = await db
-    .insertInto('inventory')
-    .values({
-      farm_id: farm.id,
-      product_id: product.id,
-      quantity,
-      remaining: quantity,
-      price: finalPrice,
-      harvest_date: harvestDate ? new Date(harvestDate) : null,
-      status: 'available',
-    })
-    .returningAll()
-    .execute();
+  const invId = uuid();
+  await db.collection('inventory').doc(invId).set({
+    farm_id: farmId,
+    product_id: productId,
+    quantity,
+    remaining: quantity,
+    price: finalPrice,
+    harvest_date: harvestDate ? new Date(harvestDate) : null,
+    status: 'available',
+    listed_at: new Date(),
+  });
 
   return {
     success: true,
-    inventory_id: inventory.id,
+    inventory_id: invId,
     product_name: productName,
     quantity,
     unit,
@@ -82,56 +88,82 @@ export async function inventoryUpdate(input: Record<string, unknown>, ctx: ToolC
     return { error: 'No fields to update' };
   }
 
-  const [updated] = await db
-    .updateTable('inventory')
-    .set(updates)
-    .where('id', '=', inventoryId)
-    .returningAll()
-    .execute();
+  const ref = db.collection('inventory').doc(inventoryId);
+  const doc = await ref.get();
+  if (!doc.exists) throw new Error('Inventory not found');
 
-  if (!updated) throw new Error('Inventory not found');
+  await ref.update(updates);
+  const updated = await ref.get();
+  return { success: true, inventory: { id: updated.id, ...updated.data() } };
+}
 
-  return { success: true, inventory: updated };
+export async function inventoryClearAll(input: Record<string, unknown>, ctx: ToolContext) {
+  const { db, userId } = ctx;
+  if (!userId) throw new Error('User not registered');
+
+  const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+  if (farmSnap.empty) throw new Error('No farm found for this user');
+  const farmId = farmSnap.docs[0].id;
+
+  const activeSnap = await db.collection('inventory')
+    .where('farm_id', '==', farmId)
+    .where('status', 'in', ['available', 'partial'])
+    .get();
+
+  if (activeSnap.empty) {
+    return { success: true, cleared: 0, message: 'No active inventory to clear.' };
+  }
+
+  const batch = db.batch();
+  for (const doc of activeSnap.docs) {
+    batch.update(doc.ref, { remaining: 0, status: 'sold' });
+  }
+  await batch.commit();
+
+  return { success: true, cleared: activeSnap.size, message: `Cleared ${activeSnap.size} inventory item(s).` };
 }
 
 export async function inventoryQuery(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
 
-  let query = db
-    .selectFrom('inventory')
-    .innerJoin('products', 'products.id', 'inventory.product_id')
-    .innerJoin('farms', 'farms.id', 'inventory.farm_id')
-    .select([
-      'inventory.id',
-      'products.name as product_name',
-      'products.category',
-      'farms.name as farm_name',
-      'inventory.remaining',
-      'products.unit',
-      'inventory.price',
-      'inventory.status',
-      'inventory.harvest_date',
-    ]);
+  let farmId: string | undefined = input.farm_id as string | undefined;
 
-  if (input.farm_id) {
-    query = query.where('inventory.farm_id', '=', input.farm_id as string);
-  } else if (userId) {
-    // Default to user's farm
-    const farm = await db.selectFrom('farms').select('id').where('user_id', '=', userId).executeTakeFirst();
-    if (farm) query = query.where('inventory.farm_id', '=', farm.id);
+  if (!farmId && userId) {
+    const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    if (!farmSnap.empty) farmId = farmSnap.docs[0].id;
   }
 
-  if (input.category) {
-    query = query.where('products.category', 'ilike', `%${input.category}%`);
-  }
-  if (input.status) {
-    query = query.where('inventory.status', '=', input.status as any);
-  }
-  if (input.search) {
-    query = query.where('products.name', 'ilike', `%${input.search}%`);
-  }
+  let query: FirebaseFirestore.Query = db.collection('inventory')
+    .where('status', 'in', ['available', 'partial']);
 
-  const results = await query.where('inventory.status', 'in', ['available', 'partial']).execute();
+  if (farmId) query = query.where('farm_id', '==', farmId);
 
-  return { count: results.length, inventory: results };
+  const snapshot = await query.get();
+
+  const results = await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const inv = doc.data();
+      const prodDoc = await db.collection('products').doc(inv.product_id).get();
+      const product = prodDoc.data() || {};
+      const farmDoc = await db.collection('farms').doc(inv.farm_id).get();
+
+      if (input.category && !product.category?.toLowerCase().includes((input.category as string).toLowerCase())) return null;
+      if (input.search && !product.name?.toLowerCase().includes((input.search as string).toLowerCase())) return null;
+
+      return {
+        id: doc.id,
+        product_name: product.name || 'Unknown',
+        category: product.category || '',
+        farm_name: farmDoc.data()?.name || 'Unknown',
+        remaining: inv.remaining,
+        unit: product.unit || '',
+        price: inv.price,
+        status: inv.status,
+        harvest_date: inv.harvest_date,
+      };
+    }),
+  );
+
+  const filtered = results.filter(Boolean);
+  return { count: filtered.length, inventory: filtered };
 }

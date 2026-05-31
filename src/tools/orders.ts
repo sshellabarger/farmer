@@ -1,5 +1,5 @@
-import { sql } from 'kysely';
 import type { ToolContext } from './index.js';
+import { v4 as uuid } from 'uuid';
 import { calculateNextDeliveryDate } from '../services/order-notifications.js';
 
 interface OrderItem {
@@ -15,7 +15,6 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
   const notes = input.notes as string | undefined;
   const deliveryType = input.delivery_type as 'pickup' | 'delivery' | undefined;
 
-  // Calculate totals and validate inventory
   let total = 0;
   const orderItems: Array<{
     inventory_id: string;
@@ -27,58 +26,40 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
   }> = [];
 
   for (const item of items) {
-    const inv = await db
-      .selectFrom('inventory')
-      .innerJoin('products', 'products.id', 'inventory.product_id')
-      .select([
-        'inventory.id',
-        'products.name',
-        'products.unit',
-        'inventory.price',
-        'inventory.remaining',
-        'inventory.status',
-      ])
-      .where('inventory.id', '=', item.inventory_id)
-      .executeTakeFirst();
+    const invDoc = await db.collection('inventory').doc(item.inventory_id).get();
+    if (!invDoc.exists) throw new Error(`Inventory ${item.inventory_id} not found`);
+    const inv = invDoc.data()!;
 
-    if (!inv) throw new Error(`Inventory ${item.inventory_id} not found`);
-    if (inv.status === 'sold') throw new Error(`${inv.name} is sold out`);
-    if (Number(inv.remaining) < item.quantity) {
-      throw new Error(`Only ${inv.remaining} ${inv.unit} of ${inv.name} available`);
-    }
+    if (inv.status === 'sold') throw new Error(`Item is sold out`);
+    if (inv.remaining < item.quantity) throw new Error(`Only ${inv.remaining} available`);
+
+    const prodDoc = await db.collection('products').doc(inv.product_id).get();
+    const product = prodDoc.data() || {};
 
     const lineTotal = Number(inv.price) * item.quantity;
     total += lineTotal;
 
     orderItems.push({
-      inventory_id: inv.id,
-      product_name: inv.name,
+      inventory_id: invDoc.id,
+      product_name: product.name || 'Unknown',
       quantity: item.quantity,
-      unit: inv.unit,
+      unit: product.unit || '',
       unit_price: Number(inv.price),
       line_total: lineTotal,
     });
   }
 
-  // Calculate delivery date from farm's schedule
   let scheduledDeliveryAt: Date | null = null;
   let deliveryTimeWindow: string | null = null;
 
   if (deliveryType) {
-    const farm = await db
-      .selectFrom('farms')
-      .select(['delivery_schedule', 'location'])
-      .where('id', '=', farmId)
-      .executeTakeFirst();
+    const farmDoc = await db.collection('farms').doc(farmId).get();
+    const farm = farmDoc.data();
+    const marketDoc = await db.collection('markets').doc(marketId).get();
+    const market = marketDoc.data();
 
-    const market = await db
-      .selectFrom('markets')
-      .select(['location'])
-      .where('id', '=', marketId)
-      .executeTakeFirst();
-
-    if (farm?.delivery_schedule && Array.isArray(farm.delivery_schedule) && farm.delivery_schedule.length > 0) {
-      const slot = calculateNextDeliveryDate(farm.delivery_schedule as any, deliveryType, market?.location);
+    if (farm?.delivery_schedule?.length > 0) {
+      const slot = calculateNextDeliveryDate(farm!.delivery_schedule, deliveryType, market?.location);
       if (slot) {
         scheduledDeliveryAt = slot.date;
         deliveryTimeWindow = slot.timeWindow;
@@ -86,42 +67,37 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
     }
   }
 
-  // Create order
-  const [order] = await db
-    .insertInto('orders')
-    .values({
-      farm_id: farmId,
-      market_id: marketId,
-      total,
-      delivery_type: deliveryType ?? null,
-      scheduled_delivery_at: scheduledDeliveryAt,
-      notes: notes ?? null,
-    })
-    .returningAll()
-    .execute();
+  const orderId = uuid();
+  const orderNumber = `ORD-${Date.now().toString(36).toUpperCase()}`;
+  await db.collection('orders').doc(orderId).set({
+    farm_id: farmId,
+    market_id: marketId,
+    order_number: orderNumber,
+    status: 'pending',
+    total,
+    order_date: new Date(),
+    delivery_type: deliveryType ?? null,
+    scheduled_delivery_at: scheduledDeliveryAt,
+    notes: notes ?? null,
+    created_at: new Date(),
+    updated_at: new Date(),
+  });
 
-  // Create order items
   for (const oi of orderItems) {
-    await db
-      .insertInto('order_items')
-      .values({ order_id: order.id, ...oi })
-      .execute();
+    await db.collection('orders').doc(orderId).collection('order_items').doc(uuid()).set(oi);
 
-    // Decrement inventory
-    await db
-      .updateTable('inventory')
-      .set({
-        remaining: sql`remaining - ${oi.quantity}`,
-        status: sql`CASE WHEN remaining - ${oi.quantity} <= 0 THEN 'sold'::inventory_status WHEN remaining - ${oi.quantity} < quantity THEN 'partial'::inventory_status ELSE status END`,
-      })
-      .where('id', '=', oi.inventory_id)
-      .execute();
+    const invRef = db.collection('inventory').doc(oi.inventory_id);
+    const invDoc = await invRef.get();
+    const inv = invDoc.data()!;
+    const newRemaining = inv.remaining - oi.quantity;
+    const newStatus = newRemaining <= 0 ? 'sold' : newRemaining < inv.quantity ? 'partial' : 'available';
+    await invRef.update({ remaining: Math.max(0, newRemaining), status: newStatus });
   }
 
   return {
     success: true,
-    order_id: order.id,
-    order_number: order.order_number,
+    order_id: orderId,
+    order_number: orderNumber,
     total,
     items_count: orderItems.length,
     status: 'pending',
@@ -135,92 +111,73 @@ export async function orderUpdate(input: Record<string, unknown>, ctx: ToolConte
   const { db, userId } = ctx;
   const orderId = input.order_id as string;
 
-  // Load the order to check current status and parties
-  const order = await db
-    .selectFrom('orders')
-    .select(['id', 'status', 'farm_id', 'market_id'])
-    .where('id', '=', orderId)
-    .executeTakeFirst();
+  const orderDoc = await db.collection('orders').doc(orderId).get();
+  if (!orderDoc.exists) throw new Error('Order not found');
+  const order = orderDoc.data()!;
 
-  if (!order) throw new Error('Order not found');
-
-  // Enforce business rules: markets can only cancel/modify pending orders;
-  // once confirmed, only the farm can update status
   if (userId && input.status) {
-    const userFarm = await db.selectFrom('farms').select('id').where('user_id', '=', userId).executeTakeFirst();
-    const userMarket = await db.selectFrom('markets').select('id').where('user_id', '=', userId).executeTakeFirst();
-    const isFarmParty = !!userFarm && order.farm_id === userFarm.id;
-    const isMarketParty = !!userMarket && order.market_id === userMarket.id;
+    const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    const marketSnap = await db.collection('markets').where('user_id', '==', userId).limit(1).get();
+    const isFarmParty = !farmSnap.empty && order.farm_id === farmSnap.docs[0].id;
+    const isMarketParty = !marketSnap.empty && order.market_id === marketSnap.docs[0].id;
 
     if (order.status === 'pending') {
-      // Market can only cancel pending orders
       if (isMarketParty && !isFarmParty && input.status !== 'cancelled') {
-        throw new Error('Markets can only cancel pending orders. The farm must confirm the order.');
+        throw new Error('Markets can only cancel pending orders.');
       }
-    } else {
-      // After confirmation, only the farm can update status
-      if (!isFarmParty) {
-        throw new Error('Only the farm can update order status after confirmation.');
-      }
+    } else if (!isFarmParty) {
+      throw new Error('Only the farm can update order status after confirmation.');
     }
   }
 
-  const updates: Record<string, unknown> = {};
+  const updates: Record<string, unknown> = { updated_at: new Date() };
   if (input.status) updates.status = input.status;
   if (input.notes) updates.notes = input.notes;
 
-  const [updated] = await db
-    .updateTable('orders')
-    .set(updates)
-    .where('id', '=', orderId)
-    .returningAll()
-    .execute();
-
-  if (!updated) throw new Error('Order not found');
-
-  return { success: true, order: updated };
+  await orderDoc.ref.update(updates);
+  const updated = await orderDoc.ref.get();
+  return { success: true, order: { id: updated.id, ...updated.data() } };
 }
 
 export async function orderQuery(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
 
-  let query = db
-    .selectFrom('orders')
-    .innerJoin('farms', 'farms.id', 'orders.farm_id')
-    .innerJoin('markets', 'markets.id', 'orders.market_id')
-    .select([
-      'orders.id',
-      'orders.order_number',
-      'orders.status',
-      'orders.total',
-      'orders.order_date',
-      'farms.name as farm_name',
-      'markets.name as market_name',
-      'orders.notes',
-    ]);
+  let farmId = input.farm_id as string | undefined;
+  let marketId = input.market_id as string | undefined;
 
-  if (input.farm_id) {
-    query = query.where('orders.farm_id', '=', input.farm_id as string);
-  }
-  if (input.market_id) {
-    query = query.where('orders.market_id', '=', input.market_id as string);
-  }
-  if (input.status) {
-    query = query.where('orders.status', '=', input.status as any);
-  }
-  if (input.date) {
-    query = query.where('orders.order_date', '=', input.date as any);
+  if (!farmId && !marketId && userId) {
+    const farmSnap = await db.collection('farms').where('user_id', '==', userId).limit(1).get();
+    if (!farmSnap.empty) farmId = farmSnap.docs[0].id;
+    else {
+      const marketSnap = await db.collection('markets').where('user_id', '==', userId).limit(1).get();
+      if (!marketSnap.empty) marketId = marketSnap.docs[0].id;
+    }
   }
 
-  // Default scope to user's farm or market
-  if (!input.farm_id && !input.market_id && userId) {
-    const farm = await db.selectFrom('farms').select('id').where('user_id', '=', userId).executeTakeFirst();
-    const market = await db.selectFrom('markets').select('id').where('user_id', '=', userId).executeTakeFirst();
-    if (farm) query = query.where('orders.farm_id', '=', farm.id);
-    else if (market) query = query.where('orders.market_id', '=', market.id);
-  }
+  let query: FirebaseFirestore.Query = db.collection('orders');
+  if (farmId) query = query.where('farm_id', '==', farmId);
+  if (marketId) query = query.where('market_id', '==', marketId);
+  if (input.status) query = query.where('status', '==', input.status);
 
-  const results = await query.orderBy('orders.created_at', 'desc').limit(20).execute();
+  const snapshot = await query.orderBy('created_at', 'desc').limit(20).get();
+
+  const results = await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const order = doc.data();
+      const farmDoc = await db.collection('farms').doc(order.farm_id).get();
+      const marketDoc = await db.collection('markets').doc(order.market_id).get();
+      return {
+        id: doc.id,
+        order_number: order.order_number,
+        status: order.status,
+        total: order.total,
+        order_date: order.order_date,
+        farm_name: farmDoc.data()?.name || 'Unknown',
+        market_name: marketDoc.data()?.name || 'Unknown',
+        notes: order.notes,
+      };
+    }),
+  );
 
   return { count: results.length, orders: results };
 }
