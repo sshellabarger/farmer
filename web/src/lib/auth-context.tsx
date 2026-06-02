@@ -41,9 +41,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Check existing token on mount
+  // Check existing token on mount. Also capture a token passed in the URL
+  // (?token=...) from an SMS "view-link" — this must happen BEFORE we decide
+  // the user is logged out, otherwise clicking a texted dashboard link bounces
+  // to /login.
   useEffect(() => {
-    const stored = localStorage.getItem('farmlink_token');
+    let stored = localStorage.getItem('farmlink_token');
+
+    try {
+      const urlToken = new URLSearchParams(window.location.search).get('token');
+      if (urlToken) {
+        localStorage.setItem('farmlink_token', urlToken);
+        stored = urlToken;
+        // Strip the token from the URL so it isn't bookmarked or leaked in history.
+        const url = new URL(window.location.href);
+        url.searchParams.delete('token');
+        window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+      }
+    } catch {
+      /* window/URL not available — ignore */
+    }
+
     if (!stored) {
       setIsLoading(false);
       return;
@@ -68,6 +86,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (phone: string, code: string) => {
     const data = await api.verifyOtp(phone, code);
+    if (!data?.token || !data?.user) {
+      throw new Error('Login failed — no session returned. Please try again.');
+    }
     localStorage.setItem('farmlink_token', data.token);
     setToken(data.token);
     setUser(data.user);

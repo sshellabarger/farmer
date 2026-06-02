@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { Header } from '@/components/header';
 import { ChatWidget } from '@/components/chat-widget';
 import { useRouter } from 'next/navigation';
+import { enablePush, pushConfigured } from '@/lib/firebase-push';
 
 interface Address {
   street: string;
@@ -264,6 +265,9 @@ export default function SettingsPage() {
             </button>
           ))}
         </div>
+
+        {/* ── Notifications ── */}
+        <NotificationsCard />
 
         {/* ── Account Tab ── */}
         {tab === 'profile' && (
@@ -738,6 +742,85 @@ function SaveBar({ saving, onSave }: { saving: boolean; onSave: () => void }) {
       >
         {saving ? 'Saving...' : 'Save Changes'}
       </button>
+    </div>
+  );
+}
+
+/* ─── Notifications (PWA push) ─── */
+function NotificationsCard() {
+  const [status, setStatus] = useState<'idle' | 'enabling' | 'enabled' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+  const [envInfo, setEnvInfo] = useState({ ios: false, standalone: true, ready: false });
+  const configured = pushConfigured();
+
+  useEffect(() => {
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+    const ios = /iphone|ipad|ipod/i.test(ua);
+    const standalone =
+      (typeof window !== 'undefined' && (window.navigator as any).standalone === true) ||
+      (typeof window !== 'undefined' && window.matchMedia('(display-mode: standalone)').matches);
+    setEnvInfo({ ios, standalone, ready: true });
+  }, []);
+
+  // iPhone web push only works inside the installed (Home Screen) app.
+  const needsInstall = envInfo.ready && envInfo.ios && !envInfo.standalone;
+
+  const enable = async () => {
+    setStatus('enabling');
+    setMsg('');
+    const res = await enablePush();
+    if (!res.ok || !res.token) {
+      setStatus('error');
+      setMsg(res.reason || 'Could not enable notifications.');
+      return;
+    }
+    try {
+      await api.registerPush(res.token);
+      setStatus('enabled');
+      setMsg('Push notifications are on for this device — order and inventory alerts will arrive here instead of by text.');
+    } catch (e: any) {
+      setStatus('error');
+      setMsg(e?.message || 'Could not save your device for notifications.');
+    }
+  };
+
+  return (
+    <div className="mb-6 bg-white border border-earth-100 rounded-2xl p-5">
+      <h2 className="text-base font-bold text-earth-900 m-0">Push Notifications</h2>
+      <p className="text-sm text-earth-500 mt-1">
+        Get order and inventory alerts as free push notifications on this device instead of by text.
+      </p>
+
+      {!configured ? (
+        <div className="mt-3 text-[13px] text-earth-500">Push isn’t fully set up yet — coming soon.</div>
+      ) : needsInstall ? (
+        <div className="mt-4 p-4 rounded-xl bg-farm-50 border border-farm-100">
+          <div className="text-[14px] font-semibold text-farm-700 mb-2">📲 Install FarmLink first</div>
+          <p className="text-[13px] text-earth-600 m-0 mb-2">
+            On iPhone, notifications only work from the installed app. It takes 10 seconds:
+          </p>
+          <ol className="text-[13px] text-earth-600 m-0 pl-5 leading-relaxed">
+            <li>Tap the <strong>Share</strong> icon at the bottom of Safari (the box with an ↑ arrow)</li>
+            <li>Scroll down and tap <strong>“Add to Home Screen”</strong></li>
+            <li>Open <strong>FarmLink</strong> from your Home Screen</li>
+            <li>Go to <strong>Settings → Push Notifications</strong> and tap <strong>Enable</strong></li>
+          </ol>
+          <p className="text-[12px] text-earth-400 m-0 mt-2">Requires iOS 16.4 or later.</p>
+        </div>
+      ) : (
+        <button
+          onClick={enable}
+          disabled={status === 'enabling' || status === 'enabled'}
+          className="mt-4 h-11 px-5 rounded-xl text-white border-none font-sans font-semibold text-[14px] cursor-pointer disabled:opacity-50"
+          style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}
+        >
+          {status === 'enabled' ? '✓ Notifications On' : status === 'enabling' ? 'Enabling…' : 'Enable Notifications'}
+        </button>
+      )}
+
+      {msg && (
+        <div className="mt-3 text-[13px] font-medium" style={{ color: status === 'error' ? '#C44B3F' : '#2E6B34' }}>{msg}</div>
+      )}
     </div>
   );
 }

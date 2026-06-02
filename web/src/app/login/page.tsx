@@ -7,13 +7,6 @@ import { api } from '@/lib/api';
 import { Header } from '@/components/header';
 import { Icon } from '@/components/icons';
 
-const TEST_USERS = [
-  { label: 'Sarah Mitchell (Farmer)', phone: '+15015550201' },
-  { label: 'Jake Rivera (Farmer)', phone: '+15015550202' },
-  { label: 'Tom at ABC (Market)', phone: '+15015550101' },
-  { label: 'Scott Shellabarger', phone: '+15015550300' },
-];
-
 export default function LoginPage() {
   const { requestOtp, login } = useAuth();
   const router = useRouter();
@@ -172,24 +165,7 @@ export default function LoginPage() {
                   {loading ? 'Checking...' : 'Send Verification Code'}
                 </button>
 
-                {/* Quick select for dev */}
-                <div className="mt-6 pt-5 border-t border-earth-100">
-                  <div className="text-[10px] text-earth-400 font-semibold uppercase tracking-wide mb-2">
-                    Quick sign in (seeded accounts)
-                  </div>
-                  {TEST_USERS.map((u) => (
-                    <button
-                      key={u.phone}
-                      onClick={() => setPhone(u.phone)}
-                      className="w-full text-left px-3 py-2 text-xs hover:bg-earth-15 rounded-lg transition-colors cursor-pointer bg-transparent border-none"
-                    >
-                      <span className="font-medium text-earth-700">{u.label}</span>
-                      <span className="text-earth-400 ml-2 font-mono text-[11px]">{u.phone}</span>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mt-5 text-center text-xs text-earth-400">
+                <div className="mt-6 text-center text-xs text-earth-400">
                   Don&apos;t have an account?{' '}
                   <button
                     onClick={() => router.push('/signup')}
@@ -235,9 +211,13 @@ export default function LoginPage() {
                 >
                   ← Use a different number
                 </button>
-                <div className="mt-4 px-4 py-3 bg-farm-50 rounded-xl text-xs text-farm-700 text-center">
-                  <strong>Dev mode:</strong> Any 6-digit code works (try 123456)
-                </div>
+                <button
+                  onClick={handleRequestOtp}
+                  disabled={loading}
+                  className="w-full py-2 bg-transparent border-none text-earth-400 text-xs font-medium cursor-pointer hover:text-earth-600 disabled:opacity-40"
+                >
+                  Resend code
+                </button>
               </>
             )}
           </div>

@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole } from '../middleware/rbac.js';
-import { sendSms } from '../services/sms.js';
+import { notifySupportFeedback } from '../services/support-notify.js';
+import { byDateDesc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
 
 const createSchema = z.object({
@@ -27,16 +28,22 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const { type, status, priority } = request.query;
     const user = request.authUser!;
 
+    // Apply at most one equality filter at the DB layer; filter the rest in memory.
     let query: FirebaseFirestore.Query = app.db.collection('feedback');
     if (user.role !== 'admin') query = query.where('user_id', '==', user.id);
-    if (type) query = query.where('type', '==', type);
-    if (status) query = query.where('status', '==', status);
-    if (priority) query = query.where('priority', '==', priority);
 
-    const snapshot = await query.orderBy('created_at', 'desc').get();
+    const snapshot = await query.get();
+    const filtered = snapshot.docs.filter((d) => {
+      const fb = d.data();
+      if (type && fb.type !== type) return false;
+      if (status && fb.status !== status) return false;
+      if (priority && fb.priority !== priority) return false;
+      return true;
+    });
+    const sortedDocs = byDateDesc(filtered.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').map((x) => x.doc);
 
     const feedback = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      sortedDocs.map(async (doc) => {
         const fb = doc.data();
         const userDoc = await app.db.collection('users').doc(fb.user_id).get();
         const userData = userDoc.data() || {};
@@ -86,17 +93,15 @@ export async function feedbackRoutes(app: FastifyInstance) {
 
     await app.db.collection('feedback').doc(id).set(feedback);
 
-    // Notify admins
+    // Notify support (ALERT_PHONE / ALERT_EMAIL from .env) — text + email.
     const userDoc = await app.db.collection('users').doc(user.id).get();
-    const adminsSnap = await app.db.collection('users').where('role', '==', 'admin').get();
-    const label = type === 'feature_request' ? 'Feature request' : 'Bug report';
-    const notifMsg = `New ${label} from ${userDoc.data()?.name || 'User'}:\n"${title}"`;
-
-    for (const adminDoc of adminsSnap.docs) {
-      sendSms({ env: app.env, to: adminDoc.data().phone, body: notifMsg }).catch((err) => {
-        app.log.warn(`Failed to notify admin: ${(err as Error).message}`);
-      });
-    }
+    notifySupportFeedback(app.env, {
+      type,
+      title,
+      description,
+      submittedBy: userDoc.data()?.name || 'User',
+      source: source || 'web',
+    }).catch(() => {});
 
     return reply.status(201).send({ id, ...feedback });
   });

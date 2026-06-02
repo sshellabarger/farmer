@@ -1,17 +1,7 @@
 import type { ToolContext } from './index.js';
-import { sendSms } from '../services/sms.js';
+import { notifySupportFeedback } from '../services/support-notify.js';
+import { byDateDesc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
-
-async function notifyAdmins(ctx: ToolContext, feedbackType: string, title: string, userName: string) {
-  const { db, env } = ctx;
-  const adminsSnap = await db.collection('users').where('role', '==', 'admin').get();
-  const label = feedbackType === 'feature_request' ? 'Feature request' : 'Bug report';
-  const message = `New ${label} from ${userName}:\n"${title}"\n\nReply "show feedback" to manage.`;
-
-  for (const doc of adminsSnap.docs) {
-    sendSms({ env, to: doc.data().phone, body: message }).catch(() => {});
-  }
-}
 
 export async function feedbackSubmit(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
@@ -30,7 +20,11 @@ export async function feedbackSubmit(input: Record<string, unknown>, ctx: ToolCo
   });
 
   const userDoc = await db.collection('users').doc(userId).get();
-  notifyAdmins(ctx, type, title, userDoc.data()?.name || 'Unknown').catch(() => {});
+  notifySupportFeedback(ctx.env, {
+    type, title, description,
+    submittedBy: userDoc.data()?.name || 'Unknown',
+    source: 'sms',
+  }).catch(() => {});
 
   const label = type === 'feature_request' ? 'Feature request' : 'Bug report';
   return { success: true, feedback_id: id, message: `${label} submitted: "${title}". Thank you!` };
@@ -45,14 +39,19 @@ export async function feedbackQuery(input: Record<string, unknown>, ctx: ToolCon
 
   let query: FirebaseFirestore.Query = db.collection('feedback');
   if (!isAdmin) query = query.where('user_id', '==', userId);
-  if (input.type) query = query.where('type', '==', input.type);
-  if (input.status) query = query.where('status', '==', input.status);
-  if (input.priority) query = query.where('priority', '==', input.priority);
 
-  const snapshot = await query.orderBy('created_at', 'desc').limit(20).get();
+  const snapshot = await query.get();
+  const filtered = snapshot.docs.filter((d) => {
+    const fb = d.data();
+    if (input.type && fb.type !== input.type) return false;
+    if (input.status && fb.status !== input.status) return false;
+    if (input.priority && fb.priority !== input.priority) return false;
+    return true;
+  });
+  const fbDocs = byDateDesc(filtered.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 20).map((x) => x.doc);
 
   const items = await Promise.all(
-    snapshot.docs.map(async (doc) => {
+    fbDocs.map(async (doc) => {
       const fb = doc.data();
       const submitterDoc = await db.collection('users').doc(fb.user_id).get();
       return {

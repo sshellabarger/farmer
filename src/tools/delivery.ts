@@ -1,4 +1,5 @@
 import type { ToolContext } from './index.js';
+import { byDateDesc } from '../utils/sort.js';
 
 export async function deliveryScheduleSet(input: Record<string, unknown>, ctx: ToolContext) {
   const { db, userId } = ctx;
@@ -51,8 +52,8 @@ export async function deliveryQuery(input: Record<string, unknown>, ctx: ToolCon
   if (input.farm_id) farmId = input.farm_id as string;
   const marketId = input.market_id as string | undefined;
 
-  let query: FirebaseFirestore.Query = db.collection('orders')
-    .where('status', 'in', ['confirmed', 'in_transit', 'pending']);
+  // Single equality filter at DB layer; filter status + sort in memory.
+  let query: FirebaseFirestore.Query = db.collection('orders');
 
   if (farmId) query = query.where('farm_id', '==', farmId);
   else if (marketId) query = query.where('market_id', '==', marketId);
@@ -61,10 +62,13 @@ export async function deliveryQuery(input: Record<string, unknown>, ctx: ToolCon
     if (!marketSnap.empty) query = query.where('market_id', '==', marketSnap.docs[0].id);
   }
 
-  const snapshot = await query.orderBy('order_date', 'desc').limit(20).get();
+  const snapshot = await query.get();
+  const activeStatuses = ['confirmed', 'in_transit', 'pending'];
+  const filtered = snapshot.docs.filter((d) => activeStatuses.includes(d.data().status));
+  const orderDocs = byDateDesc(filtered.map((d) => ({ doc: d, order_date: d.data().order_date })), 'order_date').slice(0, 20).map((x) => x.doc);
 
   const deliveries = await Promise.all(
-    snapshot.docs.map(async (doc) => {
+    orderDocs.map(async (doc) => {
       const order = doc.data();
       const fDoc = await db.collection('farms').doc(order.farm_id).get();
       const mDoc = await db.collection('markets').doc(order.market_id).get();

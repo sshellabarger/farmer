@@ -1,19 +1,26 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { byDateAsc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
 
 export async function recurringOrderRoutes(app: FastifyInstance) {
   // GET /api/recurring-orders?farm_id=&market_id=
   app.get<{ Querystring: Record<string, string> }>('/', async (request) => {
     const { farm_id, market_id } = request.query;
+    // Single equality filter at DB layer; sort in memory to avoid composite index.
     let query: FirebaseFirestore.Query = app.db.collection('recurring_orders');
     if (farm_id) query = query.where('farm_id', '==', farm_id);
-    if (market_id) query = query.where('market_id', '==', market_id);
+    else if (market_id) query = query.where('market_id', '==', market_id);
 
-    const snapshot = await query.orderBy('next_delivery').get();
+    const snapshot = await query.get();
+    const filtered = snapshot.docs.filter((d) => {
+      if (market_id && d.data().market_id !== market_id) return false;
+      return true;
+    });
+    const roDocs = byDateAsc(filtered.map((d) => ({ doc: d, next_delivery: d.data().next_delivery })), 'next_delivery').map((x) => x.doc);
 
     const result = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      roDocs.map(async (doc) => {
         const ro = doc.data();
         const farmDoc = await app.db.collection('farms').doc(ro.farm_id).get();
         const marketDoc = await app.db.collection('markets').doc(ro.market_id).get();

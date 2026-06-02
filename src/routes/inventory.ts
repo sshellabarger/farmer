@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole, requireInventoryFarmOwner } from '../middleware/rbac.js';
+import { byDateDesc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
 
 export async function inventoryRoutes(app: FastifyInstance) {
@@ -16,10 +17,11 @@ export async function inventoryRoutes(app: FastifyInstance) {
     if (farm_id) query = query.where('farm_id', '==', farm_id);
     if (status) query = query.where('status', '==', status);
 
-    const snapshot = await query.orderBy('listed_at', 'desc').get();
+    const snapshot = await query.get();
+    const sortedDocs = byDateDesc(snapshot.docs.map((d) => ({ doc: d, listed_at: d.data().listed_at })), 'listed_at').map((x) => x.doc);
 
     const inventory = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      sortedDocs.map(async (doc) => {
         const inv = doc.data();
         const productDoc = await app.db.collection('products').doc(inv.product_id).get();
         const product = productDoc.data() || {};
@@ -72,7 +74,8 @@ export async function inventoryRoutes(app: FastifyInstance) {
       quantity: data.quantity,
       remaining: data.quantity,
       price: data.price,
-      harvest_date: data.harvest_date ? new Date(data.harvest_date) : null,
+      // Default to today's date when none is given so every listing has a harvest date.
+      harvest_date: data.harvest_date ? new Date(data.harvest_date) : new Date(),
       image_url: data.image_url || null,
       status: 'available',
       listed_at: new Date(),
@@ -86,18 +89,41 @@ export async function inventoryRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string } }>('/:id', {
     preHandler: [auth, farmerOrAdmin, invFarmOwner],
   }, async (request, reply) => {
-    const { remaining, price, status, image_url } = request.body as Record<string, unknown>;
-    const updates: Record<string, unknown> = {};
-    if (remaining !== undefined) updates.remaining = remaining;
-    if (price !== undefined) updates.price = price;
-    if (status !== undefined) updates.status = status;
-    if (image_url !== undefined) updates.image_url = image_url;
+    const { remaining, price, status, image_url, harvest_date, quantity } = request.body as Record<string, unknown>;
 
     const ref = app.db.collection('inventory').doc(request.params.id);
     const doc = await ref.get();
     if (!doc.exists) return reply.notFound('Inventory not found');
+    const current = doc.data()!;
+
+    const updates: Record<string, unknown> = {};
+    if (remaining !== undefined) updates.remaining = remaining;
+    if (price !== undefined) updates.price = price;
+    if (image_url !== undefined) updates.image_url = image_url;
+    if (harvest_date !== undefined) updates.harvest_date = harvest_date ? new Date(harvest_date as string) : null;
+    if (quantity !== undefined) updates.quantity = quantity;
+
+    // Derive status from quantities so it never drifts out of sync (e.g. editing
+    // a previously "sold" item's quantity back up must not stay "sold"). An
+    // explicit status in the request still wins (e.g. "reserved").
+    if (status !== undefined) {
+      updates.status = status;
+    } else if (remaining !== undefined || quantity !== undefined) {
+      const newRemaining = Number(remaining ?? current.remaining ?? 0);
+      const newQuantity = Number(quantity ?? current.quantity ?? newRemaining);
+      updates.status = newRemaining <= 0 ? 'sold' : newRemaining < newQuantity ? 'partial' : 'available';
+    }
 
     await ref.update(updates);
+
+    // Keep the product's default photo in sync so "use existing" can reuse it later.
+    if (image_url !== undefined) {
+      const productId = doc.data()!.product_id;
+      if (productId) {
+        await app.db.collection('products').doc(productId).update({ image_url: image_url ?? null }).catch(() => {});
+      }
+    }
+
     const updated = await ref.get();
     return { id: updated.id, ...updated.data() };
   });

@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { inventoryAdd, inventoryUpdate, inventoryQuery, inventoryClearAll } from './inventory.js';
+import { inventoryAdd, inventoryUpdate, inventoryQuery, inventoryClearAll, producePhoto } from './inventory.js';
 import { orderCreate, orderUpdate, orderQuery } from './orders.js';
 import { marketQuery } from './markets.js';
 import { notifyMarkets } from './notifications.js';
@@ -63,6 +63,23 @@ export const toolDefinitions: Anthropic.Tool[] = [
         harvest_date: { type: 'string', description: 'Harvest date in YYYY-MM-DD format' },
       },
       required: ['product', 'quantity', 'unit'],
+    },
+  },
+  {
+    name: 'produce_photo',
+    description:
+      "Attach a photo to a produce/inventory item. After inventory_add, offer the farmer three choices and call this with the chosen mode: 'existing' (reuse the saved photo for that product — only offer if product_image_on_file was true), 'generate' (create one automatically with AI), or 'upload' (returns a web link to text the farmer so they can upload their own). Use the inventory_id returned by inventory_add.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        inventory_id: { type: 'string', description: 'The inventory_id returned by inventory_add' },
+        mode: {
+          type: 'string',
+          enum: ['existing', 'generate', 'upload'],
+          description: "Photo source: 'existing' reuses the saved product photo, 'generate' makes one with AI, 'upload' returns a web link for the farmer to upload one",
+        },
+      },
+      required: ['inventory_id', 'mode'],
     },
   },
   {
@@ -468,6 +485,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   inventory_update: inventoryUpdate,
   inventory_query: inventoryQuery,
   inventory_clear_all: inventoryClearAll,
+  produce_photo: producePhoto,
   order_create: orderCreate,
   order_update: orderUpdate,
   order_query: orderQuery,

@@ -16,16 +16,17 @@ export async function notifyMarkets(input: Record<string, unknown>, ctx: ToolCon
   const farmDoc = await db.collection('farms').doc(inv.farm_id).get();
   const farmName = farmDoc.data()?.name || 'Unknown';
 
-  // Get connected markets
-  let relsQuery: FirebaseFirestore.Query = db.collection('farm_market_rels')
+  // Get connected markets (filter active + sort by priority in memory)
+  const relsSnap = await db.collection('farm_market_rels')
     .where('farm_id', '==', inv.farm_id)
-    .where('active', '==', true);
-
-  const relsSnap = await relsQuery.orderBy('priority').get();
+    .get();
+  const relDocs = relsSnap.docs
+    .filter((d) => d.data().active)
+    .sort((a, b) => (a.data().priority ?? 99) - (b.data().priority ?? 99));
 
   const markets: Array<{ market_id: string; market_name: string; phone: string; priority: number; notification_delay_min: number }> = [];
 
-  for (const relDoc of relsSnap.docs) {
+  for (const relDoc of relDocs) {
     const rel = relDoc.data();
     if (specificMarketIds && !specificMarketIds.includes(rel.market_id)) continue;
 

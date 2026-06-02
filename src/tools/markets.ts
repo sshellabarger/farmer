@@ -6,12 +6,13 @@ export async function marketQuery(input: Record<string, unknown>, ctx: ToolConte
   if (input.farm_id) {
     const relsSnap = await db.collection('farm_market_rels')
       .where('farm_id', '==', input.farm_id)
-      .where('active', '==', true)
-      .orderBy('priority')
       .get();
+    const activeRels = relsSnap.docs
+      .filter((d) => d.data().active)
+      .sort((a, b) => (a.data().priority ?? 99) - (b.data().priority ?? 99));
 
     const markets = await Promise.all(
-      relsSnap.docs.map(async (d) => {
+      activeRels.map(async (d) => {
         const rel = d.data();
         const mDoc = await db.collection('markets').doc(rel.market_id).get();
         const m = mDoc.data() || {};
@@ -33,20 +34,19 @@ export async function marketQuery(input: Record<string, unknown>, ctx: ToolConte
   if (input.market_id) {
     const relsSnap = await db.collection('farm_market_rels')
       .where('market_id', '==', input.market_id)
-      .where('active', '==', true)
       .get();
 
-    const farmIds = relsSnap.docs.map((d) => d.data().farm_id);
+    const farmIds = relsSnap.docs.filter((d) => d.data().active).map((d) => d.data().farm_id);
     const inventory: any[] = [];
 
     for (const farmId of farmIds) {
       const invSnap = await db.collection('inventory')
         .where('farm_id', '==', farmId)
-        .where('status', 'in', ['available', 'partial'])
         .get();
 
       for (const doc of invSnap.docs) {
         const inv = doc.data();
+        if (!['available', 'partial'].includes(inv.status)) continue;
         if (inv.remaining <= 0) continue;
         const prodDoc = await db.collection('products').doc(inv.product_id).get();
         const product = prodDoc.data() || {};

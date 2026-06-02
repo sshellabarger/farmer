@@ -24,11 +24,13 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
 
   let productId: string | undefined;
   let defaultPrice: number | null = null;
+  let productImageUrl: string | null = null;
 
   for (const doc of prodSnap.docs) {
     if (doc.data().name.toLowerCase() === productName.toLowerCase()) {
       productId = doc.id;
       defaultPrice = doc.data().default_price;
+      productImageUrl = doc.data().image_url ?? null;
       break;
     }
   }
@@ -58,7 +60,8 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
     quantity,
     remaining: quantity,
     price: finalPrice,
-    harvest_date: harvestDate ? new Date(harvestDate) : null,
+    // Default to today when the farmer didn't specify, so every listing has a harvest date.
+    harvest_date: harvestDate ? new Date(harvestDate) : new Date(),
     status: 'available',
     listed_at: new Date(),
   });
@@ -70,9 +73,27 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
     quantity,
     unit,
     price: finalPrice,
-    harvest_date: harvestDate || null,
+    harvest_date: harvestDate || new Date().toISOString().slice(0, 10),
     farm_name: farm.name,
+    // Photo flow: tell the assistant whether a saved photo exists for this product,
+    // so it can offer the right options (see produce_photo tool).
+    product_image_on_file: !!productImageUrl,
   };
+}
+
+export async function producePhoto(input: Record<string, unknown>, ctx: ToolContext) {
+  const { db, env } = ctx;
+  const inventoryId = input.inventory_id as string;
+  const mode = input.mode as 'existing' | 'generate' | 'upload';
+  if (!inventoryId || !mode) return { error: 'inventory_id and mode are required' };
+
+  const { setProducePhoto } = await import('../services/produce-photo.js');
+  try {
+    return await setProducePhoto(db, env, inventoryId, mode);
+  } catch (err) {
+    console.error(`[produce_photo] mode=${mode} inv=${inventoryId} failed:`, err instanceof Error ? (err.stack || err.message) : err);
+    return { error: 'photo_failed', message: 'Could not complete the photo action.' };
+  }
 }
 
 export async function inventoryUpdate(input: Record<string, unknown>, ctx: ToolContext) {
@@ -83,6 +104,7 @@ export async function inventoryUpdate(input: Record<string, unknown>, ctx: ToolC
   if (input.remaining !== undefined) updates.remaining = input.remaining;
   if (input.price !== undefined) updates.price = input.price;
   if (input.status !== undefined) updates.status = input.status;
+  if (input.harvest_date !== undefined) updates.harvest_date = input.harvest_date ? new Date(input.harvest_date as string) : null;
 
   if (Object.keys(updates).length === 0) {
     return { error: 'No fields to update' };
@@ -91,6 +113,14 @@ export async function inventoryUpdate(input: Record<string, unknown>, ctx: ToolC
   const ref = db.collection('inventory').doc(inventoryId);
   const doc = await ref.get();
   if (!doc.exists) throw new Error('Inventory not found');
+  const current = doc.data()!;
+
+  // Keep status consistent with remaining/quantity unless explicitly set.
+  if (input.status === undefined && input.remaining !== undefined) {
+    const newRemaining = Number(input.remaining);
+    const qty = Number(current.quantity ?? newRemaining);
+    updates.status = newRemaining <= 0 ? 'sold' : newRemaining < qty ? 'partial' : 'available';
+  }
 
   await ref.update(updates);
   const updated = await ref.get();
@@ -105,22 +135,22 @@ export async function inventoryClearAll(input: Record<string, unknown>, ctx: Too
   if (farmSnap.empty) throw new Error('No farm found for this user');
   const farmId = farmSnap.docs[0].id;
 
-  const activeSnap = await db.collection('inventory')
+  const invSnap = await db.collection('inventory')
     .where('farm_id', '==', farmId)
-    .where('status', 'in', ['available', 'partial'])
     .get();
+  const activeDocs = invSnap.docs.filter((d) => ['available', 'partial'].includes(d.data().status));
 
-  if (activeSnap.empty) {
+  if (activeDocs.length === 0) {
     return { success: true, cleared: 0, message: 'No active inventory to clear.' };
   }
 
   const batch = db.batch();
-  for (const doc of activeSnap.docs) {
+  for (const doc of activeDocs) {
     batch.update(doc.ref, { remaining: 0, status: 'sold' });
   }
   await batch.commit();
 
-  return { success: true, cleared: activeSnap.size, message: `Cleared ${activeSnap.size} inventory item(s).` };
+  return { success: true, cleared: activeDocs.length, message: `Cleared ${activeDocs.length} inventory item(s).` };
 }
 
 export async function inventoryQuery(input: Record<string, unknown>, ctx: ToolContext) {
@@ -133,12 +163,12 @@ export async function inventoryQuery(input: Record<string, unknown>, ctx: ToolCo
     if (!farmSnap.empty) farmId = farmSnap.docs[0].id;
   }
 
-  let query: FirebaseFirestore.Query = db.collection('inventory')
-    .where('status', 'in', ['available', 'partial']);
-
+  // Filter by farm at DB layer when possible; filter status in memory.
+  let query: FirebaseFirestore.Query = db.collection('inventory');
   if (farmId) query = query.where('farm_id', '==', farmId);
 
-  const snapshot = await query.get();
+  const rawSnapshot = await query.get();
+  const snapshot = { docs: rawSnapshot.docs.filter((d) => ['available', 'partial'].includes(d.data().status)) };
 
   const results = await Promise.all(
     snapshot.docs.map(async (doc) => {

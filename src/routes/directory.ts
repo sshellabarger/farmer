@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { sendSms } from '../services/sms.js';
+import { byStringAsc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
 
 export async function directoryRoutes(app: FastifyInstance) {
@@ -8,9 +9,9 @@ export async function directoryRoutes(app: FastifyInstance) {
   app.get('/farms', async (request, reply) => {
     const { search, market_id } = request.query as { search?: string; market_id?: string };
 
-    const snapshot = await app.db.collection('farms').where('active', '==', true).orderBy('name').get();
+    const snapshot = await app.db.collection('farms').where('active', '==', true).get();
 
-    let farms = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    let farms = byStringAsc(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })), 'name');
 
     if (search) {
       const s = search.toLowerCase();
@@ -38,8 +39,8 @@ export async function directoryRoutes(app: FastifyInstance) {
   app.get('/markets', async (request, reply) => {
     const { search, farm_id } = request.query as { search?: string; farm_id?: string };
 
-    const snapshot = await app.db.collection('markets').where('active', '==', true).orderBy('name').get();
-    let markets = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const snapshot = await app.db.collection('markets').where('active', '==', true).get();
+    let markets = byStringAsc(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })), 'name');
 
     if (search) {
       const s = search.toLowerCase();
@@ -86,28 +87,27 @@ export async function directoryRoutes(app: FastifyInstance) {
     const farmUserDoc = await app.db.collection('users').doc(farm.user_id).get();
     const marketUserDoc = await app.db.collection('users').doc(market.user_id).get();
 
-    // Check existing
-    const existingSnap = await app.db
+    // Check existing (filter market_id in memory to avoid composite index)
+    const existingByFarm = await app.db
       .collection('farm_market_rels')
       .where('farm_id', '==', data.farm_id)
-      .where('market_id', '==', data.market_id)
-      .limit(1)
       .get();
+    const existingDoc = existingByFarm.docs.find((d) => d.data().market_id === data.market_id);
 
-    if (!existingSnap.empty) {
-      const existing = existingSnap.docs[0].data();
+    if (existingDoc) {
+      const existing = existingDoc.data();
       if (existing.status === 'active') return reply.status(409).send({ error: 'Already connected' });
       if (existing.status === 'pending') return reply.status(409).send({ error: 'Request already pending' });
 
       // Re-request after decline
-      await existingSnap.docs[0].ref.update({
+      await existingDoc.ref.update({
         status: 'pending',
         initiated_by: data.initiated_by,
         request_message: data.message ?? null,
         responded_at: null,
       });
 
-      const updatedDoc = await existingSnap.docs[0].ref.get();
+      const updatedDoc = await existingDoc.ref.get();
       const rel = { id: updatedDoc.id, ...updatedDoc.data() };
 
       const recipientPhone = data.initiated_by === 'farm' ? marketUserDoc.data()?.phone : farmUserDoc.data()?.phone;
@@ -189,16 +189,21 @@ export async function directoryRoutes(app: FastifyInstance) {
   app.get('/connect/pending', async (request, reply) => {
     const { farm_id, market_id } = request.query as { farm_id?: string; market_id?: string };
 
-    let query: FirebaseFirestore.Query = app.db
-      .collection('farm_market_rels')
-      .where('status', '==', 'pending');
-
+    // Use a single equality filter at the DB layer; filter status (+ the other id) in memory.
+    let query: FirebaseFirestore.Query = app.db.collection('farm_market_rels');
     if (farm_id) query = query.where('farm_id', '==', farm_id);
-    if (market_id) query = query.where('market_id', '==', market_id);
+    else if (market_id) query = query.where('market_id', '==', market_id);
 
     const snapshot = await query.get();
+    const pendingDocs = snapshot.docs.filter((d) => {
+      const r = d.data();
+      if (r.status !== 'pending') return false;
+      if (farm_id && r.farm_id !== farm_id) return false;
+      if (market_id && r.market_id !== market_id) return false;
+      return true;
+    });
     const pending = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      pendingDocs.map(async (doc) => {
         const r = doc.data();
         const farmDoc = await app.db.collection('farms').doc(r.farm_id).get();
         const marketDoc = await app.db.collection('markets').doc(r.market_id).get();

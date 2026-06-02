@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole, requireFarmOwner } from '../middleware/rbac.js';
+import { byDateDesc, byNumberAsc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
 
 export async function farmRoutes(app: FastifyInstance) {
@@ -49,7 +50,6 @@ export async function farmRoutes(app: FastifyInstance) {
     const invSnapshot = await app.db
       .collection('inventory')
       .where('farm_id', '==', request.params.id)
-      .orderBy('listed_at', 'desc')
       .get();
 
     const inventory = await Promise.all(
@@ -73,7 +73,7 @@ export async function farmRoutes(app: FastifyInstance) {
       }),
     );
 
-    return { inventory };
+    return { inventory: byDateDesc(inventory, 'listed_at') };
   });
 
   // GET /api/farms/:id/orders
@@ -83,8 +83,6 @@ export async function farmRoutes(app: FastifyInstance) {
     const orderSnapshot = await app.db
       .collection('orders')
       .where('farm_id', '==', request.params.id)
-      .orderBy('order_date', 'desc')
-      .limit(50)
       .get();
 
     const orders = await Promise.all(
@@ -102,7 +100,7 @@ export async function farmRoutes(app: FastifyInstance) {
       }),
     );
 
-    return { orders };
+    return { orders: byDateDesc(orders, 'order_date').slice(0, 50) };
   });
 
   // GET /api/farms/:id/analytics
@@ -129,13 +127,13 @@ export async function farmRoutes(app: FastifyInstance) {
     const invSnap = await app.db
       .collection('inventory')
       .where('farm_id', '==', farmId)
-      .where('status', 'in', ['available', 'partial'])
       .get();
+    const activeListings = invSnap.docs.filter((d) => ['available', 'partial'].includes(d.data().status)).length;
 
     return {
       revenue,
       total_orders: totalOrders,
-      active_listings: invSnap.size,
+      active_listings: activeListings,
     };
   });
 
@@ -148,13 +146,12 @@ export async function farmRoutes(app: FastifyInstance) {
     const ordersSnap = await app.db
       .collection('orders')
       .where('farm_id', '==', farmId)
-      .orderBy('order_date', 'desc')
-      .limit(50)
       .get();
+    const orderDocs = byDateDesc(ordersSnap.docs.map((d) => ({ doc: d, order_date: d.data().order_date })), 'order_date').slice(0, 50).map((x) => x.doc);
 
     const messages: any[] = [];
 
-    for (const doc of ordersSnap.docs) {
+    for (const doc of orderDocs) {
       const order = doc.data();
       const marketDoc = await app.db.collection('markets').doc(order.market_id).get();
       const marketName = marketDoc.data()?.name || 'Unknown';
@@ -204,11 +201,10 @@ export async function farmRoutes(app: FastifyInstance) {
     const notifsSnap = await app.db
       .collection('notifications')
       .where('farm_id', '==', farmId)
-      .orderBy('created_at', 'desc')
-      .limit(50)
       .get();
+    const notifDocs = byDateDesc(notifsSnap.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
-    for (const doc of notifsSnap.docs) {
+    for (const doc of notifDocs) {
       const notif = doc.data();
       const marketDoc = await app.db.collection('markets').doc(notif.market_id).get();
       const marketName = marketDoc.data()?.name || 'Unknown';
@@ -263,25 +259,23 @@ export async function farmRoutes(app: FastifyInstance) {
     const relsSnap = await app.db
       .collection('farm_market_rels')
       .where('farm_id', '==', farmId)
-      .orderBy('priority')
       .get();
+    const relDocs = byNumberAsc(relsSnap.docs.map((d) => ({ doc: d, priority: d.data().priority })), 'priority', 99).map((x) => x.doc);
+
+    // Fetch all orders for this farm once, then group by market in memory.
+    const allOrdersSnap = await app.db.collection('orders').where('farm_id', '==', farmId).get();
 
     const markets = await Promise.all(
-      relsSnap.docs.map(async (relDoc) => {
+      relDocs.map(async (relDoc) => {
         const rel = relDoc.data();
         const marketDoc = await app.db.collection('markets').doc(rel.market_id).get();
         const market = marketDoc.data() || {};
 
-        const ordersSnap = await app.db
-          .collection('orders')
-          .where('farm_id', '==', farmId)
-          .where('market_id', '==', rel.market_id)
-          .get();
-
         let pendingCount = 0, pendingTotal = 0;
         let historyCount = 0, historyTotal = 0;
-        for (const oDoc of ordersSnap.docs) {
+        for (const oDoc of allOrdersSnap.docs) {
           const o = oDoc.data();
+          if (o.market_id !== rel.market_id) continue;
           if (o.status === 'pending') {
             pendingCount++;
             pendingTotal += Number(o.total || 0);
@@ -361,17 +355,16 @@ export async function farmRoutes(app: FastifyInstance) {
       });
     }
 
-    const existingRel = await app.db
+    const relsForFarm = await app.db
       .collection('farm_market_rels')
       .where('farm_id', '==', farmId)
-      .where('market_id', '==', marketId)
-      .limit(1)
       .get();
+    const existingRel = relsForFarm.docs.find((d) => d.data().market_id === marketId);
 
-    if (!existingRel.empty) {
+    if (existingRel) {
       return reply.status(409).send({
         error: 'This market is already linked to your farm',
-        rel_id: existingRel.docs[0].id,
+        rel_id: existingRel.id,
       });
     }
 

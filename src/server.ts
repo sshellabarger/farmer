@@ -6,6 +6,7 @@ import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { getEnv } from './config/env.js';
 import { getDb } from './db/firestore.js';
+import { serializeTimestamps } from './utils/serialize.js';
 import { smsRoutes } from './routes/sms.js';
 import { farmRoutes } from './routes/farms.js';
 import { marketRoutes } from './routes/markets.js';
@@ -21,6 +22,8 @@ import { uploadRoutes } from './routes/uploads.js';
 import { profileRoutes } from './routes/profile.js';
 import { feedbackRoutes } from './routes/feedback.js';
 import { directoryRoutes } from './routes/directory.js';
+import { inviteRoutes } from './routes/invite.js';
+import { pushRoutes } from './routes/push.js';
 
 async function start() {
   const env = getEnv();
@@ -41,6 +44,8 @@ async function start() {
   app.decorate('db', db);
   app.decorate('env', env);
 
+  app.addHook('preSerialization', async (_req, _reply, payload) => serializeTimestamps(payload));
+
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 
   await app.register(authRoutes, { prefix: '/api/auth' });
@@ -58,6 +63,8 @@ async function start() {
   await app.register(profileRoutes, { prefix: '/api/profile' });
   await app.register(feedbackRoutes, { prefix: '/api/feedback' });
   await app.register(directoryRoutes, { prefix: '/api/directory' });
+  await app.register(inviteRoutes, { prefix: '/api/invite' });
+  await app.register(pushRoutes, { prefix: '/api/push' });
 
   // View link redirect
   app.get('/api/view/:token', async (request, reply) => {

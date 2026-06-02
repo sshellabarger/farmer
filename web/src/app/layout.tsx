@@ -1,10 +1,21 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { AuthProvider } from '@/lib/auth-context';
+import { PwaRegister } from '@/components/pwa-register';
 
 export const metadata: Metadata = {
-  title: 'FarmLink — Farm to Market',
-  description: 'Text-first platform connecting farms with markets',
+  title: 'FarmLink — Arkansas Local Food Network',
+  description: 'Text-first platform connecting local farms and markets',
+  manifest: '/manifest.webmanifest',
+  appleWebApp: {
+    capable: true,
+    title: 'FarmLink',
+    statusBarStyle: 'default',
+  },
+  icons: {
+    icon: '/icon-192.png',
+    apple: '/apple-touch-icon.png',
+  },
 };
 
 export const viewport: Viewport = {
@@ -12,6 +23,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  themeColor: '#2E6B34',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -27,6 +39,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <AuthProvider>
           {children}
         </AuthProvider>
+        <PwaRegister />
       </body>
     </html>
   );

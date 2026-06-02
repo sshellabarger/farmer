@@ -77,11 +77,13 @@ interface DashboardProps {
   initialTab?: string;
 }
 
-function resolveInitialPanel(tab: string | undefined): 'orders' | 'inventory' | 'markets' | 'directory' {
+type View = 'chat' | 'orders' | 'inventory' | 'markets';
+
+function resolveInitialView(tab: string | undefined): View {
   if (tab === 'inventory') return 'inventory';
-  if (tab === 'markets') return 'markets';
-  if (tab === 'directory') return 'directory';
-  return 'orders';
+  if (tab === 'markets' || tab === 'directory') return 'markets';
+  if (tab === 'orders' || tab === 'deliveries' || tab === 'recurring') return 'orders';
+  return 'chat';
 }
 
 export function Dashboard({ viewAs, initialTab }: DashboardProps) {
@@ -89,7 +91,7 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
   const { user, farm, market, isAuthenticated, isLoading: authLoading } = useAuth();
   const [conversations, setConversations] = useState<Convo[]>([]);
   const [activeConvo, setActiveConvo] = useState<Convo | null>(null);
-  const [sidePanel, setSidePanel] = useState<'orders' | 'inventory' | 'markets' | 'directory'>(resolveInitialPanel(initialTab));
+  const [activeView, setActiveView] = useState<View>(resolveInitialView(initialTab));
   const [directorySearch, setDirectorySearch] = useState('');
   const [directoryResults, setDirectoryResults] = useState<any[]>([]);
   const [directoryLoading, setDirectoryLoading] = useState(false);
@@ -97,8 +99,7 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<DisplayMessage[]>([]);
-  const [convoFilter, setConvoFilter] = useState('All');
-  const [mobileView, setMobileView] = useState<MobileView>('list');
+  const [chatSearch, setChatSearch] = useState('');
   const [sending, setSending] = useState(false);
   const [loadingConvos, setLoadingConvos] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -157,7 +158,6 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
 
   const selectConvo = useCallback(async (convo: Convo) => {
     setActiveConvo(convo);
-    setMobileView('chat');
     setLoadingMessages(true);
     try {
       const data = await api.getChatHistory(convo.phone_number);
@@ -207,9 +207,17 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
     selectConvo(newConvo);
   }, [user, selectConvo]);
 
-  const filteredConvos = convoFilter === 'All' ? conversations :
-    convoFilter === 'Partners' ? conversations.filter(c => (isFarmer ? c.role === 'market' : c.role === 'farmer')) :
-    conversations.filter(c => c.role === 'system');
+  // Auto-open the user's FarmLink conversation whenever the Chat view is active.
+  useEffect(() => {
+    if (activeView === 'chat' && !activeConvo && user && !authLoading) {
+      startNewConvo();
+    }
+  }, [activeView, activeConvo, user, authLoading, startNewConvo]);
+
+  // Search filters the visible message history.
+  const visibleMessages = chatSearch.trim()
+    ? chatMessages.filter(m => m.text.toLowerCase().includes(chatSearch.trim().toLowerCase()))
+    : chatMessages;
 
   return (
     <div className="h-screen flex flex-col bg-bg font-sans">
@@ -245,144 +253,83 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
         </div>
       </header>
 
-      {/* ── Mobile Bottom Nav ── */}
-      <div className="md:hidden flex border-b border-border bg-white shrink-0">
-        {[
-          { id: 'list' as MobileView, icon: 'msg', label: 'Messages' },
-          { id: 'chat' as MobileView, icon: 'send', label: 'Chat' },
-          { id: 'panel' as MobileView, icon: 'order', label: 'Info' },
-        ].map(tab => (
-          <button key={tab.id} onClick={() => setMobileView(tab.id)} className="flex-1 py-2.5 border-none cursor-pointer flex flex-col items-center gap-0.5 transition-all"
-            style={{
-              background: mobileView === tab.id ? '#E8F5E3' : 'transparent',
-              borderBottom: mobileView === tab.id ? '2px solid #2E6B34' : '2px solid transparent',
-            }}>
-            <Icon name={tab.icon} size={16} className={mobileView === tab.id ? 'text-green-600' : 'text-text-muted'} />
-            <span className={`font-sans text-[10px] font-semibold ${mobileView === tab.id ? 'text-green-600' : 'text-text-muted'}`}>{tab.label}</span>
+      {/* ── Primary View Tabs (top nav) ── */}
+      <div className="flex gap-1.5 px-3 md:px-5 py-2 bg-white border-b border-border shrink-0 overflow-x-auto">
+        {([
+          { id: 'chat' as View, icon: 'msg', label: 'Chat' },
+          { id: 'orders' as View, icon: 'order', label: 'Orders' },
+          { id: 'inventory' as View, icon: 'package', label: isFarmer ? 'Inventory' : 'Available' },
+          { id: 'markets' as View, icon: 'market', label: isFarmer ? 'Markets' : 'Farms' },
+        ]).map(tab => (
+          <button key={tab.id} onClick={() => setActiveView(tab.id)}
+            className="h-10 px-4 rounded-full border-none cursor-pointer flex items-center gap-2 shrink-0 transition-all active:scale-95"
+            style={{ background: activeView === tab.id ? '#2E6B34' : '#F3EFE9' }}>
+            <Icon name={tab.icon} size={16} className={activeView === tab.id ? 'text-white' : 'text-text-muted'} />
+            <span className={`font-sans text-[14px] font-semibold ${activeView === tab.id ? 'text-white' : 'text-text-soft'}`}>{tab.label}</span>
           </button>
         ))}
       </div>
 
-      {/* ── Main Area ── */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* LEFT: Conversation List — visible on md+ or when mobileView=list */}
-        <div suppressHydrationWarning className={`w-full md:w-[280px] border-r border-border flex-col bg-white shrink-0 ${mobileView === 'list' ? 'flex' : 'hidden'} md:flex`}>
-          {/* Search */}
-          <div className="p-3.5 border-b border-border-light">
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg border border-border">
-              <Icon name="search" size={14} className="text-text-muted" />
-              <input placeholder="Search messages..." className="border-none bg-transparent font-sans text-[13px] text-text outline-none w-full" />
-            </div>
-          </div>
-          {/* Filter tabs */}
-          <div className="flex px-3.5 py-2 gap-1.5">
-            {['All', 'Partners', 'System'].map(tab => (
-              <button key={tab} onClick={() => setConvoFilter(tab)} className="px-3 py-1 rounded-md text-xs font-semibold font-sans border-none cursor-pointer"
-                style={{
-                  background: convoFilter === tab ? '#E8F5E3' : 'transparent',
-                  color: convoFilter === tab ? '#2E6B34' : '#9A9A9A',
-                }}>
-                {tab}
-              </button>
-            ))}
-          </div>
-          {/* Conversation items */}
-          <div className="flex-1 overflow-y-auto">
-            {loadingConvos ? (
-              <div className="flex items-center justify-center py-10 text-text-muted text-sm">Loading...</div>
-            ) : filteredConvos.length === 0 ? (
-              <div className="flex items-center justify-center py-10 text-text-muted text-sm">No conversations yet</div>
-            ) : filteredConvos.map((c) => (
-              <div key={c.id} onClick={() => selectConvo(c)} className="px-3.5 py-3 cursor-pointer flex gap-2.5 items-start transition-all duration-150"
-                style={{
-                  background: activeConvo?.id === c.id ? '#E8F5E3' : 'transparent',
-                  borderLeft: activeConvo?.id === c.id ? '3px solid #2E6B34' : '3px solid transparent',
-                }}>
-                <div className="w-10 h-10 rounded-[10px] flex items-center justify-center text-lg shrink-0"
-                  style={{ background: c.role === 'system' ? '#E8F5E3' : '#F5F0E8' }}>
-                  {c.avatar}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-center mb-0.5">
-                    <span className="font-sans font-semibold text-[13px] text-text">{c.name}</span>
-                    <span className="font-sans text-[10px] text-text-muted">{c.time}</span>
-                  </div>
-                  <div className="font-sans text-xs text-text-muted overflow-hidden text-ellipsis whitespace-nowrap">{c.lastMsg}</div>
-                </div>
-                {c.unread > 0 && (
-                  <div className="w-[18px] h-[18px] rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0 mt-0.5" style={{ background: '#2E6B34' }}>
-                    {c.unread}
-                  </div>
+      {/* ── Main Area (one view at a time) ── */}
+      <div className="flex-1 overflow-hidden">
+        {/* CHAT VIEW: single conversation with FarmLink — search + history + input */}
+        {activeView === 'chat' && (
+          <div className="h-full flex flex-col bg-[#F7F5F1]">
+            {/* Search bar */}
+            <div className="px-4 py-3 bg-white border-b border-border shrink-0">
+              <div className="max-w-[680px] mx-auto flex items-center gap-2 px-3.5 h-11 rounded-xl bg-bg-alt">
+                <Icon name="search" size={16} className="text-text-muted" />
+                <input
+                  value={chatSearch}
+                  onChange={e => setChatSearch(e.target.value)}
+                  placeholder="Search your messages"
+                  className="border-none bg-transparent font-sans text-[15px] text-text outline-none w-full"
+                />
+                {chatSearch && (
+                  <button onClick={() => setChatSearch('')} className="bg-transparent border-none cursor-pointer text-text-muted text-sm">✕</button>
                 )}
               </div>
-            ))}
-          </div>
-          {/* Quick text shortcut */}
-          <div className="p-3.5 border-t border-border-light">
-            <button onClick={startNewConvo} className="w-full px-3.5 py-2.5 rounded-[10px] text-white border-none font-sans font-semibold text-[13px] cursor-pointer flex items-center justify-center gap-2"
-              style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)', boxShadow: '0 2px 8px rgba(46,107,52,0.25)' }}>
-              <Icon name="msg" size={16} className="text-white" /> New Text to FarmLink
-            </button>
-          </div>
-        </div>
+            </div>
 
-        {/* CENTER: Active Chat — visible on md+ or when mobileView=chat */}
-        <div className={`flex-1 flex-col bg-bg ${mobileView === 'chat' ? 'flex' : 'hidden'} md:flex`}>
-          {activeConvo ? (
-            <>
-              {/* Chat header */}
-              <div className="px-4 md:px-5 py-3 border-b border-border bg-white flex justify-between items-center">
-                <div className="flex items-center gap-2.5">
-                  {/* Mobile back button */}
-                  <button onClick={() => setMobileView('list')} className="md:hidden bg-transparent border-none cursor-pointer p-0 flex items-center">
-                    <Icon name="back" size={18} className="text-text-muted" />
-                  </button>
-                  <div className="w-9 h-9 rounded-[10px] flex items-center justify-center text-base"
-                    style={{ background: activeConvo.role === 'system' ? '#E8F5E3' : '#F5F0E8' }}>
-                    {activeConvo.avatar}
-                  </div>
-                  <div>
-                    <div className="font-sans font-bold text-[15px] text-text">{activeConvo.name}</div>
-                    <div className="font-sans text-[11px] text-text-muted">{activeConvo.role === 'system' ? 'FarmLink Assistant' : activeConvo.role === 'market' ? 'Market Partner' : activeConvo.role === 'farmer' ? 'Farm Partner' : 'Contact'}</div>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  {activeConvo.role === 'market' && (
-                    <button className="px-3.5 py-1.5 rounded-lg bg-bg border border-border font-sans text-xs font-semibold text-text-soft cursor-pointer hidden sm:block">View Orders</button>
-                  )}
-                  {/* Mobile panel shortcut */}
-                  <button onClick={() => setMobileView('panel')} className="md:hidden w-9 h-9 rounded-lg bg-bg border border-border flex items-center justify-center cursor-pointer">
-                    <Icon name="order" size={16} className="text-text-muted" />
-                  </button>
-                </div>
-              </div>
-              {/* Messages */}
-              <div ref={scrollRef} className="flex-1 px-4 md:px-6 py-4 md:py-5 overflow-y-auto flex flex-col gap-2.5">
+            {/* History */}
+            <div ref={scrollRef} className="flex-1 overflow-y-auto">
+              <div className="max-w-[680px] mx-auto w-full px-4 py-4 flex flex-col gap-1">
                 {loadingMessages ? (
                   <div className="flex items-center justify-center py-10 text-text-muted text-sm">Loading messages...</div>
-                ) : chatMessages.map((msg) => {
+                ) : visibleMessages.length === 0 ? (
+                  <div className="py-16 text-center text-text-muted text-[14px] px-6">
+                    {chatSearch ? `No messages match “${chatSearch}”` : 'Send a message to start — try “What can you help me with?”'}
+                  </div>
+                ) : visibleMessages.map((msg, idx) => {
                   const isUser = msg.from === 'user';
+                  const prev = visibleMessages[idx - 1];
+                  const next = visibleMessages[idx + 1];
+                  const firstOfGroup = !prev || prev.from !== msg.from;
+                  const lastOfGroup = !next || next.from !== msg.from;
                   return (
-                    <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`} style={{ animation: 'msgIn 0.3s ease' }}>
-                      <div className="max-w-[80%] md:max-w-[65%]">
-                        <div className="px-3.5 md:px-4 py-2.5 text-[13px] md:text-sm leading-relaxed whitespace-pre-line font-sans"
+                    <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'} ${firstOfGroup ? 'mt-2' : ''}`} style={{ animation: 'msgIn 0.25s ease' }}>
+                      <div className="max-w-[78%] flex flex-col">
+                        <div className="px-3.5 py-2 text-[15px] leading-[1.35] whitespace-pre-line font-sans"
                           style={{
-                            borderRadius: isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-                            background: isUser ? '#2E6B34' : '#fff',
+                            borderRadius: 18,
+                            borderBottomRightRadius: isUser && lastOfGroup ? 5 : 18,
+                            borderBottomLeftRadius: !isUser && lastOfGroup ? 5 : 18,
+                            background: isUser ? '#2E6B34' : '#FFFFFF',
                             color: isUser ? '#fff' : '#1A1A1A',
-                            boxShadow: isUser ? '0 2px 8px rgba(46,107,52,0.2)' : '0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03)',
-                            border: isUser ? 'none' : '1px solid #F0EDE8',
+                            boxShadow: isUser ? 'none' : '0 1px 1.5px rgba(0,0,0,0.07)',
                           }}>
                           {msg.text}
                         </div>
-                        <div className={`font-sans text-[10px] text-text-muted mt-1 ${isUser ? 'text-right pr-1' : 'text-left pl-1'}`}>{msg.time}</div>
+                        {lastOfGroup && (
+                          <div className={`font-sans text-[11px] text-text-muted mt-1 px-1 ${isUser ? 'text-right' : 'text-left'}`}>{msg.time}</div>
+                        )}
                       </div>
                     </div>
                   );
                 })}
-                {sending && (
-                  <div className="flex justify-start" style={{ animation: 'msgIn 0.3s ease' }}>
-                    <div className="px-4 py-3 rounded-2xl bg-white border border-[#F0EDE8] shadow-sm">
+                {sending && !chatSearch && (
+                  <div className="flex justify-start mt-2" style={{ animation: 'msgIn 0.25s ease' }}>
+                    <div className="px-4 py-3 bg-white shadow-sm" style={{ borderRadius: 18, borderBottomLeftRadius: 5 }}>
                       <div className="flex gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-text-muted" style={{ animation: 'typingDot 1.4s ease infinite' }} />
                         <span className="w-2 h-2 rounded-full bg-text-muted" style={{ animation: 'typingDot 1.4s ease 0.2s infinite' }} />
@@ -392,87 +339,64 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
                   </div>
                 )}
               </div>
-              {/* Input */}
-              <div className="px-3 md:px-5 py-3 pb-4 border-t border-border-light bg-white">
-                <div className="flex gap-2 md:gap-2.5 items-end">
-                  <div className="flex-1 rounded-[14px] border border-border bg-bg overflow-hidden">
-                    <textarea
-                      value={chatInput}
-                      onChange={e => setChatInput(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                      placeholder={activeConvo.role === 'system' ? 'Text FarmLink...' : `Message ${activeConvo.name}...`}
-                      rows={1}
-                      className="w-full px-3 md:px-4 py-2.5 border-none bg-transparent font-sans text-sm text-text outline-none resize-none leading-relaxed"
-                    />
-                  </div>
-                  <button onClick={handleSend} disabled={sending || !chatInput.trim()} className="w-10 h-10 md:w-[42px] md:h-[42px] rounded-xl border-none flex items-center justify-center shrink-0 transition-all duration-200"
-                    style={{
-                      background: chatInput.trim() && !sending ? 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' : '#F3EFE9',
-                      cursor: chatInput.trim() && !sending ? 'pointer' : 'default',
-                      boxShadow: chatInput.trim() && !sending ? '0 2px 8px rgba(46,107,52,0.3)' : 'none',
-                    }}>
-                    <Icon name="send" size={18} className={chatInput.trim() && !sending ? 'text-white' : 'text-text-muted'} />
-                  </button>
-                </div>
-                <div className="flex gap-1.5 md:gap-2 mt-2 overflow-x-auto">
+            </div>
+
+            {/* Suggestions + input (hidden while searching) */}
+            {!chatSearch && (
+              <div className="max-w-[680px] mx-auto w-full">
+                <div className="flex gap-2 px-4 pt-2 overflow-x-auto shrink-0">
                   {['📦 Check inventory', '💰 Today\'s sales', '📋 Pending orders'].map(q => (
-                    <button key={q} onClick={() => setChatInput(q.slice(2).trim())} className="px-2.5 md:px-3 py-1 rounded-full bg-bg border border-border font-sans text-[11px] text-text-soft cursor-pointer whitespace-nowrap hover:bg-earth-25 transition-colors">
+                    <button key={q} onClick={() => setChatInput(q.slice(2).trim())} className="px-3 h-8 rounded-full bg-white border border-border font-sans text-[13px] text-text-soft cursor-pointer whitespace-nowrap hover:bg-bg transition-colors shrink-0">
                       {q}
                     </button>
                   ))}
                 </div>
+                <div className="px-4 py-3 shrink-0">
+                  <div className="flex gap-2 items-end">
+                    <div className="flex-1 flex items-end rounded-[22px] border border-border bg-white min-h-[44px]">
+                      <textarea
+                        value={chatInput}
+                        onChange={e => setChatInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                        placeholder="Message FarmLink"
+                        rows={1}
+                        className="w-full px-4 py-2.5 border-none bg-transparent font-sans text-[15px] text-text outline-none resize-none leading-relaxed max-h-32"
+                      />
+                    </div>
+                    <button onClick={handleSend} disabled={sending || !chatInput.trim()} className="w-11 h-11 rounded-full border-none flex items-center justify-center shrink-0 transition-all duration-200 active:scale-95"
+                      style={{
+                        background: chatInput.trim() && !sending ? 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' : '#E2DDD5',
+                        cursor: chatInput.trim() && !sending ? 'pointer' : 'default',
+                      }}>
+                      <Icon name="send" size={18} className={chatInput.trim() && !sending ? 'text-white' : 'text-text-muted'} />
+                    </button>
+                  </div>
+                </div>
               </div>
-            </>
-          ) : (
-            /* Empty state */
-            <div className="flex-1 flex items-center justify-center flex-col gap-4 px-6">
-              <div className="w-[72px] h-[72px] rounded-[20px] bg-green-50 flex items-center justify-center">
-                <Icon name="msg" size={32} className="text-green-600" />
-              </div>
-              <h3 className="font-display font-bold text-xl md:text-[22px] text-text m-0">Your Messages</h3>
-              <p className="font-sans text-sm text-text-muted text-center max-w-[320px]">Select a conversation to view messages, or text FarmLink to manage your inventory and orders.</p>
-              <button onClick={startNewConvo} className="px-6 py-2.5 rounded-[10px] text-white border-none font-sans font-semibold text-sm cursor-pointer flex items-center gap-2"
-                style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
-                <Icon name="msg" size={16} className="text-white" /> Text FarmLink
-              </button>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
 
-        {/* RIGHT: Context Panel — visible on lg+ or when mobileView=panel */}
-        <div className={`w-full lg:w-[300px] border-l border-border flex-col bg-white shrink-0 ${mobileView === 'panel' ? 'flex' : 'hidden'} lg:flex`}>
-          {/* Mobile back from panel */}
-          <div className="lg:hidden flex items-center gap-2 px-4 py-3 border-b border-border-light">
-            <button onClick={() => setMobileView(activeConvo ? 'chat' : 'list')} className="bg-transparent border-none cursor-pointer p-0 flex items-center gap-1.5 text-text-soft font-sans text-[13px] font-medium">
-              <Icon name="back" size={16} className="text-text-muted" /> Back
-            </button>
+        {/* ORDERS VIEW */}
+        {activeView === 'orders' && (
+          <div className="h-full overflow-y-auto">
+            <OrdersPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} />
           </div>
-          {/* Panel tabs */}
-          <div className="flex border-b border-border">
-            {[
-              { id: 'orders' as const, icon: 'order', label: 'Orders' },
-              { id: 'inventory' as const, icon: 'package', label: isFarmer ? 'Inventory' : 'Available' },
-              { id: 'markets' as const, icon: 'market', label: isFarmer ? 'My Markets' : 'My Farms' },
-              { id: 'directory' as const, icon: 'search', label: 'Directory' },
-            ].map(tab => (
-              <button key={tab.id} onClick={() => setSidePanel(tab.id)} className="flex-1 py-3 border-none cursor-pointer flex flex-col items-center gap-0.5 transition-all duration-150"
-                style={{
-                  background: sidePanel === tab.id ? '#FAF8F5' : 'transparent',
-                  borderBottom: sidePanel === tab.id ? '2px solid #2E6B34' : '2px solid transparent',
-                }}>
-                <Icon name={tab.icon} size={16} className={sidePanel === tab.id ? 'text-green-600' : 'text-text-muted'} />
-                <span className={`font-sans text-[10px] font-semibold ${sidePanel === tab.id ? 'text-green-600' : 'text-text-muted'}`}>{tab.label}</span>
-              </button>
-            ))}
+        )}
+
+        {/* INVENTORY VIEW */}
+        {activeView === 'inventory' && (
+          <div className="h-full overflow-y-auto">
+            <InventoryPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} isFarmer={!!isFarmer} />
           </div>
-          {/* Panel content */}
-          <div className="flex-1 overflow-y-auto">
-            {sidePanel === 'orders' && <OrdersPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} />}
-            {sidePanel === 'inventory' && <InventoryPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} isFarmer={!!isFarmer} />}
-            {sidePanel === 'markets' && (isFarmer ? <MarketsPanel farmId={farm?.id} /> : <FarmsPanel marketId={market?.id} />)}
-            {sidePanel === 'directory' && <DirectoryPanel isFarmer={!!isFarmer} farmId={farm?.id} marketId={market?.id} />}
+        )}
+
+        {/* MARKETS / FARMS VIEW (with Find New + Invite) */}
+        {activeView === 'markets' && (
+          <div className="h-full overflow-y-auto">
+            <ConnectionsView isFarmer={!!isFarmer} farmId={farm?.id} marketId={market?.id} />
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -524,31 +448,31 @@ function OrdersPanel({ farmId, marketId }: { farmId?: string; marketId?: string 
   };
 
   return (
-    <div className="p-5">
-      <h3 className="font-display font-bold text-lg text-text mb-4">Recent Orders</h3>
+    <div className="p-6 max-w-[1100px] mx-auto w-full">
+      <h2 className="font-display font-bold text-[22px] text-text mb-5">Recent Orders</h2>
       {loading ? (
-        <div className="text-center text-text-muted text-sm py-6">Loading...</div>
+        <div className="text-center text-text-muted text-sm py-10">Loading...</div>
       ) : orders.length === 0 ? (
-        <div className="text-center text-text-muted text-sm py-6">No orders yet</div>
+        <div className="text-center text-text-muted text-sm py-10">No orders yet</div>
       ) : (
-        <div className="flex flex-col gap-2.5">
-          {orders.slice(0, 10).map((o: any, i: number) => {
+        <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
+          {orders.slice(0, 20).map((o: any, i: number) => {
             const sc = STATUS_COLORS[o.status] || '#9A9A9A';
             const nextStatuses = ORDER_TRANSITIONS[o.status] || [];
             return (
-              <div key={o.id} className="bg-bg rounded-lg p-3.5 border border-border-light" style={{ animation: `fadeUp 0.3s ease ${i * 0.05}s both` }}>
-                <div className="flex justify-between items-center mb-1.5">
-                  <span className="font-mono text-[13px] font-semibold text-text">{o.order_number || `#${String(o.id).slice(0, 8)}`}</span>
-                  <span className="font-sans text-[11px] font-semibold px-2 py-0.5 rounded-md" style={{ color: sc, background: `${sc}12` }}>{o.status}</span>
+              <div key={o.id} className="bg-white rounded-2xl p-4 border border-border-light flex flex-col" style={{ animation: `fadeUp 0.3s ease ${i * 0.04}s both`, boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="font-mono text-[13px] font-semibold text-text-soft">{o.order_number || `#${String(o.id).slice(0, 8)}`}</span>
+                  <span className="font-sans text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize" style={{ color: sc, background: `${sc}18` }}>{String(o.status).replace('_', ' ')}</span>
                 </div>
-                <div className="font-sans text-[13px] text-text font-semibold">{o.market_name || o.farm_name || 'Order'}</div>
-                {o.order_date && <div className="font-sans text-[11px] text-text-muted mt-0.5">{new Date(o.order_date).toLocaleDateString()}</div>}
-                <div className="font-mono text-sm font-bold mt-1.5" style={{ color: '#2E6B34' }}>${Number(o.total || 0).toFixed(2)}</div>
+                <div className="font-sans text-[16px] text-text font-semibold leading-tight">{o.market_name || o.farm_name || 'Order'}</div>
+                {o.order_date && <div className="font-sans text-[12px] text-text-muted mt-0.5">{new Date(o.order_date).toLocaleDateString()}</div>}
+                <div className="font-mono text-[20px] font-bold mt-2" style={{ color: '#2E6B34' }}>${Number(o.total || 0).toFixed(2)}</div>
                 {nextStatuses.length > 0 && (
-                  <div className="flex gap-1.5 mt-2">
+                  <div className="flex gap-2 mt-3 pt-1">
                     {nextStatuses.map(ns => (
                       <button key={ns} onClick={() => updateStatus(o.id, ns)} disabled={updating === o.id}
-                        className="px-2.5 py-1 rounded-md font-sans text-[11px] font-semibold border-none cursor-pointer transition-colors"
+                        className="flex-1 h-10 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer transition-colors"
                         style={{
                           background: ns === 'cancelled' ? '#FDECEB' : '#E8F5E3',
                           color: ns === 'cancelled' ? '#C44B3F' : '#2E6B34',
@@ -575,7 +499,11 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
   const [editing, setEditing] = useState<string | null>(null);
   const [editQty, setEditQty] = useState('');
   const [editPrice, setEditPrice] = useState('');
+  const [editHarvest, setEditHarvest] = useState('');
   const [clearConfirm, setClearConfirm] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState<string | null>(null);
 
   const loadInventory = useCallback(() => {
     const fetcher = farmId
@@ -595,6 +523,7 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
     setEditing(item.id);
     setEditQty(String(item.remaining ?? item.quantity ?? ''));
     setEditPrice(String(item.price ?? ''));
+    setEditHarvest(item.harvest_date ? new Date(item.harvest_date).toISOString().slice(0, 10) : '');
   };
 
   const saveEdit = async (id: string) => {
@@ -602,6 +531,7 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
       await api.updateInventory(id, {
         remaining: Number(editQty),
         price: Number(editPrice),
+        harvest_date: editHarvest || null,
       });
       setEditing(null);
       loadInventory();
@@ -610,21 +540,44 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
     }
   };
 
-  const clearItem = async (id: string) => {
+  const deleteItem = async (id: string) => {
+    setDeleteBusy(id);
     try {
-      await api.updateInventory(id, { remaining: 0, status: 'sold' });
+      await api.deleteInventory(id);
+      setPendingDelete(null);
       loadInventory();
-    } catch (err) {
-      console.error('Failed to clear inventory item:', err);
+    } catch (err: any) {
+      console.error('Failed to delete inventory:', err);
+      alert(err?.message || 'Could not delete this item. Please try again.');
+    } finally {
+      setDeleteBusy(null);
     }
   };
 
-  const deleteItem = async (id: string) => {
+  // Phase B: add/replace/delete a produce photo on an existing item.
+  const setPhoto = async (id: string, file: File) => {
+    setPhotoBusy(id);
     try {
-      await api.deleteInventory(id);
+      const { url } = await api.uploadImage(file);
+      await api.updateInventory(id, { image_url: url });
       loadInventory();
     } catch (err) {
-      console.error('Failed to delete inventory:', err);
+      console.error('Failed to set produce photo:', err);
+      alert('Failed to upload photo. Please try again.');
+    } finally {
+      setPhotoBusy(null);
+    }
+  };
+
+  const removePhoto = async (id: string) => {
+    setPhotoBusy(id);
+    try {
+      await api.updateInventory(id, { image_url: null });
+      loadInventory();
+    } catch (err) {
+      console.error('Failed to remove produce photo:', err);
+    } finally {
+      setPhotoBusy(null);
     }
   };
 
@@ -651,95 +604,130 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
   };
 
   return (
-    <div className="p-5">
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="font-display font-bold text-lg text-text m-0">{isFarmer ? 'Your Inventory' : 'Available Items'}</h3>
+    <div className="p-6 max-w-[1100px] mx-auto w-full">
+      <div className="flex justify-between items-center mb-5">
+        <h2 className="font-display font-bold text-[22px] text-text m-0">{isFarmer ? 'Inventory' : 'Available Items'}</h2>
         {isFarmer && activeInventory.length > 0 && !clearConfirm && (
           <button
             onClick={() => setClearConfirm(true)}
-            className="text-[11px] font-semibold font-sans text-red-600 border border-red-200 bg-red-50 rounded-md px-2.5 py-1 cursor-pointer hover:bg-red-100 transition-colors"
+            className="text-[13px] font-semibold font-sans text-red-600 border border-red-200 bg-red-50 rounded-lg px-3.5 h-9 cursor-pointer hover:bg-red-100 transition-colors"
           >
             Clear All
           </button>
         )}
       </div>
       {clearConfirm && (
-        <div className="mb-4 p-3 rounded-lg border border-red-200 bg-red-50">
-          <p className="font-sans text-xs text-red-700 m-0 mb-2">Mark all {activeInventory.length} active items as sold (qty 0)?</p>
+        <div className="mb-5 p-4 rounded-xl border border-red-200 bg-red-50">
+          <p className="font-sans text-sm text-red-700 m-0 mb-3">Mark all {activeInventory.length} active items as sold (qty 0)?</p>
           <div className="flex gap-2">
-            <button onClick={clearAll} className="flex-1 py-1.5 rounded-md bg-red-600 text-white border-none font-sans text-[11px] font-semibold cursor-pointer">Yes, clear all</button>
-            <button onClick={() => setClearConfirm(false)} className="flex-1 py-1.5 rounded-md bg-white border border-red-200 font-sans text-[11px] font-semibold text-red-600 cursor-pointer">Cancel</button>
+            <button onClick={clearAll} className="flex-1 h-10 rounded-lg bg-red-600 text-white border-none font-sans text-[13px] font-semibold cursor-pointer">Yes, clear all</button>
+            <button onClick={() => setClearConfirm(false)} className="flex-1 h-10 rounded-lg bg-white border border-red-200 font-sans text-[13px] font-semibold text-red-600 cursor-pointer">Cancel</button>
           </div>
         </div>
       )}
       {loading ? (
-        <div className="text-center text-text-muted text-sm py-6">Loading...</div>
+        <div className="text-center text-text-muted text-sm py-10">Loading...</div>
       ) : inventory.length === 0 ? (
-        <div className="text-center text-text-muted text-sm py-6">No inventory items</div>
+        <div className="text-center text-text-muted text-sm py-10">No inventory items</div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
           {inventory.map((item: any, i: number) => {
-            const s = statusStyles[item.status] || statusStyles.available;
+            // Derive the badge from quantities so it can't drift out of sync with stock.
+            const rem = Number(item.remaining ?? item.quantity ?? 0);
+            const qty = Number(item.quantity ?? rem);
+            const derivedStatus = rem <= 0 ? 'sold' : rem < qty ? 'partial' : 'available';
+            const s = statusStyles[derivedStatus] || statusStyles.available;
             const isEditing = editing === item.id;
             return (
-              <div key={item.id || i} className="bg-bg rounded-lg p-3.5 border border-border-light" style={{ animation: `fadeUp 0.3s ease ${i * 0.05}s both`, opacity: item.status === 'sold' ? 0.5 : 1 }}>
-                <div className="flex justify-between items-center">
-                  <span className="font-sans text-sm font-semibold text-text">{item.product_name}</span>
-                  <span className="text-[10px] font-bold font-sans px-2 py-0.5 rounded-md" style={{ background: s.bg, color: s.color }}>{s.label}</span>
+              <div key={item.id || i} className="bg-white rounded-2xl border border-border-light overflow-hidden flex flex-col"
+                style={{ animation: `fadeUp 0.3s ease ${i * 0.04}s both`, opacity: derivedStatus === 'sold' ? 0.55 : 1, boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+                {/* Photo zone */}
+                <div className="relative h-36 bg-bg-alt flex items-center justify-center overflow-hidden">
+                  {item.image_url ? (
+                    <img src={item.image_url} alt={item.product_name} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="text-4xl opacity-50">🌱</div>
+                  )}
+                  <span className="absolute top-2.5 right-2.5 text-[11px] font-bold font-sans px-2.5 py-1 rounded-full backdrop-blur" style={{ background: `${s.bg}E6`, color: s.color }}>{s.label}</span>
+                  {isFarmer && (
+                    <div className="absolute bottom-2.5 right-2.5 flex gap-1.5">
+                      <label className="h-8 px-3 rounded-full bg-black/55 backdrop-blur text-white text-[12px] font-semibold flex items-center cursor-pointer hover:bg-black/70 transition-colors">
+                        {photoBusy === item.id ? '…' : item.image_url ? 'Replace' : '+ Photo'}
+                        <input type="file" accept="image/*" capture="environment" className="hidden" disabled={photoBusy === item.id}
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) setPhoto(item.id, f); e.target.value = ''; }} />
+                      </label>
+                      {item.image_url && (
+                        <button onClick={() => removePhoto(item.id)} className="w-8 h-8 rounded-full bg-black/55 backdrop-blur text-white text-sm flex items-center justify-center cursor-pointer hover:bg-black/70 border-none" title="Remove photo">✕</button>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {!isFarmer && item.farm_name && (
-                  <div className="font-sans text-[11px] text-text-muted mt-0.5">from {item.farm_name}</div>
-                )}
-                {isEditing ? (
-                  <div className="mt-2 flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2">
-                      <label className="font-sans text-[11px] text-text-muted w-8">Qty</label>
-                      <input value={editQty} onChange={e => setEditQty(e.target.value)} className="flex-1 px-2 py-1 rounded border border-border bg-white font-mono text-xs text-text outline-none" />
-                      <span className="font-sans text-[11px] text-text-muted">{item.unit}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label className="font-sans text-[11px] text-text-muted w-8">$</label>
-                      <input value={editPrice} onChange={e => setEditPrice(e.target.value)} className="flex-1 px-2 py-1 rounded border border-border bg-white font-mono text-xs text-text outline-none" />
-                      <span className="font-sans text-[11px] text-text-muted">/{item.unit}</span>
-                    </div>
-                    <div className="flex gap-1.5 mt-1">
-                      <button onClick={() => saveEdit(item.id)} className="flex-1 py-1 rounded-md bg-green-600 text-white border-none font-sans text-[11px] font-semibold cursor-pointer">Save</button>
-                      <button onClick={() => setEditing(null)} className="flex-1 py-1 rounded-md bg-bg border border-border font-sans text-[11px] font-semibold text-text-muted cursor-pointer">Cancel</button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex justify-between mt-1.5">
-                      <span className="font-sans text-xs text-text-muted">{item.remaining ?? item.quantity ?? 0} {item.unit}</span>
-                      <span className="font-mono text-xs font-semibold" style={{ color: '#2E6B34' }}>${Number(item.price || 0).toFixed(2)}/{item.unit}</span>
-                    </div>
-                    {item.harvest_date && <div className="font-sans text-[10px] text-text-muted mt-1">Harvested {new Date(item.harvest_date).toLocaleDateString()}</div>}
-                    {isFarmer && (
-                      <div className="flex gap-1.5 mt-2">
-                        <button onClick={() => startEdit(item)} className="flex-1 py-1 rounded-md bg-bg border border-border-light font-sans text-[11px] font-semibold text-text-soft cursor-pointer hover:bg-earth-25 transition-colors">
-                          <Icon name="edit" size={11} className="text-text-muted inline-block mr-1" style={{ verticalAlign: '-1px' }} /> Edit
-                        </button>
-                        {item.status !== 'sold' && (
-                          <button onClick={() => clearItem(item.id)} className="py-1 px-2.5 rounded-md bg-bg border border-orange-200 font-sans text-[11px] font-semibold text-orange-500 cursor-pointer hover:bg-orange-50 transition-colors" title="Clear (set to 0)">
-                            0
-                          </button>
-                        )}
-                        <button onClick={() => deleteItem(item.id)} className="py-1 px-2.5 rounded-md bg-bg border border-red-200 font-sans text-[11px] font-semibold text-red-500 cursor-pointer hover:bg-red-50 transition-colors" title="Delete">
-                          ✕
-                        </button>
+                {/* Body */}
+                <div className="p-4 flex-1 flex flex-col">
+                  <div className="font-sans text-[16px] font-semibold text-text leading-tight">{item.product_name}</div>
+                  {!isFarmer && item.farm_name && (
+                    <div className="font-sans text-[12px] text-text-muted mt-0.5">from {item.farm_name}</div>
+                  )}
+                  {isEditing ? (
+                    <div className="mt-3 flex flex-col gap-2">
+                      <div className="flex items-center gap-2">
+                        <label className="font-sans text-[12px] text-text-muted w-10">Qty</label>
+                        <input value={editQty} onChange={e => setEditQty(e.target.value)} className="flex-1 h-9 px-3 rounded-lg border border-border bg-white font-mono text-sm text-text outline-none focus:border-green-500" />
+                        <span className="font-sans text-[12px] text-text-muted">{item.unit}</span>
                       </div>
-                    )}
-                  </>
-                )}
+                      <div className="flex items-center gap-2">
+                        <label className="font-sans text-[12px] text-text-muted w-10">$</label>
+                        <input value={editPrice} onChange={e => setEditPrice(e.target.value)} className="flex-1 h-9 px-3 rounded-lg border border-border bg-white font-mono text-sm text-text outline-none focus:border-green-500" />
+                        <span className="font-sans text-[12px] text-text-muted">/{item.unit}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="font-sans text-[12px] text-text-muted w-10">Harv.</label>
+                        <input type="date" value={editHarvest} onChange={e => setEditHarvest(e.target.value)} className="flex-1 h-9 px-3 rounded-lg border border-border bg-white font-sans text-[13px] text-text outline-none focus:border-green-500" />
+                      </div>
+                      <div className="flex gap-2 mt-1">
+                        <button onClick={() => saveEdit(item.id)} className="flex-1 h-10 rounded-lg bg-green-600 text-white border-none font-sans text-[13px] font-semibold cursor-pointer">Save</button>
+                        <button onClick={() => setEditing(null)} className="flex-1 h-10 rounded-lg bg-bg border border-border font-sans text-[13px] font-semibold text-text-muted cursor-pointer">Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-baseline justify-between mt-2">
+                        <span className="font-sans text-[15px] text-text-soft">{item.remaining ?? item.quantity ?? 0} <span className="text-text-muted text-[13px]">{item.unit}</span></span>
+                        <span className="font-mono text-[16px] font-bold" style={{ color: '#2E6B34' }}>${Number(item.price || 0).toFixed(2)}<span className="text-[11px] font-medium text-text-muted">/{item.unit}</span></span>
+                      </div>
+                      {item.harvest_date && <div className="font-sans text-[12px] text-text-muted mt-1.5">Harvested {new Date(item.harvest_date).toLocaleDateString()}</div>}
+                      {isFarmer && (
+                        pendingDelete === item.id ? (
+                          <div className="flex flex-col gap-2 mt-auto pt-3">
+                            <span className="font-sans text-[13px] text-red-600 font-semibold text-center">Delete this item?</span>
+                            <div className="flex gap-2">
+                              <button onClick={() => deleteItem(item.id)} disabled={deleteBusy === item.id} className="flex-1 h-10 rounded-lg bg-red-600 text-white border-none font-sans text-[13px] font-semibold cursor-pointer disabled:opacity-50">{deleteBusy === item.id ? 'Deleting…' : 'Yes, delete'}</button>
+                              <button onClick={() => setPendingDelete(null)} className="flex-1 h-10 rounded-lg bg-bg border border-border font-sans text-[13px] font-semibold text-text-muted cursor-pointer">Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex gap-2 mt-auto pt-3">
+                            <button onClick={() => startEdit(item)} className="flex-1 h-10 rounded-lg bg-bg border border-border-light font-sans text-[13px] font-semibold text-text-soft cursor-pointer hover:bg-earth-25 transition-colors flex items-center justify-center gap-1.5">
+                              <Icon name="edit" size={13} className="text-text-muted" /> Edit
+                            </button>
+                            <button onClick={() => setPendingDelete(item.id)} className="flex-1 h-10 rounded-lg bg-bg border border-red-200 font-sans text-[13px] font-semibold text-red-500 cursor-pointer hover:bg-red-50 transition-colors flex items-center justify-center" title="Delete item">
+                              Delete
+                            </button>
+                          </div>
+                        )
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             );
           })}
         </div>
       )}
       {isFarmer && (
-        <div className="mt-4 p-3.5 rounded-lg border border-dashed" style={{ background: '#E8F5E3', borderColor: 'rgba(46,107,52,0.25)' }}>
-          <p className="font-sans text-xs leading-relaxed m-0" style={{ color: '#2E6B34' }}>
-            <strong>Tip:</strong> You can add inventory by texting! Just send something like &ldquo;50lb jalapeños at $2.49&rdquo;
+        <div className="mt-5 p-4 rounded-xl border border-dashed" style={{ background: '#E8F5E3', borderColor: 'rgba(46,107,52,0.25)' }}>
+          <p className="font-sans text-[13px] leading-relaxed m-0" style={{ color: '#2E6B34' }}>
+            <strong>Tip:</strong> Add inventory by texting — just send &ldquo;50lb jalapeños at $2.49&rdquo;
           </p>
         </div>
       )}
@@ -817,9 +805,9 @@ function MarketsPanel({ farmId }: { farmId?: string }) {
   };
 
   return (
-    <div className="p-5">
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="font-display font-bold text-lg text-text m-0">Your Markets</h3>
+    <div className="p-6 max-w-[760px] mx-auto w-full">
+      <div className="flex justify-between items-center mb-5">
+        <h2 className="font-display font-bold text-[22px] text-text m-0">Your Markets</h2>
         {farmId && (
           <button onClick={() => setShowAdd(!showAdd)}
             className="px-2.5 py-1 rounded-md font-sans text-[11px] font-semibold border-none cursor-pointer"
@@ -949,8 +937,8 @@ function FarmsPanel({ marketId }: { marketId?: string }) {
   }, [marketId]);
 
   return (
-    <div className="p-5">
-      <h3 className="font-display font-bold text-lg text-text mb-4">Your Farms</h3>
+    <div className="p-6 max-w-[760px] mx-auto w-full">
+      <h2 className="font-display font-bold text-[22px] text-text mb-5">Your Farms</h2>
       {loading ? (
         <div className="text-center text-text-muted text-sm py-6">Loading...</div>
       ) : farms.length === 0 ? (
@@ -1062,7 +1050,7 @@ function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; far
   };
 
   return (
-    <div className="h-full flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4 p-6 max-w-[760px] mx-auto w-full">
       <div className="flex gap-2">
         {(['browse', 'pending'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
@@ -1152,6 +1140,81 @@ function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; far
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─── Markets/Farms view: My connections, Find New, and Invite ─── */
+function ConnectionsView({ isFarmer, farmId, marketId }: { isFarmer: boolean; farmId?: string; marketId?: string }) {
+  const [mode, setMode] = useState<'mine' | 'find'>('mine');
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [invitePhone, setInvitePhone] = useState('');
+  const [inviteName, setInviteName] = useState('');
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteMsg, setInviteMsg] = useState('');
+
+  const label = isFarmer ? 'Markets' : 'Farms';
+  const singular = isFarmer ? 'market' : 'farm';
+
+  const sendInvite = async () => {
+    if (!invitePhone.trim()) return;
+    setInviteBusy(true);
+    setInviteMsg('');
+    try {
+      const res = await api.invite({ phone: invitePhone.trim(), name: inviteName.trim() || undefined });
+      setInviteMsg(res.message || 'Invitation sent!');
+      setInvitePhone('');
+      setInviteName('');
+    } catch (e: any) {
+      setInviteMsg(e.message || 'Failed to send invitation');
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const tabBtn = (active: boolean) =>
+    ({ background: active ? '#fff' : 'transparent', color: active ? '#2E6B34' : '#9A9A9A', boxShadow: active ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' });
+
+  return (
+    <div className="w-full">
+      {/* Control bar */}
+      <div className="max-w-[1100px] mx-auto px-6 pt-6 pb-1 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1 rounded-full bg-bg-alt p-1">
+          <button onClick={() => setMode('mine')} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans transition-all" style={tabBtn(mode === 'mine')}>My {label}</button>
+          <button onClick={() => setMode('find')} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans transition-all" style={tabBtn(mode === 'find')}>Find New {label}</button>
+        </div>
+        <button onClick={() => { setInviteOpen(o => !o); setInviteMsg(''); }} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans text-white flex items-center gap-1.5 active:scale-95 transition-transform" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
+          <Icon name="msg" size={14} className="text-white" /> Invite a {singular}
+        </button>
+      </div>
+
+      {/* Invite form */}
+      {inviteOpen && (
+        <div className="max-w-[1100px] mx-auto px-6 pt-3">
+          <div className="p-4 rounded-2xl border border-green-200 bg-green-50">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-sans font-bold text-[15px] text-green-700 m-0">Invite a {singular} to FarmLink</h3>
+              <button onClick={() => setInviteOpen(false)} className="bg-transparent border-none cursor-pointer text-text-muted text-lg leading-none">✕</button>
+            </div>
+            <p className="font-sans text-[13px] text-text-soft mb-3">We&apos;ll text them an invitation to join — just enter their number.</p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input value={inviteName} onChange={e => setInviteName(e.target.value)} placeholder="Name (optional)" className="flex-1 h-11 px-3.5 rounded-xl border border-border bg-white font-sans text-[15px] text-text outline-none focus:border-green-500" />
+              <input value={invitePhone} onChange={e => setInvitePhone(e.target.value)} type="tel" placeholder="Phone number" className="flex-1 h-11 px-3.5 rounded-xl border border-border bg-white font-sans text-[15px] text-text outline-none focus:border-green-500" />
+              <button onClick={sendInvite} disabled={!invitePhone.trim() || inviteBusy} className="h-11 px-5 rounded-xl text-white border-none font-sans font-semibold text-[14px] cursor-pointer disabled:opacity-40" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
+                {inviteBusy ? 'Sending…' : 'Send Invite'}
+              </button>
+            </div>
+            {inviteMsg && (
+              <div className="mt-2.5 font-sans text-[13px] font-semibold" style={{ color: /fail|could not|error/i.test(inviteMsg) ? '#C44B3F' : '#2E6B34' }}>{inviteMsg}</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Body */}
+      {mode === 'mine'
+        ? (isFarmer ? <MarketsPanel farmId={farmId} /> : <FarmsPanel marketId={marketId} />)
+        : <DirectoryPanel isFarmer={isFarmer} farmId={farmId} marketId={marketId} />}
     </div>
   );
 }

@@ -1,10 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { signJwt, verifyJwt } from '../utils/jwt.js';
+import { sendOtp, verifyOtp } from '../services/otp.js';
 import { v4 as uuid } from 'uuid';
-
-// In-memory OTP store (use Firestore TTL docs in production)
-const otpStore = new Map<string, { code: string; expires: number }>();
 
 export async function authRoutes(app: FastifyInstance) {
   // Signup
@@ -93,13 +91,24 @@ export async function authRoutes(app: FastifyInstance) {
       market = { id: marketId, name: data.businessName };
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(data.phone, { code, expires: Date.now() + 5 * 60 * 1000 });
-    app.log.info({ phone: data.phone, code }, 'Signup OTP generated');
+    try {
+      await sendOtp(app.db, app.env, data.phone);
+    } catch (err) {
+      app.log.error({ err, phone: data.phone }, 'Failed to send signup OTP');
+      // Account is created; surface a soft error so the user can retry the OTP request.
+      return reply.status(201).send({
+        success: true,
+        message: 'Account created, but we could not send your verification code. Please request a new code.',
+        userId,
+        farm,
+        market,
+        otp_send_failed: true,
+      });
+    }
 
     reply.status(201).send({
       success: true,
-      message: 'Account created. Please verify your phone number.',
+      message: 'Account created. A verification code has been sent to your phone.',
       userId,
       farm,
       market,
@@ -130,9 +139,12 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'No account found. Please sign up first.' });
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(phone, { code, expires: Date.now() + 5 * 60 * 1000 });
-    app.log.info({ phone, code }, 'OTP generated');
+    try {
+      await sendOtp(app.db, app.env, phone);
+    } catch (err) {
+      app.log.error({ err, phone }, 'Failed to send OTP');
+      return reply.status(502).send({ error: 'Could not send verification code. Please try again shortly.' });
+    }
 
     reply.send({ success: true, message: 'OTP sent' });
   });
@@ -145,13 +157,11 @@ export async function authRoutes(app: FastifyInstance) {
     });
     const { phone, code } = schema.parse(request.body);
 
-    const stored = otpStore.get(phone);
     const isDev = app.env.NODE_ENV === 'development';
-
-    if (!isDev && (!stored || stored.code !== code || stored.expires < Date.now())) {
+    const valid = await verifyOtp(app.db, phone, code, isDev);
+    if (!valid) {
       return reply.status(401).send({ error: 'Invalid or expired OTP' });
     }
-    otpStore.delete(phone);
 
     const userSnap = await app.db.collection('users').where('phone', '==', phone).limit(1).get();
     if (userSnap.empty) {

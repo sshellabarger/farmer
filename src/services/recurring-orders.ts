@@ -7,10 +7,17 @@ export async function processRecurringOrders(db: Firestore, env: Env): Promise<{
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const dueSnap = await db.collection('recurring_orders')
+  // Filter by next_delivery in memory to avoid an active+next_delivery composite index.
+  const activeSnap = await db.collection('recurring_orders')
     .where('active', '==', true)
-    .where('next_delivery', '<=', today)
     .get();
+  const dueSnap = {
+    docs: activeSnap.docs.filter((d) => {
+      const nd = d.data().next_delivery?.toDate?.() || new Date(d.data().next_delivery);
+      return nd <= today;
+    }),
+    get size() { return this.docs.length; },
+  };
 
   let created = 0;
   let skipped = 0;
@@ -41,11 +48,14 @@ export async function processRecurringOrders(db: Firestore, env: Env): Promise<{
 
       const invSnap = await db.collection('inventory')
         .where('farm_id', '==', ro.farm_id)
-        .where('product_id', '==', item.product_id)
-        .where('status', 'in', ['available', 'partial'])
         .get();
 
-      const inv = invSnap.docs.find((d) => d.data().remaining >= item.quantity);
+      const inv = invSnap.docs.find((d) => {
+        const v = d.data();
+        return v.product_id === item.product_id
+          && ['available', 'partial'].includes(v.status)
+          && v.remaining >= item.quantity;
+      });
       if (!inv) {
         unavailable.push(`${item.quantity} ${item.unit} ${productName}`);
         continue;

@@ -19,7 +19,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
 
     let query: FirebaseFirestore.Query = app.db.collection('orders');
     if (farm_id) query = query.where('farm_id', '==', farm_id);
-    query = query.where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
+    const ACTIVE_STATUSES = ['confirmed', 'delivered', 'in_transit'];
 
     const snapshot = await query.get();
 
@@ -30,6 +30,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
 
     for (const doc of snapshot.docs) {
       const order = doc.data();
+      if (!ACTIVE_STATUSES.includes(order.status)) continue;
       const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
 
       if (orderDate >= periodStart) {
@@ -71,13 +72,14 @@ export async function analyticsRoutes(app: FastifyInstance) {
 
     let query: FirebaseFirestore.Query = app.db.collection('orders');
     if (farm_id) query = query.where('farm_id', '==', farm_id);
-    query = query.where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
+    const ACTIVE_STATUSES = ['confirmed', 'delivered', 'in_transit'];
 
     const ordersSnap = await query.get();
     const productMap = new Map<string, { revenue: number; total_quantity: number; unit: string }>();
 
     for (const orderDoc of ordersSnap.docs) {
       const order = orderDoc.data();
+      if (!ACTIVE_STATUSES.includes(order.status)) continue;
       const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
       if (orderDate < periodStart) continue;
 
@@ -109,13 +111,14 @@ export async function analyticsRoutes(app: FastifyInstance) {
 
     let query: FirebaseFirestore.Query = app.db.collection('orders');
     if (farm_id) query = query.where('farm_id', '==', farm_id);
-    query = query.where('status', 'in', ['confirmed', 'delivered', 'in_transit']);
+    const ACTIVE_STATUSES = ['confirmed', 'delivered', 'in_transit'];
 
     const snapshot = await query.get();
     const marketMap = new Map<string, { revenue: number; order_count: number }>();
 
     for (const doc of snapshot.docs) {
       const order = doc.data();
+      if (!ACTIVE_STATUSES.includes(order.status)) continue;
       const orderDate = order.order_date?.toDate?.() || new Date(order.order_date);
       if (orderDate < periodStart) continue;
 

@@ -1,6 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { sendSms } from './sms.js';
+import { notifyByPhone } from './push.js';
 import { v4 as uuid } from 'uuid';
 
 export async function sendOrderStatusNotification(params: {
@@ -57,18 +57,24 @@ export async function sendOrderStatusNotification(params: {
       market_id: order.market_id,
       order_id: orderId,
       type: 'order_update',
-      channel: 'sms',
+      channel: 'push_or_sms',
       status: 'pending',
       scheduled_for: new Date(),
       created_at: new Date(),
     });
 
-    try {
-      await sendSms({ env, to: notif.phone, body: notif.message });
-      await db.collection('notifications').doc(notifId).update({ status: 'sent', sent_at: new Date() });
-    } catch {
-      await db.collection('notifications').doc(notifId).update({ status: 'failed' });
-    }
+    // Prefer free push (if the recipient has the app), fall back to SMS.
+    const channel = await notifyByPhone(db, env, notif.phone, {
+      title: `Order ${order.order_number}`,
+      body: notif.message,
+      url: '/',
+      sms: notif.message,
+    });
+    await db.collection('notifications').doc(notifId).update({
+      status: channel === 'none' ? 'failed' : 'sent',
+      channel,
+      sent_at: new Date(),
+    });
   }
 }
 

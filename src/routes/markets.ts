@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { authenticate, requireRole, requireMarketOwner } from '../middleware/rbac.js';
+import { byDateDesc, byNumberAsc } from '../utils/sort.js';
 
 export async function marketRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
@@ -46,14 +47,13 @@ export async function marketRoutes(app: FastifyInstance) {
   }, async (request) => {
     const marketId = request.params.id;
 
-    // Get farms connected to this market
+    // Get farms connected to this market (filter active in memory)
     const relsSnap = await app.db
       .collection('farm_market_rels')
       .where('market_id', '==', marketId)
-      .where('active', '==', true)
       .get();
 
-    const farmIds = relsSnap.docs.map((d) => d.data().farm_id);
+    const farmIds = relsSnap.docs.filter((d) => d.data().active).map((d) => d.data().farm_id);
     if (farmIds.length === 0) return { inventory: [] };
 
     // Get available inventory from connected farms
@@ -62,11 +62,11 @@ export async function marketRoutes(app: FastifyInstance) {
       const invSnap = await app.db
         .collection('inventory')
         .where('farm_id', '==', farmId)
-        .where('status', 'in', ['available', 'partial'])
         .get();
 
       for (const doc of invSnap.docs) {
         const inv = doc.data();
+        if (!['available', 'partial'].includes(inv.status)) continue;
         if (inv.remaining <= 0) continue;
         const productDoc = await app.db.collection('products').doc(inv.product_id).get();
         const product = productDoc.data() || {};
@@ -101,13 +101,12 @@ export async function marketRoutes(app: FastifyInstance) {
     const ordersSnap = await app.db
       .collection('orders')
       .where('market_id', '==', marketId)
-      .orderBy('created_at', 'desc')
-      .limit(50)
       .get();
+    const orderDocs = byDateDesc(ordersSnap.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
     const messages: any[] = [];
 
-    for (const doc of ordersSnap.docs) {
+    for (const doc of orderDocs) {
       const order = doc.data();
       const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
       const farmName = farmDoc.data()?.name || 'Unknown';
@@ -157,11 +156,10 @@ export async function marketRoutes(app: FastifyInstance) {
     const notifsSnap = await app.db
       .collection('notifications')
       .where('market_id', '==', marketId)
-      .orderBy('created_at', 'desc')
-      .limit(50)
       .get();
+    const notifDocs = byDateDesc(notifsSnap.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
-    for (const doc of notifsSnap.docs) {
+    for (const doc of notifDocs) {
       const notif = doc.data();
       let farmName = 'Unknown';
       let productName = '';
@@ -208,11 +206,14 @@ export async function marketRoutes(app: FastifyInstance) {
     const relsSnap = await app.db
       .collection('farm_market_rels')
       .where('market_id', '==', marketId)
-      .orderBy('priority')
       .get();
+    const relDocs = byNumberAsc(relsSnap.docs.map((d) => ({ doc: d, priority: d.data().priority })), 'priority', 99).map((x) => x.doc);
+
+    // Fetch all orders for this market once, then group by farm in memory.
+    const allOrdersSnap = await app.db.collection('orders').where('market_id', '==', marketId).get();
 
     const farms = await Promise.all(
-      relsSnap.docs.map(async (relDoc) => {
+      relDocs.map(async (relDoc) => {
         const rel = relDoc.data();
         const farmDoc = await app.db.collection('farms').doc(rel.farm_id).get();
         const farm = farmDoc.data() || {};
@@ -220,22 +221,16 @@ export async function marketRoutes(app: FastifyInstance) {
         const invSnap = await app.db
           .collection('inventory')
           .where('farm_id', '==', rel.farm_id)
-          .where('status', 'in', ['available', 'partial'])
           .get();
-        const availableItems = invSnap.docs.filter((d) => d.data().remaining > 0).length;
-
-        const ordersSnap = await app.db
-          .collection('orders')
-          .where('farm_id', '==', rel.farm_id)
-          .where('market_id', '==', marketId)
-          .get();
+        const availableItems = invSnap.docs.filter((d) => ['available', 'partial'].includes(d.data().status) && d.data().remaining > 0).length;
 
         let pendingCount = 0, pendingTotal = 0;
         let historyCount = 0, historyTotal = 0;
         const recentOrders: any[] = [];
 
-        for (const oDoc of ordersSnap.docs) {
+        for (const oDoc of allOrdersSnap.docs) {
           const o = oDoc.data();
+          if (o.farm_id !== rel.farm_id) continue;
           if (o.status === 'pending') { pendingCount++; pendingTotal += Number(o.total || 0); }
           else if (['confirmed', 'delivered', 'in_transit'].includes(o.status)) { historyCount++; historyTotal += Number(o.total || 0); }
           recentOrders.push({ id: oDoc.id, ...o });
@@ -283,12 +278,11 @@ export async function marketRoutes(app: FastifyInstance) {
     const snapshot = await app.db
       .collection('orders')
       .where('market_id', '==', request.params.id)
-      .orderBy('created_at', 'desc')
-      .limit(50)
       .get();
+    const orderDocs = byDateDesc(snapshot.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
     const orders = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      orderDocs.map(async (doc) => {
         const order = doc.data();
         const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
         return {

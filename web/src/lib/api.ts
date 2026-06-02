@@ -41,7 +41,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || body.message || `API error ${res.status}`);
   }
-  return res.json();
+  // Handle empty bodies (e.g. 204 No Content from DELETE) — res.json() would
+  // throw on an empty body, which previously made successful deletes look failed.
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 export const api = {
@@ -71,6 +75,10 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ phone, code }) },
     ),
   getMe: () => request<{ user: any; farm: any; market: any }>('/auth/me'),
+  invite: (data: { phone: string; name?: string }) =>
+    request<{ success: boolean; message: string }>('/invite', { method: 'POST', body: JSON.stringify(data) }),
+  registerPush: (token: string) =>
+    request<{ success: boolean }>('/push/register', { method: 'POST', body: JSON.stringify({ token }) }),
 
   // Farms
   getAllFarms: () => request<any>('/farms'),

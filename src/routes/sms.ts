@@ -4,6 +4,7 @@ import { processInboundMessage } from '../services/conversation.js';
 import { sendSms } from '../services/sms.js';
 import { notifyError } from '../services/error-notify.js';
 import { classifyError } from '../utils/errors.js';
+import { byDateDesc } from '../utils/sort.js';
 
 const telnyxInboundSchema = z.object({
   data: z.object({
@@ -39,7 +40,7 @@ export async function smsRoutes(app: FastifyInstance) {
 
     const userSnap = await app.db.collection('users').where('phone', '==', from).limit(1).get();
     if (userSnap.empty) {
-      await sendSms({ env: app.env, to: from, body: 'Welcome! Please create an account at farmlink.app/signup to get started.' });
+      await sendSms({ env: app.env, to: from, body: `Welcome! Please create an account at ${app.env.APP_URL}/signup to get started.` });
       return reply.send({ ok: true });
     }
 
@@ -88,7 +89,7 @@ export async function smsRoutes(app: FastifyInstance) {
       const userSnap = await app.db.collection('users').where('phone', '==', from).limit(1).get();
       if (userSnap.empty) {
         const { sendWhatsApp } = await import('../services/whatsapp.js');
-        await sendWhatsApp({ env: app.env, to: from, body: 'Welcome to FarmLink! Please create an account at farmlink.app/signup.' });
+        await sendWhatsApp({ env: app.env, to: from, body: `Welcome to FarmLink! Please create an account at ${app.env.APP_URL}/signup.` });
         continue;
       }
 
@@ -127,13 +128,12 @@ export async function smsRoutes(app: FastifyInstance) {
     const convoSnap = await app.db
       .collection('conversations')
       .where('phone_number', '==', phone)
-      .orderBy('last_message_at', 'desc')
-      .limit(1)
       .get();
 
     if (convoSnap.empty) return reply.send({ messages: [] });
 
-    const convoId = convoSnap.docs[0].id;
+    const latest = byDateDesc(convoSnap.docs.map((d) => ({ doc: d, last_message_at: d.data().last_message_at })), 'last_message_at')[0];
+    const convoId = latest.doc.id;
     const msgsSnap = await app.db
       .collection('conversations').doc(convoId).collection('messages')
       .orderBy('created_at', 'asc')
@@ -159,16 +159,18 @@ export async function smsRoutes(app: FastifyInstance) {
 
     if (farm_id) {
       const relsSnap = await app.db.collection('farm_market_rels')
-        .where('farm_id', '==', farm_id).where('active', '==', true).get();
+        .where('farm_id', '==', farm_id).get();
       for (const d of relsSnap.docs) {
+        if (!d.data().active) continue;
         const marketDoc = await app.db.collection('markets').doc(d.data().market_id).get();
         if (marketDoc.exists) includeUserIds.push(marketDoc.data()!.user_id);
       }
     }
     if (market_id) {
       const relsSnap = await app.db.collection('farm_market_rels')
-        .where('market_id', '==', market_id).where('active', '==', true).get();
+        .where('market_id', '==', market_id).get();
       for (const d of relsSnap.docs) {
+        if (!d.data().active) continue;
         const farmDoc = await app.db.collection('farms').doc(d.data().farm_id).get();
         if (farmDoc.exists) includeUserIds.push(farmDoc.data()!.user_id);
       }
@@ -179,10 +181,11 @@ export async function smsRoutes(app: FastifyInstance) {
       query = query.where('user_id', 'in', includeUserIds);
     }
 
-    const snapshot = await query.orderBy('last_message_at', 'desc').limit(50).get();
+    const snapshot = await query.get();
+    const convoDocs = byDateDesc(snapshot.docs.map((d) => ({ doc: d, last_message_at: d.data().last_message_at })), 'last_message_at').slice(0, 50).map((x) => x.doc);
 
     const results = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      convoDocs.map(async (doc) => {
         const conv = doc.data();
         const userDoc = await app.db.collection('users').doc(conv.user_id).get();
         const userData = userDoc.data() || {};
@@ -230,7 +233,10 @@ export async function smsRoutes(app: FastifyInstance) {
 
     const userSnap = await app.db.collection('users').where('phone', '==', normalizedFrom).limit(1).get();
     if (userSnap.empty) {
-      await sendSms({ env: app.env, to: normalizedFrom, body: 'Welcome! Please create an account at farmlink.us/signup.' });
+      // Send a welcome prompt, but never let a send failure 500 the webhook
+      // (voip.ms retries non-200 responses, which would reprocess the message).
+      await sendSms({ env: app.env, to: normalizedFrom, body: `Welcome! Please create an account at ${app.env.APP_URL}/signup.` })
+        .catch((err) => app.log.warn({ err, to: normalizedFrom }, 'Failed to send welcome SMS'));
       return reply.type('text/plain').send('ok');
     }
 
@@ -244,7 +250,7 @@ export async function smsRoutes(app: FastifyInstance) {
         ? "Our AI assistant is temporarily unavailable. Please try again in a moment."
         : "Something went wrong. Our team has been notified. Please try again shortly.";
       await sendSms({ env: app.env, to: normalizedFrom, body: userReply }).catch(() => null);
-      notifyError({ env: app.env, err, userPhone: normalizedFrom, userMessage: message }).catch(() => null);
+      notifyError({ env: app.env, err, source: 'sms-inbound', userPhone: normalizedFrom, userMessage: message }).catch(() => null);
     }
 
     return reply.type('text/plain').send('ok');

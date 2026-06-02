@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { sendOrderStatusNotification, calculateNextDeliveryDate } from '../services/order-notifications.js';
 import { authenticate, requireOrderParty, requireOrderCreateParty } from '../middleware/rbac.js';
+import { byDateDesc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
 
 export async function orderRoutes(app: FastifyInstance) {
@@ -16,25 +17,37 @@ export async function orderRoutes(app: FastifyInstance) {
     const user = request.authUser!;
     const { farm_id, market_id, status } = request.query;
 
+    // Use a single equality filter at the DB layer (to avoid composite indexes),
+    // then apply remaining filters + sort in memory.
     let query: FirebaseFirestore.Query = app.db.collection('orders');
+    let scopedFarmId: string | undefined;
+    let scopedMarketId: string | undefined;
 
-    if (farm_id) query = query.where('farm_id', '==', farm_id);
-    if (market_id) query = query.where('market_id', '==', market_id);
-    if (status) query = query.where('status', '==', status);
-
-    if (user.role !== 'admin') {
-      if (user.farmId && !user.marketId) {
-        query = query.where('farm_id', '==', user.farmId);
-      } else if (user.marketId && !user.farmId) {
-        query = query.where('market_id', '==', user.marketId);
-      }
-      // "both" role handled client-side for simplicity with Firestore
+    if (user.role !== 'admin' && user.farmId && !user.marketId) {
+      scopedFarmId = user.farmId;
+    } else if (user.role !== 'admin' && user.marketId && !user.farmId) {
+      scopedMarketId = user.marketId;
+    } else if (farm_id) {
+      scopedFarmId = farm_id;
+    } else if (market_id) {
+      scopedMarketId = market_id;
     }
 
-    const snapshot = await query.orderBy('created_at', 'desc').limit(50).get();
+    if (scopedFarmId) query = query.where('farm_id', '==', scopedFarmId);
+    else if (scopedMarketId) query = query.where('market_id', '==', scopedMarketId);
+
+    const snapshot = await query.get();
+    const filtered = snapshot.docs.filter((d) => {
+      const o = d.data();
+      if (farm_id && o.farm_id !== farm_id) return false;
+      if (market_id && o.market_id !== market_id) return false;
+      if (status && o.status !== status) return false;
+      return true;
+    });
+    const orderDocs = byDateDesc(filtered.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
     const orders = await Promise.all(
-      snapshot.docs.map(async (doc) => {
+      orderDocs.map(async (doc) => {
         const order = doc.data();
         const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
         const marketDoc = await app.db.collection('markets').doc(order.market_id).get();

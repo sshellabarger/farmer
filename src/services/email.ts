@@ -63,13 +63,19 @@ export async function sendOrdersReport({
 
   let query: FirebaseFirestore.Query = db.collection('orders');
   if (farmSnap && !farmSnap.empty) query = query.where('farm_id', '==', farmSnap.docs[0].id);
-  if (marketSnap && !marketSnap.empty) query = query.where('market_id', '==', marketSnap.docs[0].id);
+  else if (marketSnap && !marketSnap.empty) query = query.where('market_id', '==', marketSnap.docs[0].id);
 
-  const snapshot = await query.orderBy('created_at', 'desc').get();
-  const orders = snapshot.docs.filter((d) => {
-    const date = d.data().created_at?.toDate?.() || new Date(d.data().created_at);
-    return date >= since;
-  });
+  const snapshot = await query.get();
+  const orders = snapshot.docs
+    .filter((d) => {
+      const date = d.data().created_at?.toDate?.() || new Date(d.data().created_at);
+      return date >= since;
+    })
+    .sort((a, b) => {
+      const at = a.data().created_at?.toDate?.()?.getTime() ?? 0;
+      const bt = b.data().created_at?.toDate?.()?.getTime() ?? 0;
+      return bt - at;
+    });
 
   const totalRevenue = orders.reduce((sum, d) => sum + Number(d.data().total || 0), 0);
   const rows = orders.map((d) => { const o = d.data(); return `<tr><td>${o.order_number}</td><td>$${Number(o.total).toFixed(2)}</td><td>${o.status}</td></tr>`; }).join('');

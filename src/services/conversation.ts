@@ -4,6 +4,9 @@ import type { Env } from '../config/env.js';
 import { toolDefinitions, executeTool, type ToolContext } from '../tools/index.js';
 import { v4 as uuid } from 'uuid';
 
+// Current model for the conversational SMS assistant. Bump here to upgrade.
+const MODEL = 'claude-sonnet-4-6';
+
 let anthropic: Anthropic | null = null;
 
 function getAnthropic(apiKey: string) {
@@ -32,6 +35,10 @@ PROACTIVE BEHAVIORS:
 5. Include the delivery day and time window in order confirmations
 6. Farmers can set up their delivery schedule (e.g., "I deliver Monday and Thursday mornings")
 
+INVENTORY RULES:
+- Only add inventory items the user EXPLICITLY lists in their current message. Add exactly those items — never re-add or duplicate items that already appear in CURRENT CONTEXT.
+- Items shown in CURRENT CONTEXT already exist; do not call inventory_add for them again. To change an existing item, use inventory_update.
+
 DELIVERY SYSTEM:
 - Farms have delivery schedules with specific days and time windows (e.g., Monday 6am-10am)
 - When creating an order, ask the market: "Pickup or delivery?"
@@ -39,6 +46,15 @@ DELIVERY SYSTEM:
 - Include the delivery day, time window, and locations in order confirmations
 - Use delivery_schedule_set to configure a farm's delivery days
 - Use delivery_query to show upcoming deliveries
+
+PRODUCE PHOTOS:
+- Right after inventory_add succeeds, offer to add a photo in ONE short SMS. Give the farmer numbered choices:
+  1. Use the photo already on file (ONLY offer this option if inventory_add returned product_image_on_file: true)
+  2. Generate one with AI
+  3. Upload their own
+- When they pick, call produce_photo with the inventory_id from inventory_add and mode = 'existing' | 'generate' | 'upload'.
+- For 'upload', text them the link the tool returns. For 'existing'/'generate', confirm it's done.
+- If they decline or don't respond, move on — never nag about photos.
 
 DIRECTORY & CONNECTIONS:
 - When a user wants to find or browse farms/markets, use directory_search.
@@ -66,6 +82,7 @@ const MUTATING_TOOLS = new Set([
   'inventory_add', 'inventory_update', 'order_create', 'order_update',
   'recurring_order_create', 'recurring_order_update', 'delivery_schedule_set',
   'user_signup', 'feedback_submit', 'feedback_update', 'notify_markets',
+  'produce_photo',
 ]);
 
 const ACTION_CLAIM_PATTERNS: RegExp[] = [
@@ -93,19 +110,22 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
   const userSnap = await db.collection('users').where('phone', '==', phone).limit(1).get();
   const user = userSnap.empty ? null : { id: userSnap.docs[0].id, ...userSnap.docs[0].data() as any };
 
-  // 2. Get or create conversation
+  // 2. Get or create conversation (sort in memory to avoid composite index)
   const convoSnap = await db.collection('conversations')
     .where('phone_number', '==', phone)
-    .orderBy('last_message_at', 'desc')
-    .limit(1)
     .get();
 
   let convoId: string;
   let convoData: any;
 
   if (!convoSnap.empty) {
-    convoId = convoSnap.docs[0].id;
-    convoData = convoSnap.docs[0].data();
+    const sorted = convoSnap.docs.sort((a, b) => {
+      const at = a.data().last_message_at?.toDate?.()?.getTime() ?? 0;
+      const bt = b.data().last_message_at?.toDate?.()?.getTime() ?? 0;
+      return bt - at;
+    });
+    convoId = sorted[0].id;
+    convoData = sorted[0].data();
   } else {
     convoId = uuid();
     convoData = {
@@ -152,11 +172,11 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
 
         const invSnap = await db.collection('inventory')
           .where('farm_id', '==', farm.id)
-          .where('status', 'in', ['available', 'partial'])
           .get();
+        const activeInv = invSnap.docs.filter((d) => ['available', 'partial'].includes(d.data().status));
 
-        if (invSnap.size > 0) {
-          const items = await Promise.all(invSnap.docs.map(async (d) => {
+        if (activeInv.length > 0) {
+          const items = await Promise.all(activeInv.map(async (d) => {
             const inv = d.data();
             const prodDoc = await db.collection('products').doc(inv.product_id).get();
             const prod = prodDoc.data() || {};
@@ -167,12 +187,13 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
 
         const relsSnap = await db.collection('farm_market_rels')
           .where('farm_id', '==', farm.id)
-          .where('active', '==', true)
-          .orderBy('priority')
           .get();
+        const activeRels = relsSnap.docs
+          .filter((d) => d.data().active)
+          .sort((a, b) => (a.data().priority ?? 99) - (b.data().priority ?? 99));
 
-        if (relsSnap.size > 0) {
-          const markets = await Promise.all(relsSnap.docs.map(async (d) => {
+        if (activeRels.length > 0) {
+          const markets = await Promise.all(activeRels.map(async (d) => {
             const rel = d.data();
             const mDoc = await db.collection('markets').doc(rel.market_id).get();
             return `  - ${mDoc.data()?.name} (market_id: ${rel.market_id}, priority: ${rel.priority})`;
@@ -190,12 +211,13 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
 
         const relsSnap = await db.collection('farm_market_rels')
           .where('market_id', '==', market.id)
-          .where('active', '==', true)
-          .orderBy('priority')
           .get();
+        const activeRels = relsSnap.docs
+          .filter((d) => d.data().active)
+          .sort((a, b) => (a.data().priority ?? 99) - (b.data().priority ?? 99));
 
-        if (relsSnap.size > 0) {
-          const farms = await Promise.all(relsSnap.docs.map(async (d) => {
+        if (activeRels.length > 0) {
+          const farms = await Promise.all(activeRels.map(async (d) => {
             const rel = d.data();
             const fDoc = await db.collection('farms').doc(rel.farm_id).get();
             return `  - ${fDoc.data()?.name} (farm_id: ${rel.farm_id}, priority: ${rel.priority})`;
@@ -228,7 +250,7 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
   const toolContext: ToolContext = { db, env, userId: user?.id, phone };
 
   let response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODEL,
     max_tokens: 500,
     system: SYSTEM_PROMPT + contextBlock,
     messages,
@@ -237,6 +259,10 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
 
   const calledTools = new Set<string>();
   const successfulMutations = new Set<string>();
+  // Mutating tools that were ATTEMPTED this turn (success or failure). Used to
+  // gate the verification pass so a failed tool (e.g. produce_photo) doesn't get
+  // force-corrected into re-running inventory_add and creating duplicate listings.
+  const attemptedMutations = new Set<string>();
 
   // 7. Process tool calls
   while (response.stop_reason === 'tool_use') {
@@ -247,6 +273,7 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const toolUse of toolUseBlocks) {
       calledTools.add(toolUse.name);
+      if (MUTATING_TOOLS.has(toolUse.name)) attemptedMutations.add(toolUse.name);
       try {
         const result = await executeTool(toolUse.name, toolUse.input as Record<string, unknown>, toolContext);
         if (MUTATING_TOOLS.has(toolUse.name)) {
@@ -264,7 +291,7 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     messages.push({ role: 'user', content: toolResults });
 
     response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODEL,
       max_tokens: 500,
       system: SYSTEM_PROMPT + contextBlock,
       messages,
@@ -272,21 +299,24 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     });
   }
 
-  // Verification pass
+  // Verification pass — only force a correction if the reply claims an action
+  // but NO mutating tool was even attempted (i.e. a hallucinated success). If a
+  // mutating tool was attempted (even if it failed), the bot should report that
+  // honestly; forcing tool_choice:'any' here previously caused duplicate adds.
   let correctionAttempts = 0;
   while (correctionAttempts < 2) {
     const finalText = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')
       .map((b) => b.text).join('\n');
     if (!finalText || !responseClaimsAction(finalText)) break;
-    if (successfulMutations.size > 0) break;
+    if (attemptedMutations.size > 0) break;
 
     correctionAttempts++;
     messages.push({ role: 'assistant', content: response.content });
     messages.push({ role: 'user', content: 'SYSTEM CHECK: Your reply claims an action was performed but no tool was called. Call the appropriate tool or ask the user for missing info.' });
 
     response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514', max_tokens: 500,
+      model: MODEL, max_tokens: 500,
       system: SYSTEM_PROMPT + contextBlock, messages, tools: toolDefinitions, tool_choice: { type: 'any' },
     });
 
@@ -295,6 +325,7 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const toolUse of toolUseBlocks) {
         calledTools.add(toolUse.name);
+        if (MUTATING_TOOLS.has(toolUse.name)) attemptedMutations.add(toolUse.name);
         try {
           const result = await executeTool(toolUse.name, toolUse.input as Record<string, unknown>, toolContext);
           if (MUTATING_TOOLS.has(toolUse.name)) {
@@ -309,7 +340,7 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
       }
       messages.push({ role: 'assistant', content: response.content });
       messages.push({ role: 'user', content: toolResults });
-      response = await client.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 500, system: SYSTEM_PROMPT + contextBlock, messages, tools: toolDefinitions });
+      response = await client.messages.create({ model: MODEL, max_tokens: 500, system: SYSTEM_PROMPT + contextBlock, messages, tools: toolDefinitions });
     }
   }
 

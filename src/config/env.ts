@@ -44,6 +44,14 @@ const envSchema = z.object({
   CLOUD_TASKS_QUEUE: z.string().default('notifications'),
   CLOUD_TASKS_LOCATION: z.string().default('us-central1'),
   CLOUD_FUNCTIONS_URL: z.string().optional(),
+
+  // Error alerts — where to text/email errors (with AI-researched fix).
+  // Leave blank to disable that channel. Alerts are throttled per error signature.
+  ALERT_EMAIL: z.string().default(''),
+  ALERT_PHONE: z.string().default(''),
+
+  // Firebase Storage bucket for image uploads (profile logos, produce photos).
+  STORAGE_BUCKET: z.string().default('arkansaslocalfoodnetwork.firebasestorage.app'),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -8,24 +8,48 @@ const VOIPMS_API_BASE = 'https://voip.ms/api/v1/rest.php';
  * voip.ms uses GET requests with query-string parameters.
  * Phone numbers must be 10-digit NANPA (no +1 prefix).
  */
-const SMS_MAX_LENGTH = 155;
+
+// voip.ms rejects (sms_toolong) messages over the per-segment limit. That limit
+// depends on encoding: GSM-7 allows 160 chars/segment, but any non-GSM character
+// (emoji, curly quotes, accents, etc.) forces UCS-2 where the limit drops to 70.
+// We detect the encoding and split accordingly, with a small safety margin.
+const GSM_MAX_LENGTH = 153;
+const UCS2_MAX_LENGTH = 67;
+
+function hasNonGsmChars(body: string): boolean {
+  // Treat any character outside printable ASCII (plus tab/newline/CR) as UCS-2.
+  // A precise GSM-7 charset check is overkill; this errs on the safe side.
+  for (const ch of body) {
+    const c = ch.codePointAt(0)!;
+    if (c === 0x09 || c === 0x0a || c === 0x0d) continue;
+    if (c < 0x20 || c > 0x7e) return true;
+  }
+  return false;
+}
 
 function splitMessage(body: string): string[] {
-  if (body.length <= SMS_MAX_LENGTH) return [body];
+  const maxLen = hasNonGsmChars(body) ? UCS2_MAX_LENGTH : GSM_MAX_LENGTH;
+  // Work in code points so we never split an emoji (surrogate pair) in half.
+  const codePoints = Array.from(body);
+  if (codePoints.length <= maxLen) return [body];
+
   const chunks: string[] = [];
-  let remaining = body;
-  while (remaining.length > 0) {
-    if (remaining.length <= SMS_MAX_LENGTH) {
-      chunks.push(remaining);
-      break;
+  let start = 0;
+  while (start < codePoints.length) {
+    let end = Math.min(start + maxLen, codePoints.length);
+    if (end < codePoints.length) {
+      // Prefer to break at a newline or space within the window.
+      const window = codePoints.slice(start, end);
+      let breakIdx = window.lastIndexOf('\n');
+      if (breakIdx <= 0) breakIdx = window.lastIndexOf(' ');
+      if (breakIdx > 0) end = start + breakIdx;
     }
-    let cutAt = remaining.lastIndexOf('\n', SMS_MAX_LENGTH);
-    if (cutAt <= 0) cutAt = remaining.lastIndexOf(' ', SMS_MAX_LENGTH);
-    if (cutAt <= 0) cutAt = SMS_MAX_LENGTH;
-    chunks.push(remaining.slice(0, cutAt).trimEnd());
-    remaining = remaining.slice(cutAt).trimStart();
+    chunks.push(codePoints.slice(start, end).join('').trim());
+    start = end;
+    // Skip a leading separator we broke on.
+    while (start < codePoints.length && (codePoints[start] === ' ' || codePoints[start] === '\n')) start++;
   }
-  return chunks;
+  return chunks.filter((c) => c.length > 0);
 }
 
 async function sendSegment({
