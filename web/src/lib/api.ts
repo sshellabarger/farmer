@@ -159,6 +159,19 @@ export const api = {
   },
   createRecurringOrder: (data: any) =>
     request<any>('/recurring-orders', { method: 'POST', body: JSON.stringify(data) }),
+  updateRecurringOrder: (id: string, data: any) =>
+    request<any>(`/recurring-orders/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteRecurringOrder: (id: string) =>
+    request<any>(`/recurring-orders/${id}`, { method: 'DELETE' }),
+
+  // Reminders
+  getReminders: () => request<any>('/reminders'),
+  createReminder: (data: { title: string; frequency: 'daily' | 'weekly'; schedule_days?: string; time: string }) =>
+    request<any>('/reminders', { method: 'POST', body: JSON.stringify(data) }),
+  updateReminder: (id: string, data: any) =>
+    request<any>(`/reminders/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteReminder: (id: string) =>
+    request<any>(`/reminders/${id}`, { method: 'DELETE' }),
 
   // Relationships
   createRelationship: (data: any) =>

@@ -10,6 +10,7 @@ import { analyticsSummary } from './analytics.js';
 import { userSignup } from './signup.js';
 import { deliveryScheduleSet, deliveryQuery } from './delivery.js';
 import { feedbackSubmit, feedbackQuery, feedbackUpdate } from './feedback.js';
+import { reminderSet, reminderList, reminderUpdate } from './reminders.js';
 import { emailSend } from './email.js';
 import { generateViewLink } from '../utils/view-link.js';
 import { directorySearch, connectionRequest, connectionRespond, pendingConnections } from './connections.js';
@@ -25,7 +26,7 @@ export const toolDefinitions: Anthropic.Tool[] = [
   {
     name: 'user_signup',
     description:
-      'Register a new user via SMS. Creates user account, and optionally a farm (for farmers) and/or market (for market buyers). Call this when a new/unregistered phone number wants to sign up.',
+      'Register a new user via SMS. Creates user account, and optionally a farm (for farmers) and/or market (for market buyers). "Market" includes any food buyer: restaurants, grocery stores, food hubs, food pantries, food banks, co-ops, schools, etc. Call this when a new/unregistered phone number wants to sign up.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -33,15 +34,15 @@ export const toolDefinitions: Anthropic.Tool[] = [
         role: {
           type: 'string',
           enum: ['farmer', 'market', 'both'],
-          description: 'User role: farmer (sells produce), market (buys produce), or both',
+          description: 'User role: farmer (sells/grows produce), market (any entity that buys or receives produce — restaurant, grocery, food bank, food hub, co-op, etc.), or both',
         },
         location: { type: 'string', description: 'City/region (e.g., "Austin, TX")' },
         farm_name: { type: 'string', description: "Farm name (defaults to \"<name>'s Farm\" if omitted)" },
-        market_name: { type: 'string', description: "Market/business name (defaults to \"<name>'s Market\" if omitted)" },
+        market_name: { type: 'string', description: "Business/organization name (defaults to \"<name>'s Market\" if omitted)" },
         market_type: {
           type: 'string',
-          enum: ['grocery', 'restaurant', 'co-op', 'farmers_market'],
-          description: 'Type of market (defaults to grocery)',
+          enum: ['grocery', 'restaurant', 'co-op', 'farmers_market', 'food_hub', 'food_bank', 'food_pantry', 'school', 'other'],
+          description: 'Type of market/organization (defaults to grocery)',
         },
         specialty: { type: 'string', description: 'Farm specialty (e.g., "organic vegetables")' },
       },
@@ -124,7 +125,7 @@ export const toolDefinitions: Anthropic.Tool[] = [
   {
     name: 'order_create',
     description:
-      'Create a new order from a market to a farm. Provide the market, farm, and list of items with quantities.',
+      'Create a new order from a market to a farm. All orders flow through the FarmLink Depot — farmers drop off, markets pick up. Provide the market, farm, and list of items with quantities.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -141,11 +142,6 @@ export const toolDefinitions: Anthropic.Tool[] = [
             required: ['inventory_id', 'quantity'],
           },
           description: 'List of items to order',
-        },
-        delivery_type: {
-          type: 'string',
-          enum: ['pickup', 'delivery'],
-          description: 'Whether the market will pick up or the farm will deliver. Ask the market their preference.',
         },
         notes: { type: 'string', description: 'Optional order notes' },
       },
@@ -257,7 +253,7 @@ export const toolDefinitions: Anthropic.Tool[] = [
   {
     name: 'delivery_schedule_set',
     description:
-      'Set up or update a farm\'s delivery schedule. Define which days and time windows the farm delivers, and optionally which areas they serve.',
+      'Set up or update a farm\'s drop-off schedule at the FarmLink Depot. Define which days and time windows the farm drops off orders.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -273,17 +269,12 @@ export const toolDefinitions: Anthropic.Tool[] = [
               },
               time_window: {
                 type: 'string',
-                description: 'Time window for deliveries (e.g., "6am-10am", "2pm-5pm")',
-              },
-              areas: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Areas/cities served on this day (optional)',
+                description: 'Time window for drop-off at the depot (e.g., "6am-10am", "2pm-5pm")',
               },
             },
             required: ['day', 'time_window'],
           },
-          description: 'Delivery schedule slots',
+          description: 'Drop-off schedule slots',
         },
       },
       required: ['schedule'],
@@ -292,7 +283,7 @@ export const toolDefinitions: Anthropic.Tool[] = [
   {
     name: 'delivery_query',
     description:
-      'Query upcoming deliveries and the farm\'s delivery schedule. Shows pending, confirmed, and in-transit orders with delivery details including locations.',
+      'Query upcoming drop-offs and pickups at the FarmLink Depot. Shows pending, confirmed, and in-transit orders with delivery details. For farmers: shows when to drop off at the depot. For markets: shows when orders are ready for pickup.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -475,6 +466,51 @@ export const toolDefinitions: Anthropic.Tool[] = [
       required: ['feedback_id'],
     },
   },
+  {
+    name: 'reminder_set',
+    description:
+      'Set a recurring reminder for the user, delivered by text/push at the chosen time (Central time). Use when a user asks to be reminded about something on a schedule, e.g. "remind me every Monday at 8am to update my inventory".',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        title: { type: 'string', description: 'What to remind the user about (e.g., "Update inventory for the weekend market")' },
+        frequency: { type: 'string', enum: ['daily', 'weekly'], description: 'How often the reminder repeats' },
+        schedule_days: { type: 'string', description: 'For weekly reminders: day name(s), e.g. "Monday" or "Tue, Fri"' },
+        time: { type: 'string', description: 'Time of day, e.g. "8am", "2:30 PM", or "14:00" (Central time)' },
+      },
+      required: ['title', 'frequency', 'time'],
+    },
+  },
+  {
+    name: 'reminder_list',
+    description:
+      "List the user's reminders. Use when they ask what reminders they have set.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        include_paused: { type: 'boolean', description: 'Include paused reminders (default false)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'reminder_update',
+    description:
+      'Update, pause, resume, or delete one of the user\'s reminders. Use reminder_list first to find the reminder_id.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        reminder_id: { type: 'string', description: 'UUID of the reminder' },
+        title: { type: 'string', description: 'New reminder text' },
+        frequency: { type: 'string', enum: ['daily', 'weekly'], description: 'New frequency' },
+        schedule_days: { type: 'string', description: 'New day(s) for weekly reminders' },
+        time: { type: 'string', description: 'New time of day (e.g. "8am", "14:00")' },
+        active: { type: 'boolean', description: 'false to pause, true to resume' },
+        delete: { type: 'boolean', description: 'true to permanently delete the reminder' },
+      },
+      required: ['reminder_id'],
+    },
+  },
 ];
 
 type ToolHandler = (input: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>;
@@ -517,6 +553,9 @@ const toolHandlers: Record<string, ToolHandler> = {
   feedback_submit: feedbackSubmit,
   feedback_query: feedbackQuery,
   feedback_update: feedbackUpdate,
+  reminder_set: reminderSet,
+  reminder_list: reminderList,
+  reminder_update: reminderUpdate,
 };
 
 export async function executeTool(

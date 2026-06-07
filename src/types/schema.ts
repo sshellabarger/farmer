@@ -17,6 +17,7 @@ export type ConnectionInitiator = 'farm' | 'market';
 export type NotificationType = 'new_inventory' | 'price_change' | 'order_update' | 'reminder';
 export type NotificationChannel = 'sms' | 'email' | 'push';
 export type NotificationStatus = 'pending' | 'sent' | 'delivered' | 'failed';
+export type ReminderFrequency = 'daily' | 'weekly';
 export type FeedbackType = 'feature_request' | 'bug_report';
 export type FeedbackStatus = 'open' | 'under_review' | 'planned' | 'in_progress' | 'resolved' | 'closed';
 export type FeedbackPriority = 'low' | 'medium' | 'high' | 'critical';

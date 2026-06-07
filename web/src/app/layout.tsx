@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { AuthProvider } from '@/lib/auth-context';
 import { PwaRegister } from '@/components/pwa-register';
+import { ErrorReporter } from '@/components/error-reporter';
 
 export const metadata: Metadata = {
   title: 'FarmLink — Arkansas Local Food Network',
@@ -34,12 +35,26 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700;800;900&family=Source+Sans+3:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
           rel="stylesheet"
         />
+        {/* Emergency SW cleanup — runs before React hydrates */}
+        <script dangerouslySetInnerHTML={{ __html: `
+          if('serviceWorker' in navigator){
+            navigator.serviceWorker.getRegistrations().then(function(regs){
+              regs.forEach(function(r){r.unregister()});
+            });
+            if(typeof caches!=='undefined'){
+              caches.keys().then(function(names){
+                names.forEach(function(n){caches.delete(n)});
+              });
+            }
+          }
+        `}} />
       </head>
       <body className="font-sans bg-bg min-h-screen antialiased">
         <AuthProvider>
           {children}
         </AuthProvider>
         <PwaRegister />
+        <ErrorReporter />
       </body>
     </html>
   );

@@ -7,6 +7,7 @@ import { Header } from '@/components/header';
 import { ChatWidget } from '@/components/chat-widget';
 import { useRouter } from 'next/navigation';
 import { enablePush, pushConfigured } from '@/lib/firebase-push';
+import { RemindersCard } from '@/components/reminders-card';
 
 interface Address {
   street: string;
@@ -268,6 +269,9 @@ export default function SettingsPage() {
 
         {/* ── Notifications ── */}
         <NotificationsCard />
+
+        {/* ── Reminders ── */}
+        <RemindersCard />
 
         {/* ── Account Tab ── */}
         {tab === 'profile' && (

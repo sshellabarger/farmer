@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole, requireInventoryFarmOwner } from '../middleware/rbac.js';
 import { byDateDesc } from '../utils/sort.js';
+import { classifyFreshness } from '../utils/freshness.js';
 import { v4 as uuid } from 'uuid';
 
 export async function inventoryRoutes(app: FastifyInstance) {
@@ -32,6 +33,8 @@ export async function inventoryRoutes(app: FastifyInstance) {
           return null;
         }
 
+        const freshness = classifyFreshness(inv.harvest_date, product.category, product.name);
+
         return {
           id: doc.id,
           product_name: product.name || 'Unknown',
@@ -45,6 +48,7 @@ export async function inventoryRoutes(app: FastifyInstance) {
           harvest_date: inv.harvest_date,
           listed_at: inv.listed_at,
           image_url: inv.image_url,
+          ...(freshness || {}),
         };
       }),
     );

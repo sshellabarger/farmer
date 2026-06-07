@@ -380,7 +380,11 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
         {/* ORDERS VIEW */}
         {activeView === 'orders' && (
           <div className="h-full overflow-y-auto">
-            <OrdersPanel farmId={isFarmer ? farm?.id : undefined} marketId={isMarket && !isFarmer ? market?.id : undefined} />
+            <OrdersPanel
+              farmId={isFarmer ? farm?.id : undefined}
+              marketId={isMarket && !isFarmer ? market?.id : undefined}
+              initialSubTab={initialTab === 'recurring' ? 'recurring' : 'recent'}
+            />
           </div>
         )}
 
@@ -415,11 +419,166 @@ const ORDER_TRANSITIONS: Record<string, string[]> = {
   in_transit: ['delivered'],
 };
 
+/* ─── Order Detail Bottom Sheet ─── */
+function OrderDetailSheet({ orderId, onClose, onStatusChange }: { orderId: string; onClose: () => void; onStatusChange: () => void }) {
+  const [detail, setDetail] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
+  const backdropRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api.getOrder(orderId)
+      .then(setDetail)
+      .catch(err => console.error('Failed to load order detail:', err))
+      .finally(() => setLoading(false));
+  }, [orderId]);
+
+  const handleStatusUpdate = async (newStatus: string) => {
+    setUpdating(true);
+    try {
+      await api.updateOrderStatus(orderId, newStatus);
+      onStatusChange();
+      // Refresh the detail
+      const updated = await api.getOrder(orderId);
+      setDetail(updated);
+    } catch (err) {
+      console.error('Failed to update order:', err);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const sc = detail ? (STATUS_COLORS[detail.status] || '#9A9A9A') : '#9A9A9A';
+  const nextStatuses = detail ? (ORDER_TRANSITIONS[detail.status] || []) : [];
+
+  return (
+    <div ref={backdropRef} onClick={e => { if (e.target === backdropRef.current) onClose(); }}
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.4)', animation: 'fadeIn 0.2s ease' }}>
+      <div className="bg-white w-full sm:max-w-[480px] sm:rounded-2xl rounded-t-2xl max-h-[85vh] flex flex-col"
+        style={{ animation: 'slideUp 0.3s ease', boxShadow: '0 -4px 30px rgba(0,0,0,0.12)' }}>
+        {/* Drag handle (mobile) */}
+        <div className="flex justify-center pt-3 pb-1 sm:hidden">
+          <div className="w-10 h-1 rounded-full bg-gray-300" />
+        </div>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 pt-3 pb-3 border-b border-border-light">
+          <div>
+            <div className="font-mono text-[13px] font-semibold text-text-soft">{detail?.order_number || `#${orderId.slice(0, 8)}`}</div>
+            <div className="font-display font-bold text-[18px] text-text">{detail?.market_name || detail?.farm_name || 'Order'}</div>
+          </div>
+          <div className="flex items-center gap-2.5">
+            {detail && <span className="font-sans text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize" style={{ color: sc, background: `${sc}18` }}>{String(detail.status).replace('_', ' ')}</span>}
+            <button onClick={onClose} className="w-8 h-8 rounded-full bg-bg border border-border flex items-center justify-center cursor-pointer text-text-muted text-sm hover:bg-gray-100 transition-colors">✕</button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {loading ? (
+            <div className="text-center text-text-muted text-sm py-10">Loading details...</div>
+          ) : !detail ? (
+            <div className="text-center text-text-muted text-sm py-10">Could not load order</div>
+          ) : (
+            <>
+              {/* Summary row */}
+              <div className="flex items-center justify-between">
+                <div>
+                  {detail.order_date && <div className="font-sans text-[13px] text-text-muted">{new Date(detail.order_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>}
+                  {detail.delivery_pref && (
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <Icon name={detail.delivery_pref === 'delivery' ? 'truck' : 'store'} size={12} className="text-text-muted" />
+                      <span className="font-sans text-[12px] text-text-soft capitalize">{detail.delivery_pref}</span>
+                    </div>
+                  )}
+                </div>
+                <div className="font-mono text-[24px] font-bold" style={{ color: '#2E6B34' }}>${Number(detail.total || 0).toFixed(2)}</div>
+              </div>
+
+              {/* Line items */}
+              {detail.items && detail.items.length > 0 && (
+                <div>
+                  <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-2">Items</div>
+                  <div className="bg-bg rounded-xl border border-border-light overflow-hidden">
+                    {detail.items.map((item: any, idx: number) => (
+                      <div key={item.id || idx} className="flex items-center justify-between px-4 py-3" style={{ borderTop: idx > 0 ? '1px solid var(--border-light, #f0f0f0)' : 'none' }}>
+                        <div>
+                          <div className="font-sans text-[14px] text-text font-medium">{item.product_name || item.product || 'Item'}</div>
+                          <div className="font-sans text-[12px] text-text-muted">
+                            {item.quantity || item.qty} {item.unit || 'units'} × ${Number(item.unit_price || item.price || 0).toFixed(2)}
+                          </div>
+                        </div>
+                        <div className="font-mono text-[14px] font-semibold text-text">${Number((item.quantity || item.qty || 0) * (item.unit_price || item.price || 0)).toFixed(2)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Parties */}
+              <div className="grid grid-cols-2 gap-3">
+                {detail.farm_name && (
+                  <div className="bg-bg rounded-xl p-3 border border-border-light">
+                    <div className="font-sans text-[11px] font-semibold text-text-muted uppercase tracking-wide mb-1">Farm</div>
+                    <div className="font-sans text-[14px] text-text font-medium">{detail.farm_name}</div>
+                    {detail.farm_location && <div className="font-sans text-[12px] text-text-muted mt-0.5">{detail.farm_location}</div>}
+                  </div>
+                )}
+                {detail.market_name && (
+                  <div className="bg-bg rounded-xl p-3 border border-border-light">
+                    <div className="font-sans text-[11px] font-semibold text-text-muted uppercase tracking-wide mb-1">Market</div>
+                    <div className="font-sans text-[14px] text-text font-medium">{detail.market_name}</div>
+                    {detail.market_location && <div className="font-sans text-[12px] text-text-muted mt-0.5">{detail.market_location}</div>}
+                  </div>
+                )}
+              </div>
+
+              {/* Notes */}
+              {detail.notes && (
+                <div>
+                  <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-2">Notes</div>
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 font-sans text-[13px] text-amber-900 leading-relaxed">{detail.notes}</div>
+                </div>
+              )}
+
+              {/* Timestamps */}
+              <div className="flex gap-4 text-[11px] font-sans text-text-muted pt-1">
+                {detail.created_at && <span>Created {new Date(detail.created_at).toLocaleString()}</span>}
+                {detail.updated_at && <span>Updated {new Date(detail.updated_at).toLocaleString()}</span>}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer: status actions */}
+        {nextStatuses.length > 0 && (
+          <div className="px-5 py-4 border-t border-border-light flex gap-2">
+            {nextStatuses.map(ns => (
+              <button key={ns} onClick={() => handleStatusUpdate(ns)} disabled={updating}
+                className="flex-1 h-12 rounded-xl font-sans text-[14px] font-semibold border-none cursor-pointer transition-colors active:scale-[0.98]"
+                style={{
+                  background: ns === 'cancelled' ? '#FDECEB' : '#E8F5E3',
+                  color: ns === 'cancelled' ? '#C44B3F' : '#2E6B34',
+                  opacity: updating ? 0.5 : 1,
+                }}>
+                {updating ? '...' : ns === 'cancelled' ? 'Cancel Order' : ns.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Side Panel: Orders ─── */
-function OrdersPanel({ farmId, marketId }: { farmId?: string; marketId?: string }) {
+function OrdersPanel({ farmId, marketId, initialSubTab }: { farmId?: string; marketId?: string; initialSubTab?: 'recent' | 'recurring' }) {
+  const [subTab, setSubTab] = useState<'recent' | 'recurring'>(initialSubTab || 'recent');
   const [orders, setOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   const loadOrders = useCallback(() => {
     const fetcher = farmId
@@ -449,8 +608,18 @@ function OrdersPanel({ farmId, marketId }: { farmId?: string; marketId?: string 
 
   return (
     <div className="p-6 max-w-[1100px] mx-auto w-full">
-      <h2 className="font-display font-bold text-[22px] text-text mb-5">Recent Orders</h2>
-      {loading ? (
+      <div className="flex items-center gap-2 mb-5">
+        {(['recent', 'recurring'] as const).map(t => (
+          <button key={t} onClick={() => setSubTab(t)}
+            className={`font-sans text-sm px-3.5 py-1.5 rounded-lg cursor-pointer border-none transition-colors ${subTab === t ? 'bg-[#2E6B34] text-white' : 'bg-surface-raised text-text-muted hover:text-text'}`}>
+            {t === 'recent' ? 'Recent Orders' : 'Standing Orders'}
+          </button>
+        ))}
+      </div>
+
+      {subTab === 'recurring' ? (
+        <RecurringPanel farmId={farmId} marketId={marketId} />
+      ) : loading ? (
         <div className="text-center text-text-muted text-sm py-10">Loading...</div>
       ) : orders.length === 0 ? (
         <div className="text-center text-text-muted text-sm py-10">No orders yet</div>
@@ -460,18 +629,23 @@ function OrdersPanel({ farmId, marketId }: { farmId?: string; marketId?: string 
             const sc = STATUS_COLORS[o.status] || '#9A9A9A';
             const nextStatuses = ORDER_TRANSITIONS[o.status] || [];
             return (
-              <div key={o.id} className="bg-white rounded-2xl p-4 border border-border-light flex flex-col" style={{ animation: `fadeUp 0.3s ease ${i * 0.04}s both`, boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+              <div key={o.id} onClick={() => setDetailId(o.id)}
+                className="bg-white rounded-2xl p-4 border border-border-light flex flex-col cursor-pointer hover:border-green-300 transition-colors"
+                style={{ animation: `fadeUp 0.3s ease ${i * 0.04}s both`, boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
                 <div className="flex justify-between items-center mb-2">
                   <span className="font-mono text-[13px] font-semibold text-text-soft">{o.order_number || `#${String(o.id).slice(0, 8)}`}</span>
                   <span className="font-sans text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize" style={{ color: sc, background: `${sc}18` }}>{String(o.status).replace('_', ' ')}</span>
                 </div>
                 <div className="font-sans text-[16px] text-text font-semibold leading-tight">{o.market_name || o.farm_name || 'Order'}</div>
                 {o.order_date && <div className="font-sans text-[12px] text-text-muted mt-0.5">{new Date(o.order_date).toLocaleDateString()}</div>}
-                <div className="font-mono text-[20px] font-bold mt-2" style={{ color: '#2E6B34' }}>${Number(o.total || 0).toFixed(2)}</div>
+                <div className="flex items-center justify-between mt-2">
+                  <div className="font-mono text-[20px] font-bold" style={{ color: '#2E6B34' }}>${Number(o.total || 0).toFixed(2)}</div>
+                  <span className="font-sans text-[11px] text-text-muted">Tap for details</span>
+                </div>
                 {nextStatuses.length > 0 && (
                   <div className="flex gap-2 mt-3 pt-1">
                     {nextStatuses.map(ns => (
-                      <button key={ns} onClick={() => updateStatus(o.id, ns)} disabled={updating === o.id}
+                      <button key={ns} onClick={e => { e.stopPropagation(); updateStatus(o.id, ns); }} disabled={updating === o.id}
                         className="flex-1 h-10 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer transition-colors"
                         style={{
                           background: ns === 'cancelled' ? '#FDECEB' : '#E8F5E3',
@@ -488,6 +662,313 @@ function OrdersPanel({ farmId, marketId }: { farmId?: string; marketId?: string 
           })}
         </div>
       )}
+
+      {/* Order detail bottom sheet */}
+      {detailId && (
+        <OrderDetailSheet orderId={detailId} onClose={() => setDetailId(null)} onStatusChange={loadOrders} />
+      )}
+    </div>
+  );
+}
+
+/* ─── Standing (Recurring) Orders Panel ─── */
+const FREQUENCY_LABELS: Record<string, string> = {
+  daily: 'Daily', twice_weekly: 'Twice weekly', weekly: 'Weekly', biweekly: 'Every 2 weeks', monthly: 'Monthly',
+};
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+function RecurringPanel({ farmId, marketId }: { farmId?: string; marketId?: string }) {
+  const [recurring, setRecurring] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+
+  const load = useCallback(() => {
+    const params: Record<string, string> = {};
+    if (farmId) params.farm_id = farmId;
+    else if (marketId) params.market_id = marketId;
+    api.getRecurringOrders(Object.keys(params).length ? params : undefined)
+      .then((data: any) => setRecurring(data.recurring_orders || []))
+      .catch(err => console.error('Failed to load standing orders:', err))
+      .finally(() => setLoading(false));
+  }, [farmId, marketId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggleActive = async (ro: any) => {
+    setBusyId(ro.id);
+    try {
+      await api.updateRecurringOrder(ro.id, { active: !ro.active });
+      load();
+    } catch (err) {
+      console.error('Failed to update standing order:', err);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (id: string) => {
+    setBusyId(id);
+    try {
+      await api.deleteRecurringOrder(id);
+      setPendingDelete(null);
+      load();
+    } catch (err) {
+      console.error('Failed to delete standing order:', err);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-4">
+        <p className="font-sans text-[13px] text-text-muted m-0">
+          Standing orders are placed automatically on their schedule.
+        </p>
+        {farmId && (
+          <button onClick={() => setShowForm(true)}
+            className="font-sans text-[13px] font-semibold bg-[#2E6B34] text-white border-none rounded-lg px-3.5 h-9 cursor-pointer hover:opacity-90 transition-opacity">
+            + New Standing Order
+          </button>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="text-center text-text-muted text-sm py-10">Loading...</div>
+      ) : recurring.length === 0 ? (
+        <div className="text-center text-text-muted text-sm py-10">
+          No standing orders yet{farmId ? ' — create one to automate repeat deliveries' : ''}
+        </div>
+      ) : (
+        <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
+          {recurring.map((ro: any, i: number) => (
+            <div key={ro.id}
+              className="bg-white rounded-2xl p-4 border border-border-light flex flex-col"
+              style={{ animation: `fadeUp 0.3s ease ${i * 0.04}s both`, boxShadow: '0 1px 3px rgba(0,0,0,0.04)', opacity: ro.active ? 1 : 0.6 }}>
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-sans text-[15px] font-semibold text-text">
+                  {farmId ? ro.market_name : ro.farm_name}
+                </span>
+                <span className="font-sans text-[11px] font-semibold px-2.5 py-1 rounded-full"
+                  style={{ color: ro.active ? '#2E6B34' : '#9A9A9A', background: ro.active ? '#E8F5E3' : '#F0F0F0' }}>
+                  {ro.active ? 'Active' : 'Paused'}
+                </span>
+              </div>
+              <div className="font-sans text-[12px] text-text-muted mb-2">
+                {FREQUENCY_LABELS[ro.frequency] || ro.frequency} · {ro.schedule_days}
+                {ro.next_delivery && <> · Next: {new Date(ro.next_delivery).toLocaleDateString()}</>}
+              </div>
+              {ro.items && ro.items.length > 0 && (
+                <div className="bg-bg rounded-xl border border-border-light px-3 py-2 mb-3">
+                  {ro.items.map((item: any, idx: number) => (
+                    <div key={item.id || idx} className="font-sans text-[12.5px] text-text-soft py-0.5">
+                      {item.quantity} {item.unit} {item.product_name}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {farmId && (
+                <div className="flex gap-2 mt-auto">
+                  <button onClick={() => toggleActive(ro)} disabled={busyId === ro.id}
+                    className="flex-1 h-9 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer"
+                    style={{ background: ro.active ? '#FFF3EB' : '#E8F5E3', color: ro.active ? '#D4763C' : '#2E6B34', opacity: busyId === ro.id ? 0.5 : 1 }}>
+                    {busyId === ro.id ? '...' : ro.active ? 'Pause' : 'Resume'}
+                  </button>
+                  {pendingDelete === ro.id ? (
+                    <button onClick={() => remove(ro.id)} disabled={busyId === ro.id}
+                      className="flex-1 h-9 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer"
+                      style={{ background: '#C44B3F', color: 'white', opacity: busyId === ro.id ? 0.5 : 1 }}>
+                      Confirm delete
+                    </button>
+                  ) : (
+                    <button onClick={() => setPendingDelete(ro.id)}
+                      className="h-9 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer px-3"
+                      style={{ background: '#FDECEB', color: '#C44B3F' }}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showForm && farmId && (
+        <RecurringOrderForm farmId={farmId} onClose={() => setShowForm(false)} onCreated={() => { setShowForm(false); load(); }} />
+      )}
+    </div>
+  );
+}
+
+/* ─── New Standing Order Form (bottom sheet) ─── */
+function RecurringOrderForm({ farmId, onClose, onCreated }: { farmId: string; onClose: () => void; onCreated: () => void }) {
+  const [markets, setMarkets] = useState<any[]>([]);
+  const [products, setProducts] = useState<any[]>([]);
+  const [marketId, setMarketId] = useState('');
+  const [frequency, setFrequency] = useState('weekly');
+  const [days, setDays] = useState<string[]>([]);
+  const [nextDelivery, setNextDelivery] = useState('');
+  const [items, setItems] = useState<{ product_id: string; quantity: string; unit: string }[]>([
+    { product_id: '', quantity: '', unit: 'lb' },
+  ]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api.directoryMarkets({ farm_id: farmId })
+      .then((data: any) => {
+        const connected = (data.markets || []).filter((m: any) => m.connection?.status === 'active');
+        setMarkets(connected.length > 0 ? connected : data.markets || []);
+      })
+      .catch(err => console.error('Failed to load markets:', err));
+    api.getProducts({ farm_id: farmId })
+      .then((data: any) => setProducts(data.products || []))
+      .catch(err => console.error('Failed to load products:', err));
+  }, [farmId]);
+
+  const setItem = (idx: number, patch: Partial<{ product_id: string; quantity: string; unit: string }>) => {
+    setItems(prev => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  };
+
+  const toggleDay = (day: string) => {
+    setDays(prev => (prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day]));
+  };
+
+  const submit = async () => {
+    setError(null);
+    const validItems = items.filter(it => it.product_id && Number(it.quantity) > 0 && it.unit);
+    if (!marketId) return setError('Choose a market.');
+    if (days.length === 0) return setError('Pick at least one delivery day.');
+    if (!nextDelivery) return setError('Set the first delivery date.');
+    if (validItems.length === 0) return setError('Add at least one item with a product and quantity.');
+
+    setSaving(true);
+    try {
+      await api.createRecurringOrder({
+        farm_id: farmId,
+        market_id: marketId,
+        frequency,
+        schedule_days: WEEKDAYS.filter(d => days.includes(d)).join(', '),
+        next_delivery: nextDelivery,
+        items: validItems.map(it => ({ product_id: it.product_id, quantity: Number(it.quantity), unit: it.unit })),
+      });
+      onCreated();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create standing order.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputCls = 'w-full h-10 rounded-lg border border-border bg-white px-3 font-sans text-[14px] text-text outline-none focus:border-green-600';
+
+  return (
+    <div ref={backdropRef} onClick={e => { if (e.target === backdropRef.current) onClose(); }}
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.4)', animation: 'fadeIn 0.2s ease' }}>
+      <div className="bg-white w-full sm:max-w-[520px] sm:rounded-2xl rounded-t-2xl max-h-[90vh] flex flex-col"
+        style={{ animation: 'slideUp 0.3s ease', boxShadow: '0 -4px 30px rgba(0,0,0,0.12)' }}>
+        <div className="flex justify-center pt-3 pb-1 sm:hidden">
+          <div className="w-10 h-1 rounded-full bg-gray-300" />
+        </div>
+        <div className="flex items-center justify-between px-5 pt-3 pb-3 border-b border-border-light">
+          <div className="font-display font-bold text-[18px] text-text">New Standing Order</div>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-bg border border-border flex items-center justify-center cursor-pointer text-text-muted text-sm hover:bg-gray-100 transition-colors">✕</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          <div>
+            <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">Market</div>
+            <select className={inputCls} value={marketId} onChange={e => setMarketId(e.target.value)}>
+              <option value="">Choose a market...</option>
+              {markets.map((m: any) => (
+                <option key={m.id} value={m.id}>{m.name}{m.location ? ` — ${m.location}` : ''}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">Frequency</div>
+            <select className={inputCls} value={frequency} onChange={e => setFrequency(e.target.value)}>
+              {Object.entries(FREQUENCY_LABELS).map(([v, label]) => (
+                <option key={v} value={v}>{label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">Delivery day(s)</div>
+            <div className="flex flex-wrap gap-1.5">
+              {WEEKDAYS.map(day => (
+                <button key={day} onClick={() => toggleDay(day)}
+                  className="font-sans text-[12px] font-semibold rounded-lg px-2.5 h-8 cursor-pointer border transition-colors"
+                  style={{
+                    background: days.includes(day) ? '#2E6B34' : 'white',
+                    color: days.includes(day) ? 'white' : 'var(--text-soft, #555)',
+                    borderColor: days.includes(day) ? '#2E6B34' : 'var(--border, #ddd)',
+                  }}>
+                  {day.slice(0, 3)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">First delivery</div>
+            <input type="date" className={inputCls} value={nextDelivery} min={new Date().toISOString().slice(0, 10)}
+              onChange={e => setNextDelivery(e.target.value)} />
+          </div>
+
+          <div>
+            <div className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">Items</div>
+            <div className="space-y-2">
+              {items.map((it, idx) => (
+                <div key={idx} className="flex gap-2 items-center">
+                  <select className={inputCls} style={{ flex: 2 }} value={it.product_id}
+                    onChange={e => setItem(idx, { product_id: e.target.value })}>
+                    <option value="">Product...</option>
+                    {products.map((p: any) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  <input type="number" min="0" step="any" placeholder="Qty" className={inputCls} style={{ flex: 1 }}
+                    value={it.quantity} onChange={e => setItem(idx, { quantity: e.target.value })} />
+                  <input type="text" placeholder="Unit" className={inputCls} style={{ flex: 1 }}
+                    value={it.unit} onChange={e => setItem(idx, { unit: e.target.value })} />
+                  {items.length > 1 && (
+                    <button onClick={() => setItems(prev => prev.filter((_, i) => i !== idx))}
+                      className="w-8 h-8 shrink-0 rounded-full bg-red-50 border border-red-200 text-red-500 cursor-pointer text-sm">✕</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setItems(prev => [...prev, { product_id: '', quantity: '', unit: 'lb' }])}
+              className="mt-2 font-sans text-[13px] font-semibold text-[#2E6B34] bg-transparent border-none cursor-pointer p-0">
+              + Add another item
+            </button>
+          </div>
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 font-sans text-[13px] text-red-700">{error}</div>
+          )}
+        </div>
+
+        <div className="px-5 py-4 border-t border-border-light flex gap-2">
+          <button onClick={onClose}
+            className="flex-1 h-12 rounded-xl font-sans text-[14px] font-semibold border border-border bg-white text-text-soft cursor-pointer">
+            Cancel
+          </button>
+          <button onClick={submit} disabled={saving}
+            className="flex-1 h-12 rounded-xl font-sans text-[14px] font-semibold border-none cursor-pointer text-white"
+            style={{ background: '#2E6B34', opacity: saving ? 0.6 : 1 }}>
+            {saving ? 'Creating...' : 'Create Standing Order'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -649,6 +1130,16 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
                     <div className="text-4xl opacity-50">🌱</div>
                   )}
                   <span className="absolute top-2.5 right-2.5 text-[11px] font-bold font-sans px-2.5 py-1 rounded-full backdrop-blur" style={{ background: `${s.bg}E6`, color: s.color }}>{s.label}</span>
+                  {derivedStatus !== 'sold' && (item.freshness === 'aging' || item.freshness === 'past') && (
+                    <span className="absolute top-2.5 left-2.5 text-[11px] font-bold font-sans px-2.5 py-1 rounded-full backdrop-blur"
+                      style={{
+                        background: item.freshness === 'past' ? '#C44B3FE6' : '#D4763CE6',
+                        color: 'white',
+                      }}
+                      title={`${item.age_days} days old — estimated shelf life ${item.shelf_life_days} days`}>
+                      {item.freshness === 'past' ? `${item.age_days}d — donate/compost` : `${item.age_days}d — sell soon`}
+                    </span>
+                  )}
                   {isFarmer && (
                     <div className="absolute bottom-2.5 right-2.5 flex gap-1.5">
                       <label className="h-8 px-3 rounded-full bg-black/55 backdrop-blur text-white text-[12px] font-semibold flex items-center cursor-pointer hover:bg-black/70 transition-colors">
@@ -1184,7 +1675,7 @@ function ConnectionsView({ isFarmer, farmId, marketId }: { isFarmer: boolean; fa
           <button onClick={() => setMode('find')} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans transition-all" style={tabBtn(mode === 'find')}>Find New {label}</button>
         </div>
         <button onClick={() => { setInviteOpen(o => !o); setInviteMsg(''); }} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans text-white flex items-center gap-1.5 active:scale-95 transition-transform" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
-          <Icon name="msg" size={14} className="text-white" /> Invite a {singular}
+          <Icon name="msg" size={14} className="text-white" /> Invite
         </button>
       </div>
 
@@ -1193,7 +1684,7 @@ function ConnectionsView({ isFarmer, farmId, marketId }: { isFarmer: boolean; fa
         <div className="max-w-[1100px] mx-auto px-6 pt-3">
           <div className="p-4 rounded-2xl border border-green-200 bg-green-50">
             <div className="flex items-center justify-between mb-1">
-              <h3 className="font-sans font-bold text-[15px] text-green-700 m-0">Invite a {singular} to FarmLink</h3>
+              <h3 className="font-sans font-bold text-[15px] text-green-700 m-0">Invite a farm or market to FarmLink</h3>
               <button onClick={() => setInviteOpen(false)} className="bg-transparent border-none cursor-pointer text-text-muted text-lg leading-none">✕</button>
             </div>
             <p className="font-sans text-[13px] text-text-soft mb-3">We&apos;ll text them an invitation to join — just enter their number.</p>

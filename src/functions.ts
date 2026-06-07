@@ -27,6 +27,8 @@ import { feedbackRoutes } from './routes/feedback.js';
 import { directoryRoutes } from './routes/directory.js';
 import { inviteRoutes } from './routes/invite.js';
 import { pushRoutes } from './routes/push.js';
+import { errorRoutes } from './routes/errors.js';
+import { reminderRoutes } from './routes/reminders.js';
 import { serializeTimestamps } from './utils/serialize.js';
 
 setGlobalOptions({
@@ -80,6 +82,8 @@ async function getApp() {
   await app.register(directoryRoutes, { prefix: '/api/directory' });
   await app.register(inviteRoutes, { prefix: '/api/invite' });
   await app.register(pushRoutes, { prefix: '/api/push' });
+  await app.register(errorRoutes, { prefix: '/api/errors' });
+  await app.register(reminderRoutes, { prefix: '/api/reminders' });
 
   // Short view-link redirect: /api/view/:token → dashboard with a signed JWT
   app.get('/api/view/:token', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -166,6 +170,43 @@ export const processRecurringOrders = onSchedule(
     } catch (err) {
       const { notifyError } = await import('./services/error-notify.js');
       await notifyError({ env, err, source: 'scheduler:recurring-orders' }).catch(() => {});
+      throw err;
+    }
+  }
+);
+
+// Scheduled function: freshness sweep daily at 7am CT — flags aging produce
+// and texts farmers what to sell soon, donate, or compost.
+export const freshnessAlerts = onSchedule(
+  { schedule: '0 7 * * *', timeZone: 'America/Chicago' },
+  async () => {
+    const db = getDb();
+    const env = getEnv();
+    try {
+      const { sendFreshnessAlerts } = await import('./services/freshness-alerts.js');
+      const result = await sendFreshnessAlerts(db, env);
+      console.log(`Freshness alerts: ${result.farmsAlerted} farms alerted (${result.agingItems} aging, ${result.pastItems} past shelf life)`);
+    } catch (err) {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err, source: 'scheduler:freshness-alerts' }).catch(() => {});
+      throw err;
+    }
+  }
+);
+
+// Scheduled function: deliver due user reminders (checked every 15 minutes)
+export const processReminders = onSchedule(
+  { schedule: '*/15 * * * *', timeZone: 'America/Chicago' },
+  async () => {
+    const db = getDb();
+    const env = getEnv();
+    try {
+      const { processDueReminders } = await import('./services/reminders.js');
+      const result = await processDueReminders(db, env);
+      if (result.sent > 0) console.log(`Reminders: ${result.sent}/${result.checked} sent`);
+    } catch (err) {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err, source: 'scheduler:reminders' }).catch(() => {});
       throw err;
     }
   }

@@ -24,6 +24,8 @@ import { feedbackRoutes } from './routes/feedback.js';
 import { directoryRoutes } from './routes/directory.js';
 import { inviteRoutes } from './routes/invite.js';
 import { pushRoutes } from './routes/push.js';
+import { errorRoutes } from './routes/errors.js';
+import { reminderRoutes } from './routes/reminders.js';
 
 async function start() {
   const env = getEnv();
@@ -65,6 +67,8 @@ async function start() {
   await app.register(directoryRoutes, { prefix: '/api/directory' });
   await app.register(inviteRoutes, { prefix: '/api/invite' });
   await app.register(pushRoutes, { prefix: '/api/push' });
+  await app.register(errorRoutes, { prefix: '/api/errors' });
+  await app.register(reminderRoutes, { prefix: '/api/reminders' });
 
   // View link redirect
   app.get('/api/view/:token', async (request, reply) => {
