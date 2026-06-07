@@ -30,7 +30,11 @@ function getToken(): string | null {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {};
+  // Only set a JSON content type when there is actually a body. Fastify
+  // rejects bodyless requests (e.g. DELETE) that claim application/json
+  // with a 400 FST_ERR_CTP_EMPTY_JSON_BODY, which broke all web deletes.
+  if (options?.body) headers['Content-Type'] = 'application/json';
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${API_BASE}${path}`, {
