@@ -9,3 +9,4 @@ uploads/
 web/.next/
 web/node_modules/
 .claude/
+.firebase/
