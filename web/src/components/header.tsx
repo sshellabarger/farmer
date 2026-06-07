@@ -38,6 +38,9 @@ export function Header() {
           <NavBtn active={pathname === '/'} onClick={() => router.push('/')}>
             Overview
           </NavBtn>
+          <NavBtn active={pathname === '/about'} onClick={() => router.push('/about')}>
+            Revenue Network
+          </NavBtn>
           {!isAuthenticated && (
             <NavBtn active={pathname === '/chat'} onClick={() => router.push('/chat')}>
               Live Chat
@@ -89,6 +92,9 @@ export function Header() {
         <div className="md:hidden border-t border-border-light px-4 pb-3 flex flex-col gap-1">
           <MobileNavBtn active={pathname === '/'} onClick={() => { router.push('/'); setMenuOpen(false); }}>
             Overview
+          </MobileNavBtn>
+          <MobileNavBtn active={pathname === '/about'} onClick={() => { router.push('/about'); setMenuOpen(false); }}>
+            Revenue Network
           </MobileNavBtn>
           {!isAuthenticated && (
             <MobileNavBtn active={pathname === '/chat'} onClick={() => { router.push('/chat'); setMenuOpen(false); }}>

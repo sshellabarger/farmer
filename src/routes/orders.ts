@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { sendOrderStatusNotification, calculateNextDeliveryDate } from '../services/order-notifications.js';
+import { sendOrderStatusNotification, calculateNextDropoff } from '../services/order-notifications.js';
+import { DEPOT } from '../config/depot.js';
 import { authenticate, requireOrderParty, requireOrderCreateParty } from '../middleware/rbac.js';
 import { byDateDesc } from '../utils/sort.js';
 import { v4 as uuid } from 'uuid';
@@ -81,8 +82,6 @@ export async function orderRoutes(app: FastifyInstance) {
           quantity: z.number().positive(),
         })
       ),
-      delivery_type: z.enum(['pickup', 'delivery']).optional(),
-      delivery_notes: z.string().optional(),
       notes: z.string().optional(),
     });
 
@@ -122,21 +121,13 @@ export async function orderRoutes(app: FastifyInstance) {
       });
     }
 
-    let scheduledDeliveryAt: Date | null = null;
-    if (data.delivery_type) {
-      const farmDoc = await app.db.collection('farms').doc(data.farm_id).get();
-      const farm = farmDoc.data();
-      const marketDoc = await app.db.collection('markets').doc(data.market_id).get();
-      const market = marketDoc.data();
-
-      if (farm?.delivery_schedule?.length > 0) {
-        const slot = calculateNextDeliveryDate(
-          farm!.delivery_schedule,
-          data.delivery_type,
-          market?.location,
-        );
-        if (slot) scheduledDeliveryAt = slot.date;
-      }
+    // Calculate next drop-off date at the depot
+    let scheduledDropoff: Date | null = null;
+    const farmDoc = await app.db.collection('farms').doc(data.farm_id).get();
+    const farm = farmDoc.data();
+    if (farm?.delivery_schedule?.length > 0) {
+      const slot = calculateNextDropoff(farm!.delivery_schedule);
+      if (slot) scheduledDropoff = slot.date;
     }
 
     const orderId = uuid();
@@ -148,9 +139,8 @@ export async function orderRoutes(app: FastifyInstance) {
       status: 'pending',
       total,
       order_date: new Date(),
-      delivery_type: data.delivery_type ?? null,
-      scheduled_delivery_at: scheduledDeliveryAt,
-      delivery_notes: data.delivery_notes ?? null,
+      delivery_type: 'depot',
+      scheduled_delivery_at: scheduledDropoff,
       notes: data.notes ?? null,
       created_at: new Date(),
       updated_at: new Date(),
@@ -171,13 +161,14 @@ export async function orderRoutes(app: FastifyInstance) {
       await invRef.update({ remaining: Math.max(0, newRemaining), status: newStatus });
     }
 
-    // Create delivery record
+    // Create delivery record (depot-based)
     await app.db.collection('deliveries').doc(uuid()).set({
       order_id: orderId,
-      type: data.delivery_type ?? 'pickup',
-      scheduled_at: scheduledDeliveryAt ?? new Date(),
+      type: 'depot',
+      scheduled_at: scheduledDropoff ?? new Date(),
       status: 'scheduled',
-      notes: data.delivery_notes ?? null,
+      depot_address: DEPOT.short,
+      notes: data.notes ?? null,
       created_at: new Date(),
     });
 

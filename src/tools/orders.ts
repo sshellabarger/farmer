@@ -1,6 +1,7 @@
 import type { ToolContext } from './index.js';
 import { v4 as uuid } from 'uuid';
-import { calculateNextDeliveryDate } from '../services/order-notifications.js';
+import { calculateNextDropoff } from '../services/order-notifications.js';
+import { DEPOT } from '../config/depot.js';
 import { byDateDesc } from '../utils/sort.js';
 
 interface OrderItem {
@@ -14,7 +15,6 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
   const marketId = input.market_id as string;
   const items = input.items as OrderItem[];
   const notes = input.notes as string | undefined;
-  const deliveryType = input.delivery_type as 'pickup' | 'delivery' | undefined;
 
   let total = 0;
   const orderItems: Array<{
@@ -50,21 +50,17 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
     });
   }
 
-  let scheduledDeliveryAt: Date | null = null;
-  let deliveryTimeWindow: string | null = null;
+  // Calculate next drop-off date at the depot based on farm's schedule
+  let scheduledDropoff: Date | null = null;
+  let dropoffTimeWindow: string | null = null;
 
-  if (deliveryType) {
-    const farmDoc = await db.collection('farms').doc(farmId).get();
-    const farm = farmDoc.data();
-    const marketDoc = await db.collection('markets').doc(marketId).get();
-    const market = marketDoc.data();
-
-    if (farm?.delivery_schedule?.length > 0) {
-      const slot = calculateNextDeliveryDate(farm!.delivery_schedule, deliveryType, market?.location);
-      if (slot) {
-        scheduledDeliveryAt = slot.date;
-        deliveryTimeWindow = slot.timeWindow;
-      }
+  const farmDoc = await db.collection('farms').doc(farmId).get();
+  const farm = farmDoc.data();
+  if (farm?.delivery_schedule?.length > 0) {
+    const slot = calculateNextDropoff(farm!.delivery_schedule);
+    if (slot) {
+      scheduledDropoff = slot.date;
+      dropoffTimeWindow = slot.timeWindow;
     }
   }
 
@@ -77,8 +73,8 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
     status: 'pending',
     total,
     order_date: new Date(),
-    delivery_type: deliveryType ?? null,
-    scheduled_delivery_at: scheduledDeliveryAt,
+    delivery_type: 'depot',
+    scheduled_delivery_at: scheduledDropoff,
     notes: notes ?? null,
     created_at: new Date(),
     updated_at: new Date(),
@@ -102,9 +98,9 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
     total,
     items_count: orderItems.length,
     status: 'pending',
-    delivery_type: deliveryType || null,
-    scheduled_delivery_at: scheduledDeliveryAt?.toISOString() || null,
-    delivery_time_window: deliveryTimeWindow || null,
+    depot_address: DEPOT.short,
+    scheduled_dropoff: scheduledDropoff?.toISOString() || null,
+    dropoff_time_window: dropoffTimeWindow || null,
   };
 }
 

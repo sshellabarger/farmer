@@ -21,7 +21,7 @@ const MARKET_SCRIPT = [
   { from: 'user', text: 'yes, 40lb' },
   { from: 'app', text: '40lb Cherokee Tomatoes @ $2.99/lb\nTotal: $119.60\n\nConfirm order?' },
   { from: 'user', text: 'yes' },
-  { from: 'app', text: 'Order confirmed! ✅\n\n🚜 Green Acres Farm will have it ready.\nPickup: Today by 4pm\n\nOrder #1247' },
+  { from: 'app', text: 'Order confirmed! ✅\n\n📍 Pickup at FarmLink Depot\n10301 N Rodney Parham Rd, STE C1\n\nOrder #1247' },
   { from: 'user', text: 'do they have any herbs?' },
   { from: 'app', text: 'Yes! Green Acres has:\n\n🌿 Fresh Basil — 20 bunches · $2.50/bunch\n🌿 Cilantro — 15 bunches · $1.75/bunch\n🌿 Rosemary — 10 bunches · $3.00/bunch\n\nWant to add any to your order?' },
   { from: 'user', text: '10 basil' },
@@ -37,16 +37,16 @@ const STATS = [
 
 const STEPS = [
   { step: '01', emoji: '📱', title: 'Text Your Harvest', desc: "Send a text about what you've got. FarmLink understands natural language — just talk like you would to a friend.", example: '"Hey, 100lb Cherokee Tomatoes, picked today"' },
-  { step: '02', emoji: '🔔', title: 'Markets Get Notified', desc: 'Priority markets see your listing first. Set delays so your best buyers always get first pick.', example: 'ABC Market gets 30 min head start' },
-  { step: '03', emoji: '✅', title: 'Orders Roll In', desc: 'Markets text back their orders. Confirmation, totals, and pickup details — all handled automatically.', example: '"Order #1247 confirmed: 40lb @ $2.99"' },
+  { step: '02', emoji: '🔔', title: 'Buyers Get Notified', desc: 'Priority buyers see your listing first — restaurants, groceries, food banks, and more. Set delays so your best buyers get first pick.', example: 'ABC Market gets 30 min head start' },
+  { step: '03', emoji: '📍', title: 'Drop Off & Pick Up', desc: 'Drop your orders at the FarmLink Depot. Buyers pick up from the same location. One address, zero coordination hassle.', example: 'Drop off Mon & Thu · Buyers pickup same day' },
 ];
 
 const FEATURES = [
   { icon: 'msg', title: 'Natural Conversations', desc: "No commands to memorize. Text naturally and FarmLink's AI understands what you need — pricing, inventory, orders, and more.", color: '#2E6B34' },
-  { icon: 'market', title: 'Priority Markets', desc: 'Rank your best buyers. They see your listings first, with configurable notification delays before inventory goes wide.', color: '#D4763C' },
+  { icon: 'market', title: 'Priority Buyers', desc: 'Rank your best buyers — restaurants, food banks, groceries, co-ops. They see your listings first, with configurable notification delays before inventory goes wide.', color: '#D4763C' },
   { icon: 'chart', title: 'Smart Dashboard', desc: 'When you need more than text, the web dashboard shows everything — inventory, orders, analytics, and full message history.', color: '#3B7DD8' },
   { icon: 'order', title: 'Standing Orders', desc: "Markets can set up recurring orders. Same items, same schedule, zero effort. Just text 'standing order' to manage them.", color: '#8B7355' },
-  { icon: 'users', title: 'Multi-Market Reach', desc: 'List once, reach every market in your network. Or target specific buyers first. You control who sees what and when.', color: '#2E6B34' },
+  { icon: 'users', title: 'Multi-Buyer Reach', desc: 'List once, reach every buyer in your network — restaurants, groceries, food banks, schools, and more. You control who sees what and when.', color: '#2E6B34' },
   { icon: 'zap', title: 'Instant Confirmations', desc: 'Both sides get immediate confirmation of orders, changes, and pickups. No phone tag, no missed messages, no confusion.', color: '#D4763C' },
 ];
 
@@ -110,9 +110,9 @@ export default function LandingPage() {
         </div>
         <div className="flex items-center gap-4 md:gap-8">
           <div className="hidden md:flex items-center gap-8">
-            {['Features', 'How It Works', 'Pricing'].map(item => (
-              <a key={item} href="#" className="font-sans font-medium text-sm text-text-soft no-underline hover:text-text transition-colors">{item}</a>
-            ))}
+            <a href="#features" className="font-sans font-medium text-sm text-text-soft no-underline hover:text-text transition-colors">Features</a>
+            <a href="#how-it-works" className="font-sans font-medium text-sm text-text-soft no-underline hover:text-text transition-colors">How It Works</a>
+            <a href="/about" className="font-sans font-medium text-sm text-text-soft no-underline hover:text-text transition-colors">Revenue Network</a>
           </div>
           <button onClick={onEnterApp} className="hidden sm:block px-6 py-2.5 rounded-[10px] text-white border-none font-sans font-semibold text-sm cursor-pointer" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)', boxShadow: '0 2px 8px rgba(46,107,52,0.3)' }}>
             Login
@@ -126,9 +126,9 @@ export default function LandingPage() {
       {/* Mobile menu dropdown */}
       {menuOpen && (
         <div className="md:hidden border-b border-border-light bg-white px-4 py-3 flex flex-col gap-2 sticky top-[58px] z-40" style={{ animation: 'fadeIn 0.15s ease' }}>
-          {['Features', 'How It Works', 'Pricing'].map(item => (
-            <a key={item} href="#" className="font-sans font-medium text-sm text-text-soft no-underline py-2 px-3 rounded-lg hover:bg-bg transition-colors">{item}</a>
-          ))}
+          <a href="#features" onClick={() => setMenuOpen(false)} className="font-sans font-medium text-sm text-text-soft no-underline py-2 px-3 rounded-lg hover:bg-bg transition-colors">Features</a>
+          <a href="#how-it-works" onClick={() => setMenuOpen(false)} className="font-sans font-medium text-sm text-text-soft no-underline py-2 px-3 rounded-lg hover:bg-bg transition-colors">How It Works</a>
+          <a href="/about" onClick={() => setMenuOpen(false)} className="font-sans font-medium text-sm text-text-soft no-underline py-2 px-3 rounded-lg hover:bg-bg transition-colors">Revenue Network</a>
           <button onClick={() => { onEnterApp(); setMenuOpen(false); }} className="mt-1 px-6 py-2.5 rounded-[10px] text-white border-none font-sans font-semibold text-sm cursor-pointer w-full" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
             Login
           </button>
@@ -149,7 +149,7 @@ export default function LandingPage() {
               <span className="text-green-600">with a text.</span>
             </h1>
             <p className="font-sans text-base md:text-lg leading-relaxed text-text-soft mb-7 md:mb-9 max-w-[440px]">
-              FarmLink connects farmers and markets through natural text conversations. List inventory, take orders, and manage sales — all from your phone. No apps to download, no dashboards to learn.
+              FarmLink connects farmers with restaurants, grocery stores, food banks, food hubs, and more through natural text conversations. List inventory, take orders, and drop off at one central location. No apps to download, no dashboards to learn.
             </p>
             <div className="flex gap-3 md:gap-3.5 flex-wrap">
               <button onClick={onEnterApp} className="px-6 md:px-8 py-3 md:py-3.5 rounded-xl text-white border-none font-sans font-bold text-sm md:text-base cursor-pointer flex items-center gap-2" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)', boxShadow: '0 4px 16px rgba(46,107,52,0.3)' }}>
@@ -228,7 +228,7 @@ export default function LandingPage() {
       </section>
 
       {/* ── HOW IT WORKS ── */}
-      <section className="py-12 md:py-20 px-4 md:px-6 lg:px-10 max-w-[1000px] mx-auto">
+      <section id="how-it-works" className="py-12 md:py-20 px-4 md:px-6 lg:px-10 max-w-[1000px] mx-auto scroll-mt-16">
         <div className="text-center mb-8 md:mb-14">
           <h2 className="font-display font-extrabold text-[26px] md:text-[32px] lg:text-[38px] text-text mb-3 tracking-tight">How FarmLink Works</h2>
           <p className="font-sans text-sm md:text-base text-text-soft max-w-[500px] mx-auto">From field to market in three texts. No complicated apps or training required.</p>
@@ -247,7 +247,7 @@ export default function LandingPage() {
       </section>
 
       {/* ── FEATURES GRID ── */}
-      <section className="py-12 md:py-16 px-4 md:px-6 lg:px-10 bg-bg-alt">
+      <section id="features" className="py-12 md:py-16 px-4 md:px-6 lg:px-10 bg-bg-alt scroll-mt-16">
         <div className="max-w-[1000px] mx-auto">
           <div className="text-center mb-8 md:mb-12">
             <h2 className="font-display font-extrabold text-[26px] md:text-[32px] lg:text-[38px] text-text mb-3 tracking-tight">Everything You Need</h2>
@@ -318,7 +318,7 @@ export default function LandingPage() {
             </div>
             <span className="font-display font-bold text-base text-text">FarmLink</span>
           </div>
-          <div className="font-sans text-[13px] text-text-muted">&copy; 2026 FarmLink. Connecting farms and markets.</div>
+          <div className="font-sans text-[13px] text-text-muted">&copy; 2026 FarmLink. Connecting farmers with local buyers.</div>
         </div>
       </footer>
     </div>

@@ -150,24 +150,32 @@ export default function SignupPage() {
                 <p className="text-sm text-earth-600 mb-4 text-center">
                   How will you use FarmLink?
                 </p>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3">
                   <button
                     onClick={() => { setRole('farmer'); setError(''); setStep('details'); }}
-                    className="p-5 rounded-xl border-2 transition-all cursor-pointer bg-white hover:border-farm-400 hover:bg-farm-50 text-center"
+                    className="p-5 rounded-xl border-2 transition-all cursor-pointer bg-white hover:border-farm-400 hover:bg-farm-50 text-left"
                     style={{ borderColor: '#e8e0d4' }}
                   >
-                    <div className="text-3xl mb-2">🌱</div>
-                    <div className="font-bold text-earth-900 text-sm">I&apos;m a Farmer</div>
-                    <div className="text-[11px] text-earth-500 mt-1">Sell produce to markets</div>
+                    <div className="flex items-start gap-3">
+                      <div className="text-3xl">🌱</div>
+                      <div>
+                        <div className="font-bold text-earth-900 text-sm">I&apos;m a Farmer</div>
+                        <div className="text-[11px] text-earth-500 mt-1">Farms, ranches, and growers who produce food and want to sell or distribute it locally</div>
+                      </div>
+                    </div>
                   </button>
                   <button
                     onClick={() => { setRole('market'); setError(''); setStep('details'); }}
-                    className="p-5 rounded-xl border-2 transition-all cursor-pointer bg-white hover:border-blue-400 hover:bg-blue-50 text-center"
+                    className="p-5 rounded-xl border-2 transition-all cursor-pointer bg-white hover:border-blue-400 hover:bg-blue-50 text-left"
                     style={{ borderColor: '#e8e0d4' }}
                   >
-                    <div className="text-3xl mb-2">🏪</div>
-                    <div className="font-bold text-earth-900 text-sm">I&apos;m a Market</div>
-                    <div className="text-[11px] text-earth-500 mt-1">Buy from local farms</div>
+                    <div className="flex items-start gap-3">
+                      <div className="text-3xl">🏪</div>
+                      <div>
+                        <div className="font-bold text-earth-900 text-sm">I&apos;m a Market</div>
+                        <div className="text-[11px] text-earth-500 mt-1">Restaurants, grocery stores, food hubs, food banks, food pantries, co-ops, schools, or any organization that sources local food</div>
+                      </div>
+                    </div>
                   </button>
                 </div>
 
@@ -303,31 +311,20 @@ export default function SignupPage() {
                         <option value="restaurant">Restaurant</option>
                         <option value="grocery">Grocery Store</option>
                         <option value="co_op">Co-op</option>
+                        <option value="food_hub">Food Hub</option>
+                        <option value="food_bank">Food Bank</option>
+                        <option value="food_pantry">Food Pantry</option>
+                        <option value="school">School / Institution</option>
                         <option value="other">Other</option>
                       </select>
                     </div>
-                    <div className="mb-4">
-                      <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                        Fulfillment Preference
-                      </label>
-                      <div className="grid grid-cols-3 gap-2">
-                        {[
-                          { id: 'pickup', label: '📍 Pickup' },
-                          { id: 'delivery', label: '🚚 Delivery' },
-                          { id: 'both', label: '✅ Both' },
-                        ].map(opt => (
-                          <button
-                            key={opt.id}
-                            onClick={() => setDeliveryPref(opt.id)}
-                            className={`px-3 py-2.5 text-xs font-bold rounded-xl border cursor-pointer transition-all ${
-                              deliveryPref === opt.id
-                                ? 'bg-farm-600 text-white border-farm-600'
-                                : 'bg-white text-earth-600 border-earth-200 hover:border-farm-300'
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
+                    <div className="mb-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                      <div className="flex items-start gap-2">
+                        <span className="text-base mt-0.5">📍</span>
+                        <div>
+                          <div className="text-xs font-semibold text-blue-800">Central Pickup Location</div>
+                          <div className="text-[11px] text-blue-600 mt-0.5">All orders are picked up from the FarmLink Depot at 10301 N Rodney Parham Rd, STE C1, Little Rock, AR 72227</div>
+                        </div>
                       </div>
                     </div>
                   </>

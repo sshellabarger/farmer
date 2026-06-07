@@ -126,7 +126,7 @@ export default function LoginPage() {
                     <div className="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center text-xl">🌾</div>
                     <div>
                       <div className="font-bold text-sm text-earth-800">Farmer Dashboard</div>
-                      <div className="text-xs text-earth-500 mt-0.5">Manage inventory, orders &amp; market connections</div>
+                      <div className="text-xs text-earth-500 mt-0.5">Manage inventory, orders &amp; drop-offs at the depot</div>
                     </div>
                   </div>
                 </button>
@@ -138,7 +138,7 @@ export default function LoginPage() {
                     <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center text-xl">🏪</div>
                     <div>
                       <div className="font-bold text-sm text-earth-800">Market Dashboard</div>
-                      <div className="text-xs text-earth-500 mt-0.5">Browse farms, place orders &amp; manage deliveries</div>
+                      <div className="text-xs text-earth-500 mt-0.5">Restaurants, food banks, groceries &amp; more — browse farms, order &amp; pickup</div>
                     </div>
                   </div>
                 </button>

@@ -1,17 +1,17 @@
-/* FarmLink service worker — offline shell + push notifications */
-const CACHE = 'farmlink-v1';
-const APP_SHELL = ['/', '/farmer', '/market', '/login', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+/* FarmLink service worker — network-first + push notifications */
+const CACHE = 'farmlink-v3';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(APP_SHELL).catch(() => {})));
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
+  // Purge ALL old caches on activate
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+    caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      .then(() => caches.open(CACHE))
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
@@ -19,27 +19,20 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  // Never cache API calls — always hit the network.
+  // Never cache API calls
   if (url.pathname.startsWith('/api/')) return;
 
-  // Navigations: network-first, fall back to cached page (or app root) offline.
-  if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req)
-        .then((res) => { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); return res; })
-        .catch(() => caches.match(req).then((r) => r || caches.match('/')))
-    );
-    return;
-  }
-
-  // Static assets: stale-while-revalidate.
+  // Network-first for everything — only use cache when offline
   event.respondWith(
-    caches.match(req).then((cached) => {
-      const fetched = fetch(req)
-        .then((res) => { if (res && res.status === 200) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); } return res; })
-        .catch(() => cached);
-      return cached || fetched;
-    })
+    fetch(req)
+      .then((res) => {
+        if (res && res.status === 200) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(req).then((r) => r || (req.mode === 'navigate' ? caches.match('/') : undefined)))
   );
 });
 

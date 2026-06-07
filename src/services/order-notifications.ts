@@ -1,5 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
+import { DEPOT } from '../config/depot.js';
 import { notifyByPhone } from './push.js';
 import { v4 as uuid } from 'uuid';
 
@@ -36,14 +37,14 @@ export async function sendOrderStatusNotification(params: {
 
   switch (newStatus) {
     case 'confirmed':
-      notifications.push({ phone: farmerPhone, message: `Order ${order.order_number} confirmed!\n${market.name} ordered:\n${itemSummary}\nTotal: $${Number(order.total).toFixed(2)}` });
-      notifications.push({ phone: marketPhone, message: `Your order ${order.order_number} from ${farm.name} is confirmed!\nTotal: $${Number(order.total).toFixed(2)}` });
+      notifications.push({ phone: farmerPhone, message: `Order ${order.order_number} confirmed!\n${market.name} ordered:\n${itemSummary}\nTotal: $${Number(order.total).toFixed(2)}\n\nDrop off at: ${DEPOT.short}` });
+      notifications.push({ phone: marketPhone, message: `Your order ${order.order_number} from ${farm.name} is confirmed!\nTotal: $${Number(order.total).toFixed(2)}\n\nPickup at: ${DEPOT.short}` });
       break;
     case 'in_transit':
-      notifications.push({ phone: marketPhone, message: `Order ${order.order_number} from ${farm.name} is on its way!` });
+      notifications.push({ phone: marketPhone, message: `Order ${order.order_number} from ${farm.name} has been dropped off at the depot!\n\nPickup at: ${DEPOT.short}` });
       break;
     case 'delivered':
-      notifications.push({ phone: farmerPhone, message: `Delivery confirmed! Order ${order.order_number} to ${market.name} delivered.` });
+      notifications.push({ phone: farmerPhone, message: `Pickup confirmed! ${market.name} picked up order ${order.order_number} from the depot.` });
       break;
     case 'cancelled':
       notifications.push({ phone: farmerPhone, message: `Order ${order.order_number} cancelled. Market: ${market.name}` });
@@ -78,10 +79,14 @@ export async function sendOrderStatusNotification(params: {
   }
 }
 
-export function calculateNextDeliveryDate(
-  deliverySchedule: Array<{ day: string; time_window: string; areas?: string[] }>,
-  deliveryType: 'pickup' | 'delivery',
-  marketLocation?: string,
+/**
+ * Calculate the next drop-off date at the depot based on a farm's schedule.
+ * Kept as an alias so existing route imports still work.
+ */
+export const calculateNextDeliveryDate = calculateNextDropoff;
+
+export function calculateNextDropoff(
+  deliverySchedule: Array<{ day: string; time_window: string }>,
 ): { date: Date; timeWindow: string } | null {
   if (!deliverySchedule || deliverySchedule.length === 0) return null;
 
