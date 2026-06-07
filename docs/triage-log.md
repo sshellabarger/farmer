@@ -2,6 +2,10 @@
 
 Items listed here have been triaged. The daily scheduled task should only report feedback IDs not present in this file.
 
+## Run: 2026-06-07 (night)
+
+- `ce8ea6ca-30da-47a1-97a9-1eb61b2576ec` — Reminders not being delivered, set via web (bug, sms, Jun 7) — Scheduler ran and marked 2 of 3 Sunday reminders sent (last_sent_date=2026-06-07); failure is delivery. notifyByPhone prefers push since Scott has 2 fcm_tokens; FCM accepted the message (successCount>0) so it returned 'push' and skipped SMS, but FCM acceptance ≠ device display (closed browser / stale-but-registered token / OS permission). No SMS fallback fires and reminder sends are not logged to notifications collection. Recommended: send reminders via SMS (or push+SMS) and log sends. FIXED Jun 7: SMS now authoritative channel (marked sent only on SMS success), push kept best-effort, sends logged to notifications collection. Deployed to processReminders.
+
 ## Run: 2026-06-07 (evening)
 
 - `c4936ed5-4f95-42c7-9c81-68ec57170d7b` — Delete inventory item gives Bad Request popup (bug, web, Jun 7) — Root cause: web/src/lib/api.ts request() always sets Content-Type: application/json; bodyless DELETEs trigger Fastify's FST_ERR_CTP_EMPTY_JSON_BODY 400. Affects all DELETE endpoints (inventory, recurring orders, reminders, feedback). Fix = only set header when body present. FIXED + deployed Jun 7, verified by Scott, ticket closed.

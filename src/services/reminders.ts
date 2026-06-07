@@ -1,6 +1,8 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { notifyByPhone } from './push.js';
+import { v4 as uuid } from 'uuid';
+import { sendPushToUser } from './push.js';
+import { sendSms } from './sms.js';
 
 const TIMEZONE = 'America/Chicago';
 // A reminder fires when its time has passed within the last CATCH_WINDOW_MIN
@@ -57,14 +59,36 @@ export async function processDueReminders(db: Firestore, env: Env): Promise<{ ch
     if (!phone) continue;
 
     const body = `⏰ Reminder: ${r.title}`;
-    const channel = await notifyByPhone(db, env, phone, {
+
+    // Best-effort push (free, shows if the app is open) — never counts as delivery.
+    // FCM "success" only means Google accepted the message, not that the user saw it.
+    sendPushToUser(db, r.user_id, {
       title: 'FarmLink Reminder',
       body: r.title,
       url: '/settings',
-      sms: body,
-    }).catch(() => 'none' as const);
+    }).catch(() => {});
 
-    if (channel !== 'none') {
+    // SMS is the authoritative channel: reminders are time-critical, so we only
+    // mark the reminder sent when the SMS actually goes out.
+    let smsOk = true;
+    try {
+      await sendSms({ env, to: phone, body });
+    } catch {
+      smsOk = false;
+    }
+
+    // Audit trail so delivery failures are diagnosable.
+    await db.collection('notifications').doc(uuid()).set({
+      type: 'reminder',
+      channel: 'sms',
+      status: smsOk ? 'sent' : 'failed',
+      user_id: r.user_id,
+      reminder_id: doc.id,
+      created_at: new Date(),
+      sent_at: smsOk ? new Date() : null,
+    }).catch(() => {});
+
+    if (smsOk) {
       await doc.ref.update({ last_sent_date: dateStr, updated_at: new Date() });
       sent++;
     }
