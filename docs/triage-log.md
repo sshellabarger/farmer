@@ -2,6 +2,15 @@
 
 Items listed here have been triaged. The daily scheduled task should only report feedback IDs not present in this file.
 
+## Run: 2026-06-08 (daily triage)
+
+- `4ccfa6a7-5997-49c6-9867-d53c3e086680` — Option to donate food to potluck food rescue (feature, web, Jun 8) — Wants in-app donation flow that currently requires admin.foodrescuehero.org/donations/intake/potluck. Implementation surface: new outbound integration (Food Rescue Hero API, if exists) following telnyx.ts fetch+env-key pattern; new tool in src/tools/ + route + web action. Blocked on Food Rescue Hero API availability/credentials (unconfirmed by submitter).
+- `d15c0f00-39d0-489c-b804-4fedcaeb3539` — Auto-update ALFN/Local Food Marketplace with available produce (feature, web, Jun 8) — Wants inventory (status='available') auto-pushed to littlerock.localfoodmarketplace.com instead of manual login. Implementation surface: outbound sync reading inventory collection, likely a new onSchedule job in functions.ts (mirrors processReminders/freshnessAlerts) + field mapping product/quantity/price. Blocked on Local Food Marketplace public API availability/credentials (unconfirmed).
+
+## Run: 2026-06-08 (earlier)
+
+- No new items. Open feedback `ce8ea6ca` (reminders not delivered) already triaged + FIXED Jun 7 night; status in Firestore still `open` (not yet resolved). Error alerts `054210f7` (Jun 7 18:43 UTC) and `34521a55` (Jun 1) both predate the last run; no new alerts since.
+
 ## Run: 2026-06-07 (night)
 
 - `ce8ea6ca-30da-47a1-97a9-1eb61b2576ec` — Reminders not being delivered, set via web (bug, sms, Jun 7) — Scheduler ran and marked 2 of 3 Sunday reminders sent (last_sent_date=2026-06-07); failure is delivery. notifyByPhone prefers push since Scott has 2 fcm_tokens; FCM accepted the message (successCount>0) so it returned 'push' and skipped SMS, but FCM acceptance ≠ device display (closed browser / stale-but-registered token / OS permission). No SMS fallback fires and reminder sends are not logged to notifications collection. Recommended: send reminders via SMS (or push+SMS) and log sends. FIXED Jun 7: SMS now authoritative channel (marked sent only on SMS success), push kept best-effort, sends logged to notifications collection. Deployed to processReminders.

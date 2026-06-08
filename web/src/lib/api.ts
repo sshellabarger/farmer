@@ -116,6 +116,14 @@ export const api = {
     request<any>(`/inventory/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteInventory: (id: string) =>
     request<any>(`/inventory/${id}`, { method: 'DELETE' }),
+  // Push this farm's available produce to Local Food Marketplace (ALFN).
+  syncToLfm: () =>
+    request<{
+      configured: boolean;
+      pushed: boolean;
+      item_count: number;
+      message: string;
+    }>('/inventory/sync-lfm', { method: 'POST', body: JSON.stringify({}) }),
 
   // Products
   getProducts: (params?: Record<string, string>) => {

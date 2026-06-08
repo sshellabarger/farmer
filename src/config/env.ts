@@ -52,6 +52,15 @@ const envSchema = z.object({
 
   // Firebase Storage bucket for image uploads (profile logos, produce photos).
   STORAGE_BUCKET: z.string().default('arkansaslocalfoodnetwork.firebasestorage.app'),
+
+  // Local Food Marketplace (ALFN) availability sync.
+  // Leave LFM_API_BASE / LFM_API_KEY blank to run the sync in dry-run mode
+  // (it returns what *would* be pushed without calling out). LFM's documented
+  // key-based API is reporting-oriented; a write/availability endpoint likely
+  // requires approved-partner access — confirm with info@localfoodmarketplace.com.
+  LFM_API_BASE: z.string().default(''),
+  LFM_API_KEY: z.string().default(''),
+  LFM_MARKET_ID: z.string().default(''),
 });
 
 export type Env = z.infer<typeof envSchema>;

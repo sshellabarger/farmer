@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { authenticate, requireRole, requireInventoryFarmOwner } from '../middleware/rbac.js';
 import { byDateDesc } from '../utils/sort.js';
 import { classifyFreshness } from '../utils/freshness.js';
+import { syncFarmToLfm } from '../services/lfm-sync.js';
 import { v4 as uuid } from 'uuid';
 
 export async function inventoryRoutes(app: FastifyInstance) {
@@ -54,6 +55,19 @@ export async function inventoryRoutes(app: FastifyInstance) {
     );
 
     return { inventory: inventory.filter(Boolean) };
+  });
+
+  // POST /api/inventory/sync-lfm — push this farm's available produce to
+  // Local Food Marketplace (ALFN). Runs as a dry-run (reports what would sync)
+  // until the LFM_* env vars are configured with a confirmed write endpoint.
+  app.post('/sync-lfm', {
+    preHandler: [auth, farmerOrAdmin],
+  }, async (request, reply) => {
+    const farmId = request.authUser!.farmId;
+    if (!farmId) return reply.badRequest('No farm associated with this account');
+
+    const result = await syncFarmToLfm({ db: app.db, env: app.env, farmId });
+    return result;
   });
 
   // POST /api/inventory

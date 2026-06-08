@@ -6,6 +6,7 @@ import { Icon } from './icons';
 import { Header } from './header';
 import { useAuth } from '@/lib/auth-context';
 import { api, type ConversationSummary, type ChatMessage } from '@/lib/api';
+import { openFoodRescueDonation } from '@/lib/food-rescue';
 
 /* ─── Types ─── */
 interface Convo {
@@ -970,6 +971,8 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
   const [photoBusy, setPhotoBusy] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState<string | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
   const loadInventory = useCallback(() => {
     const fetcher = farmId
@@ -1061,6 +1064,19 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
     }
   };
 
+  const syncToAlfn = async () => {
+    setSyncBusy(true);
+    setSyncMsg(null);
+    try {
+      const res = await api.syncToLfm();
+      setSyncMsg(res.message);
+    } catch (err: any) {
+      setSyncMsg(err?.message || 'Sync failed. Please try again.');
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
   const activeInventory = inventory.filter(i => i.status !== 'sold');
 
   const statusStyles: Record<string, { bg: string; color: string; label: string }> = {
@@ -1074,14 +1090,30 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
       <div className="flex justify-between items-center mb-5">
         <h2 className="font-display font-bold text-[22px] text-text m-0">{isFarmer ? 'Inventory' : 'Available Items'}</h2>
         {isFarmer && activeInventory.length > 0 && !clearConfirm && (
-          <button
-            onClick={() => setClearConfirm(true)}
-            className="text-[13px] font-semibold font-sans text-red-600 border border-red-200 bg-red-50 rounded-lg px-3.5 h-9 cursor-pointer hover:bg-red-100 transition-colors"
-          >
-            Clear All
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={syncToAlfn}
+              disabled={syncBusy}
+              title="Push your available produce to Local Food Marketplace (ALFN)"
+              className="text-[13px] font-semibold font-sans text-[#2E6B34] border border-[rgba(46,107,52,0.3)] bg-[#E8F5E3] rounded-lg px-3.5 h-9 cursor-pointer hover:bg-[#dcefd4] transition-colors disabled:opacity-50"
+            >
+              {syncBusy ? 'Syncing…' : 'Sync to ALFN'}
+            </button>
+            <button
+              onClick={() => setClearConfirm(true)}
+              className="text-[13px] font-semibold font-sans text-red-600 border border-red-200 bg-red-50 rounded-lg px-3.5 h-9 cursor-pointer hover:bg-red-100 transition-colors"
+            >
+              Clear All
+            </button>
+          </div>
         )}
       </div>
+      {syncMsg && (
+        <div className="mb-5 p-3.5 rounded-xl border flex items-start justify-between gap-3" style={{ background: '#EEF6EC', borderColor: 'rgba(46,107,52,0.2)' }}>
+          <p className="font-sans text-[13px] leading-relaxed m-0" style={{ color: '#2E6B34' }}>{syncMsg}</p>
+          <button onClick={() => setSyncMsg(null)} className="shrink-0 text-[#2E6B34] text-sm cursor-pointer bg-transparent border-none" title="Dismiss">✕</button>
+        </div>
+      )}
       {clearConfirm && (
         <div className="mb-5 p-4 rounded-xl border border-red-200 bg-red-50">
           <p className="font-sans text-sm text-red-700 m-0 mb-3">Mark all {activeInventory.length} active items as sold (qty 0)?</p>
@@ -1182,12 +1214,21 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
                             </div>
                           </div>
                         ) : (
-                          <div className="flex gap-2 mt-auto pt-3">
-                            <button onClick={() => startEdit(item)} className="flex-1 h-10 rounded-lg bg-bg border border-border-light font-sans text-[13px] font-semibold text-text-soft cursor-pointer hover:bg-earth-25 transition-colors flex items-center justify-center gap-1.5">
-                              <Icon name="edit" size={13} className="text-text-muted" /> Edit
-                            </button>
-                            <button onClick={() => setPendingDelete(item.id)} className="flex-1 h-10 rounded-lg bg-bg border border-red-200 font-sans text-[13px] font-semibold text-red-500 cursor-pointer hover:bg-red-50 transition-colors flex items-center justify-center" title="Delete item">
-                              Delete
+                          <div className="flex flex-col gap-2 mt-auto pt-3">
+                            <div className="flex gap-2">
+                              <button onClick={() => startEdit(item)} className="flex-1 h-10 rounded-lg bg-bg border border-border-light font-sans text-[13px] font-semibold text-text-soft cursor-pointer hover:bg-earth-25 transition-colors flex items-center justify-center gap-1.5">
+                                <Icon name="edit" size={13} className="text-text-muted" /> Edit
+                              </button>
+                              <button onClick={() => setPendingDelete(item.id)} className="flex-1 h-10 rounded-lg bg-bg border border-red-200 font-sans text-[13px] font-semibold text-red-500 cursor-pointer hover:bg-red-50 transition-colors flex items-center justify-center" title="Delete item">
+                                Delete
+                              </button>
+                            </div>
+                            <button
+                              onClick={() => openFoodRescueDonation({ product_name: item.product_name, remaining: item.remaining ?? item.quantity, unit: item.unit })}
+                              title="Donate this item to Potluck / Food Rescue Hero"
+                              className="h-9 rounded-lg bg-bg border border-[#D4763C40] font-sans text-[13px] font-semibold text-[#C0622E] cursor-pointer hover:bg-[#FFF3EB] transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              <Icon name="leaf" size={13} className="text-[#D4763C]" /> Donate to Food Rescue
                             </button>
                           </div>
                         )
