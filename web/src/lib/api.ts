@@ -240,6 +240,13 @@ export const api = {
   deleteFeedback: (id: string) =>
     request<any>(`/feedback/${id}`, { method: 'DELETE' }),
 
+  // Admin
+  getUtilization: () => request<any>('/admin/utilization'),
+  getAdminUsers: () => request<any>('/admin/users'),
+  sendBroadcast: (data: { audience: 'farmers' | 'markets' | 'all'; message: string }) =>
+    request<any>('/admin/broadcast', { method: 'POST', body: JSON.stringify(data) }),
+  getBroadcasts: () => request<any>('/admin/broadcasts'),
+
   // Uploads
   uploadImage: async (file: File): Promise<{ url: string; filename: string }> => {
     const formData = new FormData();

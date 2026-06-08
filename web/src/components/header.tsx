@@ -68,6 +68,11 @@ export function Header() {
               <NavBtn active={pathname === '/settings'} onClick={() => router.push('/settings')}>
                 Settings
               </NavBtn>
+              {user?.role === 'admin' && (
+                <NavBtn active={pathname === '/admin'} onClick={() => router.push('/admin')}>
+                  Admin
+                </NavBtn>
+              )}
               <NavBtn active={false} onClick={() => { logout(); router.push('/'); }}>
                 Logout
               </NavBtn>
@@ -124,6 +129,11 @@ export function Header() {
               <MobileNavBtn active={pathname === '/settings'} onClick={() => { router.push('/settings'); setMenuOpen(false); }}>
                 Settings
               </MobileNavBtn>
+              {user?.role === 'admin' && (
+                <MobileNavBtn active={pathname === '/admin'} onClick={() => { router.push('/admin'); setMenuOpen(false); }}>
+                  Admin
+                </MobileNavBtn>
+              )}
               <MobileNavBtn active={false} onClick={() => { logout(); router.push('/'); setMenuOpen(false); }}>
                 Logout
               </MobileNavBtn>

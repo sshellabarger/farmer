@@ -26,6 +26,7 @@ import { inviteRoutes } from './routes/invite.js';
 import { pushRoutes } from './routes/push.js';
 import { errorRoutes } from './routes/errors.js';
 import { reminderRoutes } from './routes/reminders.js';
+import { adminRoutes } from './routes/admin.js';
 
 async function start() {
   const env = getEnv();
@@ -69,6 +70,7 @@ async function start() {
   await app.register(pushRoutes, { prefix: '/api/push' });
   await app.register(errorRoutes, { prefix: '/api/errors' });
   await app.register(reminderRoutes, { prefix: '/api/reminders' });
+  await app.register(adminRoutes, { prefix: '/api/admin' });
 
   // View link redirect
   app.get('/api/view/:token', async (request, reply) => {
