@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Icon } from './icons';
+import { Header } from './header';
 import { useAuth } from '@/lib/auth-context';
 import { api, type ConversationSummary, type ChatMessage } from '@/lib/api';
 
@@ -221,40 +222,12 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
 
   return (
     <div className="h-screen flex flex-col bg-bg font-sans">
-      {/* ── Top Bar ── */}
-      <header className="px-3 md:px-5 py-2.5 flex items-center justify-between bg-white border-b border-border shrink-0">
-        <div className="flex items-center gap-2 md:gap-3.5">
-          <button onClick={() => router.push('/')} className="bg-transparent border-none cursor-pointer flex items-center gap-1.5 text-text-soft font-sans text-[13px] font-medium p-0">
-            <Icon name="back" size={16} className="text-text-muted" /> <span className="hidden sm:inline">Overview</span>
-          </button>
-          <div className="w-px h-5 bg-border" />
-          <div className="flex items-center gap-2">
-            <div className="w-[30px] h-[30px] rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
-              <Icon name="leaf" size={15} className="text-white" />
-            </div>
-            <div className="font-display font-bold text-sm md:text-[15px] text-text">{isFarmer ? (farm?.name || user?.name) : (market?.name || user?.name)} </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="hidden sm:flex gap-4 mr-4">
-            {[
-              { label: 'Active Orders', val: headerStats.orders, color: '#D4763C' },
-              { label: isFarmer ? 'Inventory' : 'Available Items', val: headerStats.listings, color: '#3B7DD8' },
-            ].map((s, i) => (
-              <div key={i} className="text-right">
-                <div className="font-sans text-[10px] text-text-muted uppercase tracking-wider">{s.label}</div>
-                <div className="font-mono text-[15px] font-bold" style={{ color: s.color }}>{s.val}</div>
-              </div>
-            ))}
-          </div>
-          <button onClick={() => router.push('/settings')} className="w-[34px] h-[34px] rounded-lg bg-bg border border-border cursor-pointer flex items-center justify-center">
-            <Icon name="settings" size={16} className="text-text-muted" />
-          </button>
-        </div>
-      </header>
+      {/* ── Shared Header ── */}
+      <Header />
 
-      {/* ── Primary View Tabs (top nav) ── */}
-      <div className="flex gap-1.5 px-3 md:px-5 py-2 bg-white border-b border-border shrink-0 overflow-x-auto">
+      {/* ── Primary View Tabs + Stats ── */}
+      <div className="flex items-center justify-between px-3 md:px-5 py-2 bg-white border-b border-border shrink-0">
+        <div className="flex gap-1.5 overflow-x-auto">
         {([
           { id: 'chat' as View, icon: 'msg', label: 'Chat' },
           { id: 'orders' as View, icon: 'order', label: 'Orders' },
@@ -268,6 +241,18 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
             <span className={`font-sans text-[14px] font-semibold ${activeView === tab.id ? 'text-white' : 'text-text-soft'}`}>{tab.label}</span>
           </button>
         ))}
+        </div>
+        <div className="hidden sm:flex gap-4 ml-4 shrink-0">
+          {[
+            { label: 'Active Orders', val: headerStats.orders, color: '#D4763C' },
+            { label: isFarmer ? 'Inventory' : 'Available Items', val: headerStats.listings, color: '#3B7DD8' },
+          ].map((s, i) => (
+            <div key={i} className="text-right">
+              <div className="font-sans text-[10px] text-text-muted uppercase tracking-wider">{s.label}</div>
+              <div className="font-mono text-[15px] font-bold" style={{ color: s.color }}>{s.val}</div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* ── Main Area (one view at a time) ── */}

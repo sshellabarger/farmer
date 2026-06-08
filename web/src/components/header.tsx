@@ -21,7 +21,7 @@ export function Header() {
       <div className="max-w-[1140px] mx-auto px-4 sm:px-6 py-3 sm:py-3.5 flex items-center justify-between">
         {/* Logo */}
         <button
-          onClick={() => router.push('/')}
+          onClick={() => router.push(isAuthenticated ? dashPath : '/')}
           className="flex items-center gap-2 sm:gap-2.5 bg-transparent border-none cursor-pointer"
         >
           <div className="w-8 h-8 sm:w-[34px] sm:h-[34px] rounded-[10px] flex items-center justify-center"
@@ -35,9 +35,11 @@ export function Header() {
 
         {/* Desktop Nav */}
         <div className="hidden md:flex items-center gap-1">
-          <NavBtn active={pathname === '/'} onClick={() => router.push('/')}>
-            Overview
-          </NavBtn>
+          {!isAuthenticated && (
+            <NavBtn active={pathname === '/'} onClick={() => router.push('/')}>
+              Overview
+            </NavBtn>
+          )}
           <NavBtn active={pathname === '/about'} onClick={() => router.push('/about')}>
             Revenue Network
           </NavBtn>
@@ -90,9 +92,11 @@ export function Header() {
       {/* Mobile Menu Dropdown */}
       {menuOpen && (
         <div className="md:hidden border-t border-border-light px-4 pb-3 flex flex-col gap-1">
-          <MobileNavBtn active={pathname === '/'} onClick={() => { router.push('/'); setMenuOpen(false); }}>
-            Overview
-          </MobileNavBtn>
+          {!isAuthenticated && (
+            <MobileNavBtn active={pathname === '/'} onClick={() => { router.push('/'); setMenuOpen(false); }}>
+              Overview
+            </MobileNavBtn>
+          )}
           <MobileNavBtn active={pathname === '/about'} onClick={() => { router.push('/about'); setMenuOpen(false); }}>
             Revenue Network
           </MobileNavBtn>
