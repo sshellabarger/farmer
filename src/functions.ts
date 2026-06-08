@@ -29,6 +29,7 @@ import { inviteRoutes } from './routes/invite.js';
 import { pushRoutes } from './routes/push.js';
 import { errorRoutes } from './routes/errors.js';
 import { reminderRoutes } from './routes/reminders.js';
+import { adminRoutes } from './routes/admin.js';
 import { serializeTimestamps } from './utils/serialize.js';
 
 setGlobalOptions({
@@ -84,6 +85,7 @@ async function getApp() {
   await app.register(pushRoutes, { prefix: '/api/push' });
   await app.register(errorRoutes, { prefix: '/api/errors' });
   await app.register(reminderRoutes, { prefix: '/api/reminders' });
+  await app.register(adminRoutes, { prefix: '/api/admin' });
 
   // Short view-link redirect: /api/view/:token → dashboard with a signed JWT
   app.get('/api/view/:token', async (request: FastifyRequest, reply: FastifyReply) => {
