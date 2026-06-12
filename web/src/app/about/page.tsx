@@ -1,8 +1,11 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import Link from 'next/link';
 import { Header } from '@/components/header';
 import { ChatWidget } from '@/components/chat-widget';
+import { Icon } from '@/components/icons';
+import { FARMLINK_NUMBER_DISPLAY, smsHref } from '@/lib/constants';
 
 /* ─── Channel data ─── */
 interface Channel {
@@ -92,10 +95,11 @@ const CHANNELS: Record<number, Channel> = {
   },
 };
 
+/* Tier palette — stays inside the FarmLink greens/harvest/clay system */
 const TIER_COLORS = {
-  high: { accent: '#52b788', dark: '#2d6a4f', bg: '#d8f3dc', badgeBg: '#d8f3dc', badgeText: '#1a3d2b' },
-  mid:  { accent: '#5c4a8a', dark: '#5c4a8a', bg: '#ede9f6', badgeBg: '#ede9f6', badgeText: '#5c4a8a' },
-  low:  { accent: '#e9850a', dark: '#7a4400', bg: '#fff3cd', badgeBg: '#fff3cd', badgeText: '#7a4400' },
+  high: { accent: '#3D7A47', dark: '#21512C', bg: '#EBF4E6', badgeBg: '#DCEDD6', badgeText: '#1B3F24' },
+  mid:  { accent: '#C9622F', dark: '#8F441E', bg: '#FBEFE6', badgeBg: '#F6E2D2', badgeText: '#8F441E' },
+  low:  { accent: '#8B7355', dark: '#5F4D38', bg: '#F3EDE4', badgeBg: '#E9DFD0', badgeText: '#5F4D38' },
 };
 
 /* ─── SVG Satellite positions ─── */
@@ -110,7 +114,7 @@ const SATELLITES = [
 ];
 
 /* ─── Component ─── */
-export default function AboutPage() {
+export default function RevenueNetworkPage() {
   const [activeId, setActiveId] = useState<number | null>(null);
   const [barAnimated, setBarAnimated] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -118,11 +122,9 @@ export default function AboutPage() {
   const showDetail = (id: number) => {
     setActiveId(id);
     setBarAnimated(false);
-    // Trigger bar animation after render
     requestAnimationFrame(() => {
       requestAnimationFrame(() => setBarAnimated(true));
     });
-    // Scroll to panel on mobile
     setTimeout(() => {
       panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }, 50);
@@ -132,34 +134,52 @@ export default function AboutPage() {
   const tc = active ? TIER_COLORS[active.tier] : null;
 
   return (
-    <div className="min-h-screen" style={{ background: '#faf8f3' }}>
+    <div className="min-h-screen bg-bg font-sans">
       <Header />
 
-      {/* Hero header */}
-      <header className="relative overflow-hidden" style={{ background: '#1a3d2b', color: '#fff', padding: '48px 40px 40px' }}>
+      {/* ── Hero ── */}
+      <header className="relative overflow-hidden px-5 sm:px-10 py-14 md:py-20" style={{ background: '#142E1B', color: '#fff' }}>
         <div className="absolute inset-0 pointer-events-none" style={{
-          backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2352b788' fill-opacity='0.06'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4h-4z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`,
+          backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%237BC487' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4h-4z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`,
         }} />
-        <div className="max-w-[1000px] mx-auto relative">
-          <div className="flex items-center gap-2 mb-2.5 text-[11px] font-semibold tracking-[0.14em] uppercase" style={{ color: '#52b788' }}>
-            <span className="inline-block w-6 h-0.5" style={{ background: '#52b788' }} />
-            St. Joseph Center of Arkansas
-          </div>
-          <h1 className="font-display font-bold leading-[1.15] mb-3.5" style={{ fontSize: 'clamp(28px, 5vw, 44px)' }}>
-            Revenue Network
+        <div className="max-w-[1020px] mx-auto relative">
+          <div className="kicker mb-4" style={{ color: '#7BC487' }}>St. Joseph Center of Arkansas · A nonprofit network</div>
+          <h1 className="font-display font-semibold tracking-tight mb-4" style={{ fontSize: 'clamp(34px, 5.5vw, 54px)', lineHeight: 1.08 }}>
+            Every harvest
+            <br />
+            has a home.
           </h1>
-          <p className="font-sans font-light max-w-[580px] leading-relaxed" style={{ fontSize: 16, color: 'rgba(255,255,255,0.72)' }}>
-            Seven revenue channels connecting Arkansas growers to buyers, from direct sales at the farmers market to community food donations. Each channel is sized by its revenue potential to the farmer.
+          <p className="max-w-[560px] leading-relaxed mb-8" style={{ fontSize: 16, color: 'rgba(255,255,255,0.74)' }}>
+            Seven revenue channels connect Arkansas growers to buyers — from full-retail farmers
+            markets down to tax-deductible donation. One text to FarmLink puts your harvest in
+            front of all of them.
           </p>
+          <div className="flex gap-3 flex-wrap">
+            <a
+              href={smsHref('Hi FarmLink! Tell me about selling through the network.')}
+              className="inline-flex items-center gap-2.5 px-7 py-3.5 rounded-full no-underline bg-white font-bold text-[15px] text-green-800"
+              style={{ boxShadow: '0 4px 16px rgba(0,0,0,0.2)' }}
+            >
+              <Icon name="msg" size={17} />
+              Text {FARMLINK_NUMBER_DISPLAY}
+            </a>
+            <Link
+              href="/signup?role=farmer"
+              className="inline-flex items-center px-7 py-3.5 rounded-full no-underline font-semibold text-[15px] text-white"
+              style={{ background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.3)' }}
+            >
+              Join as a farm
+            </Link>
+          </div>
         </div>
       </header>
 
-      {/* Diagram section */}
-      <section className="max-w-[1000px] mx-auto px-5 sm:px-10 pt-10 text-center">
-        <div className="text-sm tracking-wide mb-1" style={{ color: '#6b6b63' }}>FARMER REVENUE ECOSYSTEM</div>
-        <h2 className="font-display font-bold text-[22px] mb-1.5" style={{ color: '#1a3d2b' }}>Seven channels, one farmer</h2>
-        <p className="text-sm mb-4" style={{ color: '#44443f' }}>Click any channel to learn how it works and what it returns to the grower.</p>
-        <p className="text-xs italic max-w-[540px] mx-auto mb-5" style={{ color: '#6b6b63' }}>Circle size reflects revenue potential. Larger circles return more dollars to the farmer per unit of product.</p>
+      {/* ── Diagram ── */}
+      <section className="max-w-[1020px] mx-auto px-5 sm:px-10 pt-12 md:pt-16 text-center">
+        <div className="kicker mb-3">Farmer revenue ecosystem</div>
+        <h2 className="h-display mb-2" style={{ fontSize: 'clamp(26px, 3.6vw, 36px)' }}>Seven channels, one farmer</h2>
+        <p className="text-[15px] text-text-soft mb-2">Tap any channel to see how it works and what it returns to the grower.</p>
+        <p className="text-[13px] italic text-text-muted max-w-[540px] mx-auto mb-6">Circle size reflects revenue potential — larger circles return more dollars to the farmer per unit of product.</p>
 
         {/* Desktop SVG diagram */}
         <div className="hidden sm:block relative w-full max-w-[720px] mx-auto" style={{ paddingTop: '100%' }}>
@@ -167,19 +187,19 @@ export default function AboutPage() {
             role="img" aria-label="Circular diagram with farmer in center and seven revenue channels arranged around them">
             <defs>
               <radialGradient id="farmerGrad" cx="50%" cy="40%" r="60%">
-                <stop offset="0%" stopColor="#52b788" />
-                <stop offset="100%" stopColor="#2d6a4f" />
+                <stop offset="0%" stopColor="#559B61" />
+                <stop offset="100%" stopColor="#21512C" />
               </radialGradient>
               <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
                 <feGaussianBlur in="SourceAlpha" stdDeviation="3" />
                 <feOffset dx="0" dy="2" />
-                <feComponentTransfer><feFuncA type="linear" slope="0.18" /></feComponentTransfer>
+                <feComponentTransfer><feFuncA type="linear" slope="0.16" /></feComponentTransfer>
                 <feMerge><feMergeNode /><feMergeNode in="SourceGraphic" /></feMerge>
               </filter>
             </defs>
 
             {/* Connecting lines */}
-            <g stroke="#c9d5cb" strokeWidth="1.5" strokeDasharray="4 4" fill="none">
+            <g stroke="#C9D5CB" strokeWidth="1.5" strokeDasharray="4 4" fill="none">
               {SATELLITES.map(s => (
                 <line key={s.id} x1={s.lines.x1} y1={s.lines.y1} x2={s.lines.x2} y2={s.lines.y2} />
               ))}
@@ -189,8 +209,8 @@ export default function AboutPage() {
             <g style={{ pointerEvents: 'none' }} filter="url(#softShadow)">
               <circle cx="360" cy="360" r="90" fill="url(#farmerGrad)" />
               <circle cx="360" cy="360" r="90" fill="none" stroke="#ffffff" strokeWidth="3" opacity="0.4" />
-              <text x="360" y="350" textAnchor="middle" fontFamily="'Playfair Display', serif" fontSize="34" fill="#ffffff">{'🌱'}</text>
-              <text x="360" y="388" textAnchor="middle" fontFamily="'Playfair Display', serif" fontSize="20" fontWeight="700" fill="#ffffff">FARMER</text>
+              <text x="360" y="350" textAnchor="middle" fontSize="34" fill="#ffffff">{'🌱'}</text>
+              <text x="360" y="390" textAnchor="middle" fontFamily="'Fraunces', Georgia, serif" fontSize="21" fontWeight="600" letterSpacing="0.06em" fill="#ffffff">FARMER</text>
             </g>
 
             {/* Satellites */}
@@ -200,7 +220,7 @@ export default function AboutPage() {
               const isActive = activeId === s.id;
               const labelY = s.cy - s.r * 0.4;
               const fontSize = s.r > 70 ? 15 : s.r > 60 ? 14 : s.r > 50 ? 13 : 12;
-              const chFontSize = s.r > 70 ? 13 : s.r > 60 ? 12 : s.r > 50 ? 11 : 10;
+              const chFontSize = s.r > 70 ? 12 : s.r > 60 ? 11 : 10;
               const pctFontSize = s.r > 70 ? 18 : s.r > 60 ? 17 : s.r > 50 ? 15 : 13;
 
               return (
@@ -208,15 +228,15 @@ export default function AboutPage() {
                   onClick={() => showDetail(s.id)}>
                   <circle cx={s.cx} cy={s.cy} r={s.r} fill="#ffffff" filter="url(#softShadow)" />
                   <circle cx={s.cx} cy={s.cy} r={s.r} fill="none" stroke={tierColor.accent} strokeWidth={isActive ? 4 : 3} />
-                  <text x={s.cx} y={labelY} textAnchor="middle" fontFamily="'Playfair Display', serif" fontSize={chFontSize} fontWeight="700" fill={tierColor.accent}>
+                  <text x={s.cx} y={labelY} textAnchor="middle" fontFamily="'Source Sans 3', sans-serif" fontSize={chFontSize} fontWeight="700" letterSpacing="0.08em" fill={tierColor.accent}>
                     CHANNEL {s.id}
                   </text>
                   {s.label.map((line, li) => (
-                    <text key={li} x={s.cx} y={labelY + 22 + li * 17} textAnchor="middle" fontFamily="'Source Sans 3', sans-serif" fontSize={fontSize} fontWeight="600" fill="#1a1a18">
+                    <text key={li} x={s.cx} y={labelY + 22 + li * 17} textAnchor="middle" fontFamily="'Source Sans 3', sans-serif" fontSize={fontSize} fontWeight="600" fill="#1E231B">
                       {line}
                     </text>
                   ))}
-                  <text x={s.cx} y={labelY + 22 + s.label.length * 17 + 8} textAnchor="middle" fontFamily="'Playfair Display', serif" fontSize={pctFontSize} fontWeight="700" fill={tierColor.dark}>
+                  <text x={s.cx} y={labelY + 22 + s.label.length * 17 + 10} textAnchor="middle" fontFamily="'Fraunces', Georgia, serif" fontSize={pctFontSize} fontWeight="600" fill={tierColor.dark}>
                     {s.pct}
                   </text>
                 </g>
@@ -233,33 +253,33 @@ export default function AboutPage() {
             const isActive = activeId === s.id;
             return (
               <button key={s.id} onClick={() => showDetail(s.id)}
-                className="flex items-center gap-3 rounded-xl p-3.5 border-none cursor-pointer text-left w-full transition-all active:scale-[0.99]"
+                className="flex items-center gap-3 rounded-2xl p-4 border-none cursor-pointer text-left w-full transition-all active:scale-[0.99]"
                 style={{
                   background: isActive ? tierColor.bg : '#fff',
                   borderLeft: `4px solid ${tierColor.accent}`,
-                  boxShadow: '0 4px 20px rgba(26,61,43,0.08)',
+                  boxShadow: '0 3px 16px rgba(20,46,27,0.07)',
                 }}>
-                <span className="font-display font-bold text-[22px] w-[30px] text-center shrink-0" style={{ color: tierColor.accent }}>
+                <span className="font-display font-semibold text-[22px] w-[32px] text-center shrink-0" style={{ color: tierColor.accent }}>
                   {String(s.id).padStart(2, '0')}
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="block font-display font-bold text-[15px] leading-tight" style={{ color: '#1a1a18' }}>{ch.title}</span>
-                  <span className="block text-xs mt-0.5" style={{ color: '#6b6b63' }}>{ch.subtitle}</span>
+                  <span className="block font-display font-semibold text-[16px] leading-tight text-text">{ch.title}</span>
+                  <span className="block text-xs mt-0.5 text-text-muted">{ch.subtitle}</span>
                 </span>
-                <span className="font-display font-bold text-[13px] shrink-0 text-right leading-tight" style={{ color: tierColor.dark }}>{s.pct}</span>
+                <span className="font-display font-semibold text-[13px] shrink-0 text-right leading-tight" style={{ color: tierColor.dark }}>{s.pct}</span>
               </button>
             );
           })}
         </div>
 
         {/* Legend */}
-        <div className="flex justify-center gap-7 flex-wrap mt-7 text-[13px]">
+        <div className="flex justify-center gap-6 flex-wrap mt-7 text-[13px] text-text-soft">
           {[
-            { color: '#52b788', label: 'Highest return to farmer' },
-            { color: '#a08edd', label: 'Moderate return' },
-            { color: '#e9850a', label: 'Value recovery' },
+            { color: TIER_COLORS.high.accent, label: 'Highest return to farmer' },
+            { color: TIER_COLORS.mid.accent, label: 'Moderate return' },
+            { color: TIER_COLORS.low.accent, label: 'Value recovery' },
           ].map(l => (
-            <div key={l.label} className="flex items-center gap-2" style={{ color: '#44443f' }}>
+            <div key={l.label} className="flex items-center gap-2">
               <span className="w-3 h-3 rounded-full inline-block" style={{ background: l.color }} />
               {l.label}
             </div>
@@ -267,24 +287,24 @@ export default function AboutPage() {
         </div>
       </section>
 
-      {/* Detail panel */}
-      <section className="max-w-[1000px] mx-auto px-5 sm:px-10 py-8" ref={panelRef}>
+      {/* ── Detail panel ── */}
+      <section className="max-w-[1020px] mx-auto px-5 sm:px-10 py-8" ref={panelRef}>
         {!active ? (
-          <div className="text-center text-sm italic py-5" style={{ color: '#6b6b63' }}>Tap or click any channel to see how it works</div>
+          <div className="text-center text-sm italic text-text-muted py-5">Tap or click any channel to see how it works</div>
         ) : (
-          <div className="bg-white rounded-xl p-6 sm:p-8" style={{
-            boxShadow: '0 4px 20px rgba(26,61,43,0.08)',
+          <div className="bg-white rounded-2xl p-6 sm:p-9" style={{
+            boxShadow: '0 4px 20px rgba(20,46,27,0.07)',
             borderLeft: `6px solid ${tc!.accent}`,
-            animation: 'slideIn 0.3s ease',
+            animation: 'fadeUp 0.3s ease',
           }}>
             {/* Header */}
-            <div className="flex flex-wrap items-start gap-3 sm:gap-5 pb-5 mb-5 border-b" style={{ borderBottomColor: '#e8e4dc' }}>
-              <span className="font-display font-bold text-[38px] leading-none shrink-0" style={{ color: tc!.accent }}>
+            <div className="flex flex-wrap items-start gap-3 sm:gap-5 pb-5 mb-5 border-b border-border-light">
+              <span className="font-display font-semibold text-[40px] leading-none shrink-0" style={{ color: tc!.accent }}>
                 {String(active.rank).padStart(2, '0')}
               </span>
               <div className="flex-1 min-w-[180px]">
-                <div className="font-display font-bold text-2xl leading-tight mb-1" style={{ color: '#1a1a18' }}>{active.title}</div>
-                <div className="text-sm" style={{ color: '#6b6b63' }}>{active.subtitle}</div>
+                <div className="font-display font-semibold text-[24px] leading-tight mb-1 text-text">{active.title}</div>
+                <div className="text-sm text-text-muted">{active.subtitle}</div>
               </div>
               <span className="text-[13px] font-semibold px-3.5 py-1.5 rounded-full text-center leading-snug shrink-0" style={{ background: tc!.badgeBg, color: tc!.badgeText }}>
                 {active.badge}
@@ -294,98 +314,124 @@ export default function AboutPage() {
             {/* Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div>
-                <h4 className="text-[11px] font-semibold tracking-[0.1em] uppercase mb-2" style={{ color: '#6b6b63' }}>How it works</h4>
-                <p className="text-sm leading-relaxed" style={{ color: '#44443f' }}>{active.how}</p>
+                <h4 className="kicker mb-2.5" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>How it works</h4>
+                <p className="text-sm leading-relaxed text-text-soft">{active.how}</p>
               </div>
               <div>
-                <h4 className="text-[11px] font-semibold tracking-[0.1em] uppercase mb-2" style={{ color: '#6b6b63' }}>Farmer return</h4>
-                <div className="font-display font-bold text-[26px] leading-none mb-2" style={{ color: tc!.dark }}>{active.barLabel}</div>
-                <div className="h-[9px] rounded-full overflow-hidden" style={{ background: '#e8e4dc' }}>
+                <h4 className="kicker mb-2.5" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Farmer return</h4>
+                <div className="font-display font-semibold text-[26px] leading-none mb-2.5" style={{ color: tc!.dark }}>{active.barLabel}</div>
+                <div className="h-[9px] rounded-full overflow-hidden bg-earth-100">
                   <div className="h-full rounded-full transition-all duration-700" style={{
                     background: tc!.accent,
                     width: barAnimated ? `${active.barPct}%` : '0%',
                   }} />
                 </div>
-                <p className="text-[13px] mt-3 leading-relaxed" style={{ color: '#44443f' }}>{active.barNote}</p>
+                <p className="text-[13px] mt-3 leading-relaxed text-text-soft">{active.barNote}</p>
               </div>
               <div>
-                <h4 className="text-[11px] font-semibold tracking-[0.1em] uppercase mb-2" style={{ color: '#6b6b63' }}>Key points</h4>
-                <ul className="text-sm leading-loose pl-4.5 list-disc" style={{ color: '#44443f' }}>
+                <h4 className="kicker mb-2.5" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Key points</h4>
+                <ul className="text-sm leading-loose pl-4.5 list-disc text-text-soft">
                   {active.points.map(p => <li key={p}>{p}</li>)}
                 </ul>
               </div>
               <div>
-                <h4 className="text-[11px] font-semibold tracking-[0.1em] uppercase mb-2" style={{ color: '#6b6b63' }}>Why it matters</h4>
-                <p className="text-sm leading-relaxed" style={{ color: '#44443f' }}>{active.why}</p>
+                <h4 className="kicker mb-2.5" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Why it matters</h4>
+                <p className="text-sm leading-relaxed text-text-soft">{active.why}</p>
               </div>
             </div>
           </div>
         )}
       </section>
 
-      {/* Callout */}
-      <div className="max-w-[1000px] mx-auto px-5 sm:px-10 pb-6">
-        <div className="rounded-xl p-7" style={{ background: '#edf8ee', borderLeft: '5px solid #2d6a4f' }}>
-          <h3 className="font-display font-bold text-lg mb-2.5" style={{ color: '#1a3d2b' }}>A complete market system, not just one path to market</h3>
-          <p className="text-sm leading-relaxed" style={{ color: '#44443f' }}>
-            Most small farms rely on a single channel and absorb all the risk when that channel fails. SJCA&apos;s seven-channel model gives Arkansas growers a portfolio approach. Maximize returns through direct sales to consumers, capture mid-tier volume through chef and wholesale relationships, recover value from imperfect product through seconds processing, and convert truly unsellable surplus into a tax benefit by donating to Hunger Relief Alliance partners. Because SJCA operates as a nonprofit, every channel is designed around farmer benefit rather than organizational profit. No product is wasted. Every harvest has a home.
+      {/* ── Portfolio callout ── */}
+      <div className="max-w-[1020px] mx-auto px-5 sm:px-10 pb-8">
+        <div className="rounded-2xl p-7 md:p-8 bg-green-50" style={{ borderLeft: '5px solid #21512C' }}>
+          <h3 className="font-display font-semibold text-[19px] md:text-[21px] mb-2.5 text-green-800">A complete market system, not just one path to market</h3>
+          <p className="text-sm leading-relaxed text-text-soft m-0">
+            Most small farms rely on a single channel and absorb all the risk when that channel fails.
+            SJCA&apos;s seven-channel model gives Arkansas growers a portfolio approach: maximize returns
+            through direct sales, capture mid-tier volume through chef and wholesale relationships,
+            recover value from imperfect product through seconds processing, and convert truly
+            unsellable surplus into a tax benefit through donation. No product is wasted.
+            Every harvest has a home.
           </p>
         </div>
       </div>
 
-      {/* Nonprofit banner */}
-      <div style={{ background: 'linear-gradient(90deg, #52b788 0%, #2d6a4f 100%)', color: '#fff', padding: '22px 40px' }}>
-        <div className="max-w-[1000px] mx-auto flex items-center gap-5 flex-wrap">
+      {/* ── Nonprofit band ── */}
+      <div className="px-5 sm:px-10 py-7" style={{ background: 'linear-gradient(90deg, #3D7A47 0%, #21512C 100%)', color: '#fff' }}>
+        <div className="max-w-[1020px] mx-auto flex items-center gap-5 flex-wrap">
           <div className="w-[52px] h-[52px] rounded-full flex items-center justify-center text-2xl shrink-0" style={{ background: 'rgba(255,255,255,0.15)' }}>
             <span role="img" aria-label="wheat">&#x1F33E;</span>
           </div>
           <div className="flex-1 min-w-[240px]">
-            <div className="font-display font-bold text-lg mb-1">A nonprofit network means more money to the farmer</div>
-            <div className="text-sm leading-relaxed" style={{ color: 'rgba(255,255,255,0.92)' }}>
-              St. Joseph Center of Arkansas is a <strong className="font-semibold text-white">nonprofit organization</strong>. We don&apos;t require a profit margin, only enough revenue to cover operational costs. Every channel above is engineered to send the maximum possible share to the people growing the food.
+            <div className="font-display font-semibold text-[18px] md:text-[19px] mb-1">A nonprofit network means more money to the farmer</div>
+            <div className="text-sm leading-relaxed" style={{ color: 'rgba(255,255,255,0.9)' }}>
+              St. Joseph Center of Arkansas is a <strong className="font-semibold text-white">nonprofit organization</strong>.
+              We don&apos;t require a profit margin, only enough revenue to cover operational costs.
+              Every channel above is engineered to send the maximum possible share to the people growing the food.
             </div>
           </div>
         </div>
       </div>
 
-      {/* Service pillars */}
-      <section className="max-w-[1000px] mx-auto px-5 sm:px-10 pt-12 pb-2">
-        <div className="text-center mb-8">
-          <div className="text-[11px] tracking-[0.14em] uppercase font-semibold mb-2.5" style={{ color: '#2d6a4f' }}>HOW SJCA SHOWS UP FOR FARMERS</div>
-          <h2 className="font-display font-bold text-[26px] leading-tight mb-3" style={{ color: '#1a3d2b' }}>More than market access. Full-service farmer support.</h2>
-          <p className="text-[15px] max-w-[660px] mx-auto leading-relaxed" style={{ color: '#44443f' }}>
-            SJCA doesn&apos;t just open doors to revenue channels. Our team builds the markets, cultivates the buyer relationships, and walks farmers through every transaction as needed.
+      {/* ── Service pillars ── */}
+      <section className="max-w-[1020px] mx-auto px-5 sm:px-10 pt-14 pb-6">
+        <div className="text-center mb-9">
+          <div className="kicker mb-3">How SJCA shows up for farmers</div>
+          <h2 className="h-display mb-3" style={{ fontSize: 'clamp(24px, 3.4vw, 32px)' }}>More than market access. Full-service farmer support.</h2>
+          <p className="text-[15px] max-w-[640px] mx-auto leading-relaxed text-text-soft">
+            SJCA doesn&apos;t just open doors to revenue channels — our team builds the markets,
+            cultivates the buyer relationships, and walks farmers through every transaction as needed.
           </p>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           {[
-            { icon: '📚', title: 'Market Development & Training', body: 'SJCA actively develops each revenue channel and trains farmers in the skills needed to succeed, from pricing and packaging to inventory management and customer service.' },
-            { icon: '🤝', title: 'Relationship Building', body: 'Staff cultivate the buyer relationships that make each channel work, including chefs, food hub partners, market customers, and hunger relief coordinators across the region.' },
-            { icon: '🛎️', title: 'Transaction Concierge', body: 'For farmers who need it, SJCA staff walk through every transaction in person, from listing product online to coordinating delivery and processing payment.' },
+            { icon: '📚', title: 'Market development & training', body: 'SJCA actively develops each revenue channel and trains farmers in the skills needed to succeed, from pricing and packaging to inventory management and customer service.' },
+            { icon: '🤝', title: 'Relationship building', body: 'Staff cultivate the buyer relationships that make each channel work, including chefs, food hub partners, market customers, and hunger relief coordinators across the region.' },
+            { icon: '🛎️', title: 'Transaction concierge', body: 'For farmers who need it, SJCA staff walk through every transaction in person, from listing product online to coordinating delivery and processing payment.' },
           ].map((card) => (
-            <div key={card.title} className="bg-white p-7 rounded-xl border-t-4 transition-all hover:-translate-y-0.5" style={{ borderTopColor: '#52b788', boxShadow: '0 4px 20px rgba(26,61,43,0.08)' }}>
-              <div className="w-[50px] h-[50px] rounded-xl flex items-center justify-center text-2xl mb-4" style={{ background: '#d8f3dc' }}>{card.icon}</div>
-              <h3 className="font-display font-bold text-lg mb-2.5 leading-tight" style={{ color: '#1a3d2b' }}>{card.title}</h3>
-              <p className="text-sm leading-relaxed" style={{ color: '#44443f' }}>{card.body}</p>
+            <div key={card.title} className="bg-white p-7 rounded-2xl border border-border transition-transform hover:-translate-y-0.5" style={{ boxShadow: '0 3px 16px rgba(20,46,27,0.05)' }}>
+              <div className="w-[50px] h-[50px] rounded-xl flex items-center justify-center text-2xl mb-4 bg-green-50">{card.icon}</div>
+              <h3 className="font-display font-semibold text-[18px] mb-2.5 leading-tight text-text">{card.title}</h3>
+              <p className="text-sm leading-relaxed text-text-soft m-0">{card.body}</p>
             </div>
           ))}
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="text-center text-xs tracking-wide py-5 px-10" style={{ background: '#1a3d2b', color: 'rgba(255,255,255,0.6)' }}>
-        St. Joseph Center of Arkansas &nbsp;&middot;&nbsp; A nonprofit network connecting Arkansas farmers to markets
+      {/* ── Closing CTA ── */}
+      <section className="px-5 sm:px-10 py-12 md:py-16">
+        <div className="max-w-[860px] mx-auto text-center">
+          <h2 className="h-display mb-3" style={{ fontSize: 'clamp(26px, 4vw, 38px)' }}>Put all seven channels to work.</h2>
+          <p className="text-[15px] text-text-soft mb-8 max-w-[460px] mx-auto">
+            Join the network and your harvest reaches every channel — starting with a single text.
+          </p>
+          <div className="flex gap-3 justify-center flex-wrap">
+            <a
+              href={smsHref('Hi FarmLink! I want to join the network.')}
+              className="inline-flex items-center gap-2.5 px-7 py-3.5 rounded-full no-underline text-white font-bold text-[15px] transition-opacity hover:opacity-90"
+              style={{ background: 'linear-gradient(135deg, #21512C 0%, #3D7A47 100%)', boxShadow: '0 4px 18px rgba(42,94,51,0.3)' }}
+            >
+              <Icon name="msg" size={17} />
+              Text {FARMLINK_NUMBER_DISPLAY}
+            </a>
+            <Link
+              href="/signup"
+              className="inline-flex items-center px-7 py-3.5 rounded-full no-underline bg-white text-text font-semibold text-[15px] border border-border hover:bg-earth-25 transition-colors"
+            >
+              Create a free account
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Footer ── */}
+      <footer className="text-center text-xs tracking-wide py-6 px-10" style={{ background: '#142E1B', color: 'rgba(255,255,255,0.6)' }}>
+        St. Joseph Center of Arkansas &nbsp;&middot;&nbsp; A nonprofit network connecting Arkansas farmers to markets &nbsp;&middot;&nbsp; Text {FARMLINK_NUMBER_DISPLAY}
       </footer>
 
       <ChatWidget />
-
-      {/* slideIn animation (scoped) */}
-      <style>{`
-        @keyframes slideIn {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   );
 }

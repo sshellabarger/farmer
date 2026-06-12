@@ -167,7 +167,7 @@ export default function FeedbackPage() {
         {/* Title + submit button */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div>
-            <h1 className="font-display text-2xl sm:text-3xl font-extrabold" style={{ color: '#1a3409' }}>
+            <h1 className="font-display text-2xl sm:text-3xl font-extrabold" style={{ color: '#1B3F24' }}>
               Feedback
             </h1>
             <p className="text-sm mt-1" style={{ color: '#8a7e72' }}>
@@ -177,7 +177,7 @@ export default function FeedbackPage() {
           <button
             onClick={() => { setShowForm(!showForm); setSuccessMsg(''); }}
             className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white cursor-pointer border-none transition-all"
-            style={{ background: 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+            style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
           >
             {showForm ? 'Cancel' : '+ New Feedback'}
           </button>
@@ -197,9 +197,9 @@ export default function FeedbackPage() {
         {showForm && (
           <div
             className="mb-6 rounded-2xl p-5 sm:p-6 border"
-            style={{ background: '#fff', borderColor: '#e8e0d6' }}
+            style={{ background: '#fff', borderColor: '#E4DFD3' }}
           >
-            <h2 className="font-display text-lg font-bold mb-4" style={{ color: '#2d5016' }}>
+            <h2 className="font-display text-lg font-bold mb-4" style={{ color: '#21512C' }}>
               Submit Feedback
             </h2>
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -211,7 +211,7 @@ export default function FeedbackPage() {
                     name="type"
                     checked={formType === 'feature_request'}
                     onChange={() => setFormType('feature_request')}
-                    className="accent-[#2d5016]"
+                    className="accent-[#21512C]"
                   />
                   <span className="text-sm font-medium" style={{ color: '#3d3428' }}>Feature Request</span>
                 </label>
@@ -221,7 +221,7 @@ export default function FeedbackPage() {
                     name="type"
                     checked={formType === 'bug_report'}
                     onChange={() => setFormType('bug_report')}
-                    className="accent-[#2d5016]"
+                    className="accent-[#21512C]"
                   />
                   <span className="text-sm font-medium" style={{ color: '#3d3428' }}>Bug Report</span>
                 </label>
@@ -236,7 +236,7 @@ export default function FeedbackPage() {
                 maxLength={255}
                 required
                 className="w-full px-4 py-2.5 rounded-xl border text-sm outline-none"
-                style={{ borderColor: '#e8e0d6', color: '#3d3428' }}
+                style={{ borderColor: '#E4DFD3', color: '#3d3428' }}
               />
 
               {/* Description */}
@@ -249,7 +249,7 @@ export default function FeedbackPage() {
                 required
                 rows={4}
                 className="w-full px-4 py-2.5 rounded-xl border text-sm outline-none resize-y"
-                style={{ borderColor: '#e8e0d6', color: '#3d3428' }}
+                style={{ borderColor: '#E4DFD3', color: '#3d3428' }}
               />
 
               <div className="flex justify-end">
@@ -257,7 +257,7 @@ export default function FeedbackPage() {
                   type="submit"
                   disabled={submitting || !formTitle.trim() || !formDesc.trim()}
                   className="px-6 py-2.5 rounded-xl text-sm font-semibold text-white cursor-pointer border-none disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ background: 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+                  style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
                 >
                   {submitting ? 'Submitting...' : 'Submit'}
                 </button>
@@ -272,7 +272,7 @@ export default function FeedbackPage() {
             value={filterType}
             onChange={(e) => setFilterType(e.target.value)}
             className="px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer"
-            style={{ borderColor: '#e8e0d6', color: '#3d3428', background: '#fff' }}
+            style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
           >
             <option value="">All Types</option>
             <option value="feature_request">Feature Requests</option>
@@ -282,7 +282,7 @@ export default function FeedbackPage() {
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
             className="px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer"
-            style={{ borderColor: '#e8e0d6', color: '#3d3428', background: '#fff' }}
+            style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
           >
             <option value="">All Statuses</option>
             <option value="open">Open</option>
@@ -300,7 +300,7 @@ export default function FeedbackPage() {
         ) : feedback.length === 0 ? (
           <div
             className="text-center py-12 rounded-2xl border"
-            style={{ background: '#fff', borderColor: '#e8e0d6' }}
+            style={{ background: '#fff', borderColor: '#E4DFD3' }}
           >
             <p className="text-lg mb-2" style={{ color: '#3d3428' }}>No feedback yet</p>
             <p className="text-sm" style={{ color: '#8a7e72' }}>
@@ -313,7 +313,7 @@ export default function FeedbackPage() {
               <div
                 key={item.id}
                 className="rounded-2xl border p-4 sm:p-5 transition-all"
-                style={{ background: '#fff', borderColor: '#e8e0d6' }}
+                style={{ background: '#fff', borderColor: '#E4DFD3' }}
               >
                 {/* Header row */}
                 <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
@@ -336,7 +336,7 @@ export default function FeedbackPage() {
                 </div>
 
                 {/* Title + description */}
-                <h3 className="text-sm font-bold mb-1" style={{ color: '#1a3409' }}>{item.title}</h3>
+                <h3 className="text-sm font-bold mb-1" style={{ color: '#1B3F24' }}>{item.title}</h3>
                 <p className="text-sm leading-relaxed mb-2" style={{ color: '#3d3428' }}>{item.description}</p>
 
                 {/* Submitter (admin view) */}
@@ -355,13 +355,13 @@ export default function FeedbackPage() {
 
                 {/* Admin edit panel */}
                 {isAdmin && editingId === item.id && (
-                  <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: '#e8e0d6' }}>
+                  <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: '#E4DFD3' }}>
                     <div className="flex flex-wrap gap-3">
                       <select
                         value={editStatus}
                         onChange={(e) => setEditStatus(e.target.value)}
                         className="px-3 py-1.5 rounded-lg border text-xs font-medium"
-                        style={{ borderColor: '#e8e0d6', color: '#3d3428', background: '#fff' }}
+                        style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
                       >
                         <option value="">Status...</option>
                         <option value="open">Open</option>
@@ -375,7 +375,7 @@ export default function FeedbackPage() {
                         value={editPriority}
                         onChange={(e) => setEditPriority(e.target.value)}
                         className="px-3 py-1.5 rounded-lg border text-xs font-medium"
-                        style={{ borderColor: '#e8e0d6', color: '#3d3428', background: '#fff' }}
+                        style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
                       >
                         <option value="">Priority...</option>
                         <option value="low">Low</option>
@@ -390,13 +390,13 @@ export default function FeedbackPage() {
                       onChange={(e) => setEditNotes(e.target.value)}
                       rows={2}
                       className="w-full px-3 py-2 rounded-lg border text-xs outline-none resize-y"
-                      style={{ borderColor: '#e8e0d6', color: '#3d3428' }}
+                      style={{ borderColor: '#E4DFD3', color: '#3d3428' }}
                     />
                     <div className="flex gap-2 justify-end">
                       <button
                         onClick={() => setEditingId(null)}
                         className="px-4 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border"
-                        style={{ borderColor: '#e8e0d6', color: '#3d3428', background: '#fff' }}
+                        style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
                       >
                         Cancel
                       </button>
@@ -404,7 +404,7 @@ export default function FeedbackPage() {
                         onClick={() => handleAdminSave(item.id)}
                         disabled={saving}
                         className="px-4 py-1.5 rounded-lg text-xs font-semibold text-white cursor-pointer border-none disabled:opacity-50"
-                        style={{ background: '#2d5016' }}
+                        style={{ background: '#21512C' }}
                       >
                         {saving ? 'Saving...' : 'Save'}
                       </button>
@@ -423,7 +423,7 @@ export default function FeedbackPage() {
                         setEditNotes(item.admin_notes || '');
                       }}
                       className="px-3 py-1 rounded-lg text-[11px] font-semibold cursor-pointer border"
-                      style={{ borderColor: '#e8e0d6', color: '#2d5016', background: '#fff' }}
+                      style={{ borderColor: '#E4DFD3', color: '#21512C', background: '#fff' }}
                     >
                       Review
                     </button>

@@ -38,10 +38,10 @@ function UploadPhotoContent() {
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4" style={{ background: '#faf8f5' }}>
-      <div className="w-full max-w-[420px] bg-white rounded-2xl border p-6 shadow-sm" style={{ borderColor: '#e8e0d6' }}>
+      <div className="w-full max-w-[420px] bg-white rounded-2xl border p-6 shadow-sm" style={{ borderColor: '#E4DFD3' }}>
         <div className="text-center mb-5">
           <div className="text-3xl mb-2">🌱</div>
-          <h1 className="font-display text-xl font-extrabold" style={{ color: '#1a3409' }}>Add a produce photo</h1>
+          <h1 className="font-display text-xl font-extrabold" style={{ color: '#1B3F24' }}>Add a produce photo</h1>
         </div>
 
         {state === 'loading' && <p className="text-center text-sm" style={{ color: '#8a7e72' }}>Loading…</p>}
@@ -62,7 +62,7 @@ function UploadPhotoContent() {
             )}
             <label
               className="block w-full text-center py-3 rounded-xl text-sm font-semibold text-white cursor-pointer"
-              style={{ background: state === 'uploading' ? '#9ca3af' : 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+              style={{ background: state === 'uploading' ? '#9ca3af' : 'linear-gradient(135deg, #21512C, #3D7A47)' }}
             >
               {state === 'uploading' ? 'Uploading…' : 'Choose a photo'}
               <input
@@ -83,7 +83,7 @@ function UploadPhotoContent() {
         {state === 'done' && (
           <div className="text-center">
             <div className="text-4xl mb-2">✅</div>
-            <p className="text-sm font-semibold" style={{ color: '#2d5016' }}>Photo added to {productName}!</p>
+            <p className="text-sm font-semibold" style={{ color: '#21512C' }}>Photo added to {productName}!</p>
             <p className="text-xs mt-2" style={{ color: '#8a7e72' }}>You can close this page.</p>
           </div>
         )}

@@ -110,7 +110,7 @@ export function RemindersCard() {
         </div>
         {!showForm && (
           <button onClick={() => setShowForm(true)}
-            className="shrink-0 text-[13px] font-semibold bg-[#2E6B34] text-white border-none rounded-lg px-3.5 h-9 cursor-pointer hover:opacity-90 transition-opacity">
+            className="shrink-0 text-[13px] font-semibold bg-[#2A5E33] text-white border-none rounded-lg px-3.5 h-9 cursor-pointer hover:opacity-90 transition-opacity">
             + New
           </button>
         )}
@@ -133,12 +133,12 @@ export function RemindersCard() {
               </div>
               <button onClick={() => toggleActive(r)} disabled={busyId === r.id}
                 className="text-[12px] font-semibold rounded-lg px-2.5 h-8 cursor-pointer border-none"
-                style={{ background: r.active ? '#FFF3EB' : '#E8F5E3', color: r.active ? '#D4763C' : '#2E6B34' }}>
+                style={{ background: r.active ? '#FBEFE6' : '#EBF4E6', color: r.active ? '#C9622F' : '#2A5E33' }}>
                 {busyId === r.id ? '...' : r.active ? 'Pause' : 'Resume'}
               </button>
               <button onClick={() => remove(r.id)} disabled={busyId === r.id}
                 className="text-[12px] font-semibold rounded-lg px-2.5 h-8 cursor-pointer border-none"
-                style={{ background: '#FDECEB', color: '#C44B3F' }}>
+                style={{ background: '#FBEDEB', color: '#BC4639' }}>
                 Delete
               </button>
             </div>
@@ -174,9 +174,9 @@ export function RemindersCard() {
                   <button key={day} onClick={() => toggleDay(day)}
                     className="text-[12px] font-semibold rounded-lg px-2.5 h-8 cursor-pointer border transition-colors"
                     style={{
-                      background: days.includes(day) ? '#2E6B34' : 'white',
+                      background: days.includes(day) ? '#2A5E33' : 'white',
                       color: days.includes(day) ? 'white' : '#6b6258',
-                      borderColor: days.includes(day) ? '#2E6B34' : '#e3ddd4',
+                      borderColor: days.includes(day) ? '#2A5E33' : '#E4DFD3',
                     }}>
                     {day.slice(0, 3)}
                   </button>
@@ -194,7 +194,7 @@ export function RemindersCard() {
             </button>
             <button onClick={submit} disabled={saving}
               className="flex-1 h-10 rounded-lg border-none text-sm font-semibold text-white cursor-pointer"
-              style={{ background: '#2E6B34', opacity: saving ? 0.6 : 1 }}>
+              style={{ background: '#2A5E33', opacity: saving ? 0.6 : 1 }}>
               {saving ? 'Saving...' : 'Save Reminder'}
             </button>
           </div>

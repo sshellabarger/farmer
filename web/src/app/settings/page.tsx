@@ -747,7 +747,7 @@ function SaveBar({ saving, onSave }: { saving: boolean; onSave: () => void }) {
         onClick={onSave}
         disabled={saving}
         className="px-6 py-2.5 rounded-xl font-semibold text-sm text-white border-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-        style={{ background: 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+        style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
       >
         {saving ? 'Saving...' : 'Save Changes'}
       </button>
@@ -821,14 +821,14 @@ function NotificationsCard() {
           onClick={enable}
           disabled={status === 'enabling' || status === 'enabled'}
           className="mt-4 h-11 px-5 rounded-xl text-white border-none font-sans font-semibold text-[14px] cursor-pointer disabled:opacity-50"
-          style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}
+          style={{ background: 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' }}
         >
           {status === 'enabled' ? '✓ Notifications On' : status === 'enabling' ? 'Enabling…' : 'Enable Notifications'}
         </button>
       )}
 
       {msg && (
-        <div className="mt-3 text-[13px] font-medium" style={{ color: status === 'error' ? '#C44B3F' : '#2E6B34' }}>{msg}</div>
+        <div className="mt-3 text-[13px] font-medium" style={{ color: status === 'error' ? '#BC4639' : '#2A5E33' }}>{msg}</div>
       )}
     </div>
   );

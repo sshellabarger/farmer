@@ -7,6 +7,7 @@ import { Header } from './header';
 import { useAuth } from '@/lib/auth-context';
 import { api, type ConversationSummary, type ChatMessage } from '@/lib/api';
 import { openFoodRescueDonation } from '@/lib/food-rescue';
+import { FARMLINK_NUMBER_DISPLAY } from '@/lib/constants';
 
 /* ─── Types ─── */
 interface Convo {
@@ -237,7 +238,7 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
         ]).map(tab => (
           <button key={tab.id} onClick={() => setActiveView(tab.id)}
             className="h-10 px-4 rounded-full border-none cursor-pointer flex items-center gap-2 shrink-0 transition-all active:scale-95"
-            style={{ background: activeView === tab.id ? '#2E6B34' : '#F3EFE9' }}>
+            style={{ background: activeView === tab.id ? '#2A5E33' : '#F2EEE5' }}>
             <Icon name={tab.icon} size={16} className={activeView === tab.id ? 'text-white' : 'text-text-muted'} />
             <span className={`font-sans text-[14px] font-semibold ${activeView === tab.id ? 'text-white' : 'text-text-soft'}`}>{tab.label}</span>
           </button>
@@ -245,7 +246,7 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
         </div>
         <div className="hidden sm:flex gap-4 ml-4 shrink-0">
           {[
-            { label: 'Active Orders', val: headerStats.orders, color: '#D4763C' },
+            { label: 'Active Orders', val: headerStats.orders, color: '#C9622F' },
             { label: isFarmer ? 'Inventory' : 'Available Items', val: headerStats.listings, color: '#3B7DD8' },
           ].map((s, i) => (
             <div key={i} className="text-right">
@@ -285,6 +286,11 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
                 ) : visibleMessages.length === 0 ? (
                   <div className="py-16 text-center text-text-muted text-[14px] px-6">
                     {chatSearch ? `No messages match “${chatSearch}”` : 'Send a message to start — try “What can you help me with?”'}
+                    {!chatSearch && (
+                      <div className="text-[12.5px] mt-2">
+                        This is the same conversation as your texts to {FARMLINK_NUMBER_DISPLAY} — message either way.
+                      </div>
+                    )}
                   </div>
                 ) : visibleMessages.map((msg, idx) => {
                   const isUser = msg.from === 'user';
@@ -300,7 +306,7 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
                             borderRadius: 18,
                             borderBottomRightRadius: isUser && lastOfGroup ? 5 : 18,
                             borderBottomLeftRadius: !isUser && lastOfGroup ? 5 : 18,
-                            background: isUser ? '#2E6B34' : '#FFFFFF',
+                            background: isUser ? '#2A5E33' : '#FFFFFF',
                             color: isUser ? '#fff' : '#1A1A1A',
                             boxShadow: isUser ? 'none' : '0 1px 1.5px rgba(0,0,0,0.07)',
                           }}>
@@ -351,7 +357,7 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
                     </div>
                     <button onClick={handleSend} disabled={sending || !chatInput.trim()} className="w-11 h-11 rounded-full border-none flex items-center justify-center shrink-0 transition-all duration-200 active:scale-95"
                       style={{
-                        background: chatInput.trim() && !sending ? 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' : '#E2DDD5',
+                        background: chatInput.trim() && !sending ? 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' : '#E2DDD5',
                         cursor: chatInput.trim() && !sending ? 'pointer' : 'default',
                       }}>
                       <Icon name="send" size={18} className={chatInput.trim() && !sending ? 'text-white' : 'text-text-muted'} />
@@ -394,10 +400,10 @@ export function Dashboard({ viewAs, initialTab }: DashboardProps) {
 
 /* ─── Status helpers ─── */
 const STATUS_COLORS: Record<string, string> = {
-  confirmed: '#2E6B34', ready: '#2E6B34',
-  pending: '#D4763C', processing: '#D4763C', in_transit: '#3B7DD8',
+  confirmed: '#2A5E33', ready: '#2A5E33',
+  pending: '#C9622F', processing: '#C9622F', in_transit: '#3B7DD8',
   delivered: '#9A9A9A', picked_up: '#9A9A9A',
-  cancelled: '#C44B3F',
+  cancelled: '#BC4639',
 };
 const ORDER_TRANSITIONS: Record<string, string[]> = {
   pending: ['confirmed', 'cancelled'],
@@ -479,7 +485,7 @@ function OrderDetailSheet({ orderId, onClose, onStatusChange }: { orderId: strin
                     </div>
                   )}
                 </div>
-                <div className="font-mono text-[24px] font-bold" style={{ color: '#2E6B34' }}>${Number(detail.total || 0).toFixed(2)}</div>
+                <div className="font-mono text-[24px] font-bold" style={{ color: '#2A5E33' }}>${Number(detail.total || 0).toFixed(2)}</div>
               </div>
 
               {/* Line items */}
@@ -544,8 +550,8 @@ function OrderDetailSheet({ orderId, onClose, onStatusChange }: { orderId: strin
               <button key={ns} onClick={() => handleStatusUpdate(ns)} disabled={updating}
                 className="flex-1 h-12 rounded-xl font-sans text-[14px] font-semibold border-none cursor-pointer transition-colors active:scale-[0.98]"
                 style={{
-                  background: ns === 'cancelled' ? '#FDECEB' : '#E8F5E3',
-                  color: ns === 'cancelled' ? '#C44B3F' : '#2E6B34',
+                  background: ns === 'cancelled' ? '#FBEDEB' : '#EBF4E6',
+                  color: ns === 'cancelled' ? '#BC4639' : '#2A5E33',
                   opacity: updating ? 0.5 : 1,
                 }}>
                 {updating ? '...' : ns === 'cancelled' ? 'Cancel Order' : ns.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
@@ -597,7 +603,7 @@ function OrdersPanel({ farmId, marketId, initialSubTab }: { farmId?: string; mar
       <div className="flex items-center gap-2 mb-5">
         {(['recent', 'recurring'] as const).map(t => (
           <button key={t} onClick={() => setSubTab(t)}
-            className={`font-sans text-sm px-3.5 py-1.5 rounded-lg cursor-pointer border-none transition-colors ${subTab === t ? 'bg-[#2E6B34] text-white' : 'bg-surface-raised text-text-muted hover:text-text'}`}>
+            className={`font-sans text-sm px-3.5 py-1.5 rounded-lg cursor-pointer border-none transition-colors ${subTab === t ? 'bg-[#2A5E33] text-white' : 'bg-surface-raised text-text-muted hover:text-text'}`}>
             {t === 'recent' ? 'Recent Orders' : 'Standing Orders'}
           </button>
         ))}
@@ -625,7 +631,7 @@ function OrdersPanel({ farmId, marketId, initialSubTab }: { farmId?: string; mar
                 <div className="font-sans text-[16px] text-text font-semibold leading-tight">{o.market_name || o.farm_name || 'Order'}</div>
                 {o.order_date && <div className="font-sans text-[12px] text-text-muted mt-0.5">{new Date(o.order_date).toLocaleDateString()}</div>}
                 <div className="flex items-center justify-between mt-2">
-                  <div className="font-mono text-[20px] font-bold" style={{ color: '#2E6B34' }}>${Number(o.total || 0).toFixed(2)}</div>
+                  <div className="font-mono text-[20px] font-bold" style={{ color: '#2A5E33' }}>${Number(o.total || 0).toFixed(2)}</div>
                   <span className="font-sans text-[11px] text-text-muted">Tap for details</span>
                 </div>
                 {nextStatuses.length > 0 && (
@@ -634,8 +640,8 @@ function OrdersPanel({ farmId, marketId, initialSubTab }: { farmId?: string; mar
                       <button key={ns} onClick={e => { e.stopPropagation(); updateStatus(o.id, ns); }} disabled={updating === o.id}
                         className="flex-1 h-10 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer transition-colors"
                         style={{
-                          background: ns === 'cancelled' ? '#FDECEB' : '#E8F5E3',
-                          color: ns === 'cancelled' ? '#C44B3F' : '#2E6B34',
+                          background: ns === 'cancelled' ? '#FBEDEB' : '#EBF4E6',
+                          color: ns === 'cancelled' ? '#BC4639' : '#2A5E33',
                           opacity: updating === o.id ? 0.5 : 1,
                         }}>
                         {updating === o.id ? '...' : ns === 'cancelled' ? 'Cancel' : ns.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
@@ -715,7 +721,7 @@ function RecurringPanel({ farmId, marketId }: { farmId?: string; marketId?: stri
         </p>
         {farmId && (
           <button onClick={() => setShowForm(true)}
-            className="font-sans text-[13px] font-semibold bg-[#2E6B34] text-white border-none rounded-lg px-3.5 h-9 cursor-pointer hover:opacity-90 transition-opacity">
+            className="font-sans text-[13px] font-semibold bg-[#2A5E33] text-white border-none rounded-lg px-3.5 h-9 cursor-pointer hover:opacity-90 transition-opacity">
             + New Standing Order
           </button>
         )}
@@ -738,7 +744,7 @@ function RecurringPanel({ farmId, marketId }: { farmId?: string; marketId?: stri
                   {farmId ? ro.market_name : ro.farm_name}
                 </span>
                 <span className="font-sans text-[11px] font-semibold px-2.5 py-1 rounded-full"
-                  style={{ color: ro.active ? '#2E6B34' : '#9A9A9A', background: ro.active ? '#E8F5E3' : '#F0F0F0' }}>
+                  style={{ color: ro.active ? '#2A5E33' : '#9A9A9A', background: ro.active ? '#EBF4E6' : '#F0F0F0' }}>
                   {ro.active ? 'Active' : 'Paused'}
                 </span>
               </div>
@@ -759,19 +765,19 @@ function RecurringPanel({ farmId, marketId }: { farmId?: string; marketId?: stri
                 <div className="flex gap-2 mt-auto">
                   <button onClick={() => toggleActive(ro)} disabled={busyId === ro.id}
                     className="flex-1 h-9 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer"
-                    style={{ background: ro.active ? '#FFF3EB' : '#E8F5E3', color: ro.active ? '#D4763C' : '#2E6B34', opacity: busyId === ro.id ? 0.5 : 1 }}>
+                    style={{ background: ro.active ? '#FBEFE6' : '#EBF4E6', color: ro.active ? '#C9622F' : '#2A5E33', opacity: busyId === ro.id ? 0.5 : 1 }}>
                     {busyId === ro.id ? '...' : ro.active ? 'Pause' : 'Resume'}
                   </button>
                   {pendingDelete === ro.id ? (
                     <button onClick={() => remove(ro.id)} disabled={busyId === ro.id}
                       className="flex-1 h-9 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer"
-                      style={{ background: '#C44B3F', color: 'white', opacity: busyId === ro.id ? 0.5 : 1 }}>
+                      style={{ background: '#BC4639', color: 'white', opacity: busyId === ro.id ? 0.5 : 1 }}>
                       Confirm delete
                     </button>
                   ) : (
                     <button onClick={() => setPendingDelete(ro.id)}
                       className="h-9 rounded-lg font-sans text-[13px] font-semibold border-none cursor-pointer px-3"
-                      style={{ background: '#FDECEB', color: '#C44B3F' }}>
+                      style={{ background: '#FBEDEB', color: '#BC4639' }}>
                       Delete
                     </button>
                   )}
@@ -893,9 +899,9 @@ function RecurringOrderForm({ farmId, onClose, onCreated }: { farmId: string; on
                 <button key={day} onClick={() => toggleDay(day)}
                   className="font-sans text-[12px] font-semibold rounded-lg px-2.5 h-8 cursor-pointer border transition-colors"
                   style={{
-                    background: days.includes(day) ? '#2E6B34' : 'white',
+                    background: days.includes(day) ? '#2A5E33' : 'white',
                     color: days.includes(day) ? 'white' : 'var(--text-soft, #555)',
-                    borderColor: days.includes(day) ? '#2E6B34' : 'var(--border, #ddd)',
+                    borderColor: days.includes(day) ? '#2A5E33' : 'var(--border, #ddd)',
                   }}>
                   {day.slice(0, 3)}
                 </button>
@@ -933,7 +939,7 @@ function RecurringOrderForm({ farmId, onClose, onCreated }: { farmId: string; on
               ))}
             </div>
             <button onClick={() => setItems(prev => [...prev, { product_id: '', quantity: '', unit: 'lb' }])}
-              className="mt-2 font-sans text-[13px] font-semibold text-[#2E6B34] bg-transparent border-none cursor-pointer p-0">
+              className="mt-2 font-sans text-[13px] font-semibold text-[#2A5E33] bg-transparent border-none cursor-pointer p-0">
               + Add another item
             </button>
           </div>
@@ -950,7 +956,7 @@ function RecurringOrderForm({ farmId, onClose, onCreated }: { farmId: string; on
           </button>
           <button onClick={submit} disabled={saving}
             className="flex-1 h-12 rounded-xl font-sans text-[14px] font-semibold border-none cursor-pointer text-white"
-            style={{ background: '#2E6B34', opacity: saving ? 0.6 : 1 }}>
+            style={{ background: '#2A5E33', opacity: saving ? 0.6 : 1 }}>
             {saving ? 'Creating...' : 'Create Standing Order'}
           </button>
         </div>
@@ -1080,9 +1086,9 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
   const activeInventory = inventory.filter(i => i.status !== 'sold');
 
   const statusStyles: Record<string, { bg: string; color: string; label: string }> = {
-    available: { bg: '#E8F5E3', color: '#2E6B34', label: 'Available' },
-    partial: { bg: '#FFF3EB', color: '#D4763C', label: 'Partial' },
-    sold: { bg: '#FDECEB', color: '#C44B3F', label: 'Sold' },
+    available: { bg: '#EBF4E6', color: '#2A5E33', label: 'Available' },
+    partial: { bg: '#FBEFE6', color: '#C9622F', label: 'Partial' },
+    sold: { bg: '#FBEDEB', color: '#BC4639', label: 'Sold' },
   };
 
   return (
@@ -1095,7 +1101,7 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
               onClick={syncToAlfn}
               disabled={syncBusy}
               title="Push your available produce to Local Food Marketplace (ALFN)"
-              className="text-[13px] font-semibold font-sans text-[#2E6B34] border border-[rgba(46,107,52,0.3)] bg-[#E8F5E3] rounded-lg px-3.5 h-9 cursor-pointer hover:bg-[#dcefd4] transition-colors disabled:opacity-50"
+              className="text-[13px] font-semibold font-sans text-[#2A5E33] border border-[rgba(46,107,52,0.3)] bg-[#EBF4E6] rounded-lg px-3.5 h-9 cursor-pointer hover:bg-[#dcefd4] transition-colors disabled:opacity-50"
             >
               {syncBusy ? 'Syncing…' : 'Sync to ALFN'}
             </button>
@@ -1110,8 +1116,8 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
       </div>
       {syncMsg && (
         <div className="mb-5 p-3.5 rounded-xl border flex items-start justify-between gap-3" style={{ background: '#EEF6EC', borderColor: 'rgba(46,107,52,0.2)' }}>
-          <p className="font-sans text-[13px] leading-relaxed m-0" style={{ color: '#2E6B34' }}>{syncMsg}</p>
-          <button onClick={() => setSyncMsg(null)} className="shrink-0 text-[#2E6B34] text-sm cursor-pointer bg-transparent border-none" title="Dismiss">✕</button>
+          <p className="font-sans text-[13px] leading-relaxed m-0" style={{ color: '#2A5E33' }}>{syncMsg}</p>
+          <button onClick={() => setSyncMsg(null)} className="shrink-0 text-[#2A5E33] text-sm cursor-pointer bg-transparent border-none" title="Dismiss">✕</button>
         </div>
       )}
       {clearConfirm && (
@@ -1150,7 +1156,7 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
                   {derivedStatus !== 'sold' && (item.freshness === 'aging' || item.freshness === 'past') && (
                     <span className="absolute top-2.5 left-2.5 text-[11px] font-bold font-sans px-2.5 py-1 rounded-full backdrop-blur"
                       style={{
-                        background: item.freshness === 'past' ? '#C44B3FE6' : '#D4763CE6',
+                        background: item.freshness === 'past' ? '#BC4639E6' : '#C9622FE6',
                         color: 'white',
                       }}
                       title={`${item.age_days} days old — estimated shelf life ${item.shelf_life_days} days`}>
@@ -1201,7 +1207,7 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
                     <>
                       <div className="flex items-baseline justify-between mt-2">
                         <span className="font-sans text-[15px] text-text-soft">{item.remaining ?? item.quantity ?? 0} <span className="text-text-muted text-[13px]">{item.unit}</span></span>
-                        <span className="font-mono text-[16px] font-bold" style={{ color: '#2E6B34' }}>${Number(item.price || 0).toFixed(2)}<span className="text-[11px] font-medium text-text-muted">/{item.unit}</span></span>
+                        <span className="font-mono text-[16px] font-bold" style={{ color: '#2A5E33' }}>${Number(item.price || 0).toFixed(2)}<span className="text-[11px] font-medium text-text-muted">/{item.unit}</span></span>
                       </div>
                       {item.harvest_date && <div className="font-sans text-[12px] text-text-muted mt-1.5">Harvested {new Date(item.harvest_date).toLocaleDateString()}</div>}
                       {isFarmer && (
@@ -1226,9 +1232,9 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
                             <button
                               onClick={() => openFoodRescueDonation({ product_name: item.product_name, remaining: item.remaining ?? item.quantity, unit: item.unit })}
                               title="Donate this item to Potluck / Food Rescue Hero"
-                              className="h-9 rounded-lg bg-bg border border-[#D4763C40] font-sans text-[13px] font-semibold text-[#C0622E] cursor-pointer hover:bg-[#FFF3EB] transition-colors flex items-center justify-center gap-1.5"
+                              className="h-9 rounded-lg bg-bg border border-[#C9622F40] font-sans text-[13px] font-semibold text-[#C0622E] cursor-pointer hover:bg-[#FBEFE6] transition-colors flex items-center justify-center gap-1.5"
                             >
-                              <Icon name="leaf" size={13} className="text-[#D4763C]" /> Donate to Food Rescue
+                              <Icon name="leaf" size={13} className="text-[#C9622F]" /> Donate to Food Rescue
                             </button>
                           </div>
                         )
@@ -1242,8 +1248,8 @@ function InventoryPanel({ farmId, marketId, isFarmer }: { farmId?: string; marke
         </div>
       )}
       {isFarmer && (
-        <div className="mt-5 p-4 rounded-xl border border-dashed" style={{ background: '#E8F5E3', borderColor: 'rgba(46,107,52,0.25)' }}>
-          <p className="font-sans text-[13px] leading-relaxed m-0" style={{ color: '#2E6B34' }}>
+        <div className="mt-5 p-4 rounded-xl border border-dashed" style={{ background: '#EBF4E6', borderColor: 'rgba(46,107,52,0.25)' }}>
+          <p className="font-sans text-[13px] leading-relaxed m-0" style={{ color: '#2A5E33' }}>
             <strong>Tip:</strong> Add inventory by texting — just send &ldquo;50lb jalapeños at $2.49&rdquo;
           </p>
         </div>
@@ -1328,7 +1334,7 @@ function MarketsPanel({ farmId }: { farmId?: string }) {
         {farmId && (
           <button onClick={() => setShowAdd(!showAdd)}
             className="px-2.5 py-1 rounded-md font-sans text-[11px] font-semibold border-none cursor-pointer"
-            style={{ background: showAdd ? '#FDECEB' : '#E8F5E3', color: showAdd ? '#C44B3F' : '#2E6B34' }}>
+            style={{ background: showAdd ? '#FBEDEB' : '#EBF4E6', color: showAdd ? '#BC4639' : '#2A5E33' }}>
             {showAdd ? 'Cancel' : '+ Add Market'}
           </button>
         )}
@@ -1361,7 +1367,7 @@ function MarketsPanel({ farmId }: { farmId?: string }) {
             {addError && <div className="text-[11px] text-red-600 font-semibold">{addError}</div>}
             <button onClick={handleAdd} disabled={!addName.trim() || adding}
               className="mt-1 w-full py-2 rounded-md text-white border-none font-sans text-xs font-semibold cursor-pointer disabled:opacity-40"
-              style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
+              style={{ background: 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' }}>
               {adding ? 'Adding...' : 'Add Market'}
             </button>
           </div>
@@ -1395,7 +1401,7 @@ function MarketsPanel({ farmId }: { farmId?: string }) {
                 {(m.history_orders != null || m.pending_orders != null) && (
                   <div className="flex gap-4 mt-1.5">
                     {m.pending_orders != null && <span className="font-sans text-xs text-text-muted">{m.pending_orders} pending</span>}
-                    {m.history_total != null && <span className="font-mono text-xs font-semibold" style={{ color: '#2E6B34' }}>${Number(m.history_total || 0).toFixed(2)} total</span>}
+                    {m.history_total != null && <span className="font-mono text-xs font-semibold" style={{ color: '#2A5E33' }}>${Number(m.history_total || 0).toFixed(2)} total</span>}
                   </div>
                 )}
                 {m.active === false && <span className="font-sans text-[10px] font-semibold text-red-500 mt-1 block">Inactive</span>}
@@ -1416,7 +1422,7 @@ function MarketsPanel({ farmId }: { farmId?: string }) {
                       <label className="font-sans text-[11px] text-text-muted w-16">Active</label>
                       <button onClick={() => setEditActive(!editActive)}
                         className="px-2.5 py-0.5 rounded-md border-none font-sans text-[11px] font-semibold cursor-pointer"
-                        style={{ background: editActive ? '#E8F5E3' : '#FDECEB', color: editActive ? '#2E6B34' : '#C44B3F' }}>
+                        style={{ background: editActive ? '#EBF4E6' : '#FBEDEB', color: editActive ? '#2A5E33' : '#BC4639' }}>
                         {editActive ? 'Yes' : 'No'}
                       </button>
                     </div>
@@ -1484,7 +1490,7 @@ function FarmsPanel({ marketId }: { marketId?: string }) {
               {(f.history_orders != null || f.pending_orders != null) && (
                 <div className="flex gap-4 mt-1.5">
                   {f.pending_orders != null && <span className="font-sans text-xs text-text-muted">{f.pending_orders} pending</span>}
-                  {f.history_total != null && <span className="font-mono text-xs font-semibold" style={{ color: '#2E6B34' }}>${Number(f.history_total || 0).toFixed(2)} total</span>}
+                  {f.history_total != null && <span className="font-mono text-xs font-semibold" style={{ color: '#2A5E33' }}>${Number(f.history_total || 0).toFixed(2)} total</span>}
                 </div>
               )}
               {f.active === false && <span className="font-sans text-[10px] text-text-muted mt-1 block">Inactive</span>}
@@ -1560,7 +1566,7 @@ function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; far
   };
 
   const statusBadge = (status: string | undefined) => {
-    if (status === 'active') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans" style={{ background: '#e6f4ea', color: '#2E6B34' }}>Connected</span>;
+    if (status === 'active') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans" style={{ background: '#e6f4ea', color: '#2A5E33' }}>Connected</span>;
     if (status === 'pending') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans bg-yellow-100 text-yellow-800">Pending</span>;
     if (status === 'declined') return <span className="text-[10px] px-1.5 py-0.5 rounded-full font-sans bg-gray-100 text-gray-500">Declined</span>;
     return null;
@@ -1571,18 +1577,18 @@ function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; far
       <div className="flex gap-2">
         {(['browse', 'pending'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
-            className={`font-sans text-sm px-3 py-1.5 rounded-lg capitalize transition-colors ${tab === t ? 'bg-[#2E6B34] text-white' : 'bg-surface-raised text-text-muted hover:text-text'}`}>
+            className={`font-sans text-sm px-3 py-1.5 rounded-lg capitalize transition-colors ${tab === t ? 'bg-[#2A5E33] text-white' : 'bg-surface-raised text-text-muted hover:text-text'}`}>
             {t}{t === 'pending' && pending.length > 0 ? ` (${pending.length})` : ''}
           </button>
         ))}
       </div>
 
-      {actionMsg && <div className="font-sans text-sm text-[#2E6B34] bg-[#e6f4ea] px-3 py-2 rounded-lg">{actionMsg}</div>}
+      {actionMsg && <div className="font-sans text-sm text-[#2A5E33] bg-[#e6f4ea] px-3 py-2 rounded-lg">{actionMsg}</div>}
 
       {tab === 'browse' && (
         <div className="flex flex-col gap-3 flex-1 overflow-auto">
           <input
-            className="font-sans text-sm border border-border-light rounded-lg px-3 py-2 bg-surface-raised text-text placeholder:text-text-muted focus:outline-none focus:border-[#2E6B34]"
+            className="font-sans text-sm border border-border-light rounded-lg px-3 py-2 bg-surface-raised text-text placeholder:text-text-muted focus:outline-none focus:border-[#2A5E33]"
             placeholder={`Search ${isFarmer ? 'markets' : 'farms'}…`}
             value={search}
             onChange={e => setSearch(e.target.value)}
@@ -1607,7 +1613,7 @@ function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; far
                 {e.connection_status !== 'active' && (
                   <button
                     onClick={() => handleConnect(e.id)}
-                    className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-[#2E6B34] text-white shrink-0 hover:opacity-90 transition-opacity"
+                    className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-[#2A5E33] text-white shrink-0 hover:opacity-90 transition-opacity"
                   >
                     {e.connection_status === 'pending' ? 'Pending' : e.connection_status === 'declined' ? 'Re-request' : 'Connect'}
                   </button>
@@ -1641,7 +1647,7 @@ function DirectoryPanel({ isFarmer, farmId, marketId }: { isFarmer: boolean; far
                     {isIncoming && (
                       <div className="flex gap-2 shrink-0">
                         <button onClick={() => handleRespond(r.rel_id, true)}
-                          className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-[#2E6B34] text-white hover:opacity-90 transition-opacity">
+                          className="font-sans text-xs px-2.5 py-1.5 rounded-lg bg-[#2A5E33] text-white hover:opacity-90 transition-opacity">
                           Accept
                         </button>
                         <button onClick={() => handleRespond(r.rel_id, false)}
@@ -1690,7 +1696,7 @@ function ConnectionsView({ isFarmer, farmId, marketId }: { isFarmer: boolean; fa
   };
 
   const tabBtn = (active: boolean) =>
-    ({ background: active ? '#fff' : 'transparent', color: active ? '#2E6B34' : '#9A9A9A', boxShadow: active ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' });
+    ({ background: active ? '#fff' : 'transparent', color: active ? '#2A5E33' : '#9A9A9A', boxShadow: active ? '0 1px 3px rgba(0,0,0,0.08)' : 'none' });
 
   return (
     <div className="w-full">
@@ -1700,7 +1706,7 @@ function ConnectionsView({ isFarmer, farmId, marketId }: { isFarmer: boolean; fa
           <button onClick={() => setMode('mine')} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans transition-all" style={tabBtn(mode === 'mine')}>My {label}</button>
           <button onClick={() => setMode('find')} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans transition-all" style={tabBtn(mode === 'find')}>Find New {label}</button>
         </div>
-        <button onClick={() => { setInviteOpen(o => !o); setInviteMsg(''); }} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans text-white flex items-center gap-1.5 active:scale-95 transition-transform" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
+        <button onClick={() => { setInviteOpen(o => !o); setInviteMsg(''); }} className="h-9 px-4 rounded-full border-none cursor-pointer text-[13px] font-semibold font-sans text-white flex items-center gap-1.5 active:scale-95 transition-transform" style={{ background: 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' }}>
           <Icon name="msg" size={14} className="text-white" /> Invite
         </button>
       </div>
@@ -1717,12 +1723,12 @@ function ConnectionsView({ isFarmer, farmId, marketId }: { isFarmer: boolean; fa
             <div className="flex flex-col sm:flex-row gap-2">
               <input value={inviteName} onChange={e => setInviteName(e.target.value)} placeholder="Name (optional)" className="flex-1 h-11 px-3.5 rounded-xl border border-border bg-white font-sans text-[15px] text-text outline-none focus:border-green-500" />
               <input value={invitePhone} onChange={e => setInvitePhone(e.target.value)} type="tel" placeholder="Phone number" className="flex-1 h-11 px-3.5 rounded-xl border border-border bg-white font-sans text-[15px] text-text outline-none focus:border-green-500" />
-              <button onClick={sendInvite} disabled={!invitePhone.trim() || inviteBusy} className="h-11 px-5 rounded-xl text-white border-none font-sans font-semibold text-[14px] cursor-pointer disabled:opacity-40" style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}>
+              <button onClick={sendInvite} disabled={!invitePhone.trim() || inviteBusy} className="h-11 px-5 rounded-xl text-white border-none font-sans font-semibold text-[14px] cursor-pointer disabled:opacity-40" style={{ background: 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' }}>
                 {inviteBusy ? 'Sending…' : 'Send Invite'}
               </button>
             </div>
             {inviteMsg && (
-              <div className="mt-2.5 font-sans text-[13px] font-semibold" style={{ color: /fail|could not|error/i.test(inviteMsg) ? '#C44B3F' : '#2E6B34' }}>{inviteMsg}</div>
+              <div className="mt-2.5 font-sans text-[13px] font-semibold" style={{ color: /fail|could not|error/i.test(inviteMsg) ? '#BC4639' : '#2A5E33' }}>{inviteMsg}</div>
             )}
           </div>
         </div>

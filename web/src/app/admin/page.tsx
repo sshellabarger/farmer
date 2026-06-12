@@ -52,7 +52,7 @@ function timeAgo(dateStr: string | null): string {
 
 function roleBadge(role: string) {
   const colors: Record<string, { bg: string; text: string }> = {
-    farmer: { bg: '#E8F5E3', text: '#2E6B34' },
+    farmer: { bg: '#EBF4E6', text: '#2A5E33' },
     market: { bg: '#DBEAFE', text: '#1E40AF' },
     both: { bg: '#FDE68A', text: '#92400E' },
     admin: { bg: '#FCE7F3', text: '#9D174D' },
@@ -205,7 +205,7 @@ export default function AdminPage() {
       <div className="max-w-[1200px] mx-auto px-4 sm:px-6 py-6">
         {/* Page header */}
         <div className="mb-6">
-          <h1 className="font-display text-2xl sm:text-3xl font-extrabold" style={{ color: '#1a3409' }}>
+          <h1 className="font-display text-2xl sm:text-3xl font-extrabold" style={{ color: '#1B3F24' }}>
             Admin Dashboard
           </h1>
           <p className="text-sm mt-1" style={{ color: '#8a7e72' }}>
@@ -225,7 +225,7 @@ export default function AdminPage() {
               onClick={() => setTab(t.id)}
               className="px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-none transition-colors"
               style={{
-                background: tab === t.id ? '#2E6B34' : '#F3EFE9',
+                background: tab === t.id ? '#2A5E33' : '#F2EEE5',
                 color: tab === t.id ? '#fff' : '#5C5C5C',
               }}
             >
@@ -240,10 +240,10 @@ export default function AdminPage() {
             {/* Summary cards */}
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-6">
               {[
-                { label: 'Total Users', val: totalUsers, color: '#2E6B34' },
-                { label: 'Farmers', val: farmerCount, color: '#2E6B34' },
+                { label: 'Total Users', val: totalUsers, color: '#2A5E33' },
+                { label: 'Farmers', val: farmerCount, color: '#2A5E33' },
                 { label: 'Markets', val: marketCount, color: '#3B7DD8' },
-                { label: 'Messages', val: totalMessages, color: '#D4763C' },
+                { label: 'Messages', val: totalMessages, color: '#C9622F' },
                 { label: 'Orders', val: totalOrders, color: '#9333EA' },
                 { label: 'Active (7d)', val: activeThisWeek, color: '#059669' },
               ].map(s => (
@@ -260,7 +260,7 @@ export default function AdminPage() {
                 value={filterRole}
                 onChange={e => setFilterRole(e.target.value)}
                 className="px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer"
-                style={{ borderColor: '#e8e0d6', color: '#3d3428', background: '#fff' }}
+                style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
               >
                 <option value="">All Roles</option>
                 <option value="farmer">Farmers</option>
@@ -272,7 +272,7 @@ export default function AdminPage() {
                 onClick={loadUtilization}
                 disabled={loadingUsers}
                 className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border-none"
-                style={{ background: '#E8F5E3', color: '#2E6B34' }}
+                style={{ background: '#EBF4E6', color: '#2A5E33' }}
               >
                 {loadingUsers ? 'Loading...' : 'Refresh'}
               </button>
@@ -335,7 +335,7 @@ export default function AdminPage() {
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.message_count > 0 ? '#D4763C' : '#ccc' }}>
+                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.message_count > 0 ? '#C9622F' : '#ccc' }}>
                               {u.message_count}
                             </span>
                           </td>
@@ -345,7 +345,7 @@ export default function AdminPage() {
                             </span>
                           </td>
                           <td className="px-4 py-3">
-                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.inventory_count > 0 ? '#2E6B34' : '#ccc' }}>
+                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.inventory_count > 0 ? '#2A5E33' : '#ccc' }}>
                               {u.inventory_count}
                             </span>
                           </td>
@@ -373,7 +373,7 @@ export default function AdminPage() {
         {tab === 'broadcast' && (
           <div className="max-w-[640px]">
             <div className="bg-white rounded-xl p-6 border border-border-light" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
-              <h2 className="font-display font-bold text-lg mb-1" style={{ color: '#1a3409' }}>
+              <h2 className="font-display font-bold text-lg mb-1" style={{ color: '#1B3F24' }}>
                 Send Broadcast SMS
               </h2>
               <p className="text-sm mb-5" style={{ color: '#8a7e72' }}>
@@ -396,9 +396,9 @@ export default function AdminPage() {
                       onClick={() => setAudience(a.id)}
                       className="flex-1 rounded-lg py-3 border-2 cursor-pointer font-sans text-[14px] font-semibold transition-all"
                       style={{
-                        background: audience === a.id ? '#E8F5E3' : '#fff',
-                        borderColor: audience === a.id ? '#2E6B34' : '#e8e0d6',
-                        color: audience === a.id ? '#2E6B34' : '#5C5C5C',
+                        background: audience === a.id ? '#EBF4E6' : '#fff',
+                        borderColor: audience === a.id ? '#2A5E33' : '#E4DFD3',
+                        color: audience === a.id ? '#2A5E33' : '#5C5C5C',
                       }}
                     >
                       {a.label}
@@ -422,9 +422,9 @@ export default function AdminPage() {
                   rows={4}
                   maxLength={1600}
                   className="w-full px-4 py-3 rounded-xl border text-[15px] outline-none resize-y font-sans leading-relaxed"
-                  style={{ borderColor: '#e8e0d6', color: '#3d3428' }}
+                  style={{ borderColor: '#E4DFD3', color: '#3d3428' }}
                 />
-                <div className="text-right text-[11px] mt-1" style={{ color: message.length > 1500 ? '#C44B3F' : '#8a7e72' }}>
+                <div className="text-right text-[11px] mt-1" style={{ color: message.length > 1500 ? '#BC4639' : '#8a7e72' }}>
                   {message.length} / 1,600
                 </div>
               </div>
@@ -435,26 +435,26 @@ export default function AdminPage() {
                   onClick={() => setConfirmSend(true)}
                   disabled={!message.trim()}
                   className="w-full h-12 rounded-xl font-sans text-[15px] font-semibold border-none cursor-pointer text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                  style={{ background: 'linear-gradient(135deg, #2E6B34 0%, #4A9B56 100%)' }}
+                  style={{ background: 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' }}
                 >
                   Preview &amp; Send
                 </button>
               ) : (
-                <div className="rounded-xl border-2 p-4" style={{ borderColor: '#D4763C', background: '#FFF8F3' }}>
-                  <div className="font-sans text-[14px] font-semibold mb-2" style={{ color: '#D4763C' }}>
+                <div className="rounded-xl border-2 p-4" style={{ borderColor: '#C9622F', background: '#FFF8F3' }}>
+                  <div className="font-sans text-[14px] font-semibold mb-2" style={{ color: '#C9622F' }}>
                     Confirm broadcast
                   </div>
                   <p className="text-[13px] mb-3 leading-relaxed" style={{ color: '#3d3428' }}>
                     This will send the following message to <strong>{audience === 'all' ? totalUsers : audience === 'farmers' ? farmerCount : marketCount}</strong> {audience === 'all' ? 'users' : audience}:
                   </p>
-                  <div className="bg-white rounded-lg p-3 mb-3 border text-[13px] leading-relaxed" style={{ borderColor: '#e8e0d6', color: '#3d3428' }}>
+                  <div className="bg-white rounded-lg p-3 mb-3 border text-[13px] leading-relaxed" style={{ borderColor: '#E4DFD3', color: '#3d3428' }}>
                     {message}
                   </div>
                   <div className="flex gap-2">
                     <button
                       onClick={() => setConfirmSend(false)}
                       className="flex-1 h-11 rounded-lg font-sans text-[14px] font-semibold border cursor-pointer"
-                      style={{ borderColor: '#e8e0d6', color: '#5C5C5C', background: '#fff' }}
+                      style={{ borderColor: '#E4DFD3', color: '#5C5C5C', background: '#fff' }}
                     >
                       Cancel
                     </button>
@@ -462,7 +462,7 @@ export default function AdminPage() {
                       onClick={handleSend}
                       disabled={sending}
                       className="flex-1 h-11 rounded-lg font-sans text-[14px] font-semibold border-none cursor-pointer text-white disabled:opacity-50"
-                      style={{ background: '#D4763C' }}
+                      style={{ background: '#C9622F' }}
                     >
                       {sending ? 'Sending...' : 'Send Now'}
                     </button>
@@ -505,7 +505,7 @@ export default function AdminPage() {
                 onClick={loadHistory}
                 disabled={loadingHistory}
                 className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border-none"
-                style={{ background: '#E8F5E3', color: '#2E6B34' }}
+                style={{ background: '#EBF4E6', color: '#2A5E33' }}
               >
                 {loadingHistory ? 'Loading...' : 'Refresh'}
               </button>
@@ -531,7 +531,7 @@ export default function AdminPage() {
                         <div className="flex items-center gap-2">
                           <span
                             className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
-                            style={{ background: '#E8F5E3', color: '#2E6B34' }}
+                            style={{ background: '#EBF4E6', color: '#2A5E33' }}
                           >
                             {audienceLabel}
                           </span>

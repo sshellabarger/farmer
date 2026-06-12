@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import { Icon } from './icons';
+import { FARMLINK_NUMBER_DISPLAY } from '@/lib/constants';
 
 interface Message {
   id: string;
@@ -183,7 +184,7 @@ export function ChatWidget() {
             >
               <div
                 className="w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0"
-                style={{ background: 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+                style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
               >
                 <Icon name="msg" size={16} />
               </div>
@@ -208,7 +209,7 @@ export function ChatWidget() {
                 onClick={handleMinimizedSend}
                 disabled={!input.trim() || sending}
                 className="px-3 py-1.5 sm:py-2 rounded-xl font-semibold text-xs sm:text-sm text-white border-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                style={{ background: 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+                style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
               >
                 {sending ? '...' : 'Send'}
               </button>
@@ -224,14 +225,14 @@ export function ChatWidget() {
               <div className="flex items-center gap-2">
                 <div
                   className="w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0"
-                  style={{ background: 'linear-gradient(135deg, #2d5016, #4a7c28)' }}
+                  style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
                 >
                   <Icon name="msg" size={16} />
                 </div>
                 <div>
                   <div className="font-bold text-sm text-earth-900">FarmLink AI</div>
                   <div className="text-[10px] sm:text-[11px] text-earth-500 truncate max-w-[200px] sm:max-w-none">
-                    Ask about inventory, orders, or markets
+                    Same conversation as your texts to {FARMLINK_NUMBER_DISPLAY}
                   </div>
                 </div>
               </div>
@@ -251,6 +252,9 @@ export function ChatWidget() {
                   <div className="text-2xl mb-2">💬</div>
                   <div className="font-semibold text-earth-500 mb-1">Chat with FarmLink AI</div>
                   <div className="text-xs text-earth-400">Try: &quot;What&apos;s available?&quot; or &quot;Show my orders&quot;</div>
+                  <div className="text-xs text-earth-400 mt-1.5">
+                    Same thread as your texts to {FARMLINK_NUMBER_DISPLAY} — message either way.
+                  </div>
                 </div>
               )}
               {messages.map((msg) => (

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Icon } from './icons';
+import { FARMLINK_NUMBER_DISPLAY } from '@/lib/constants';
 
 interface ScriptMessage {
   from: string;
@@ -64,12 +65,12 @@ export function PhoneSMS({ script, title, autoPlay = false, compact = false }: P
       <div className="absolute top-2 left-1/2 -translate-x-1/2 w-[100px] h-6 bg-black rounded-xl z-10" />
       {/* Screen */}
       <div className="w-full h-full bg-bg rounded-[28px] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="pt-8 pb-2.5 px-4 flex items-center gap-2.5" style={{ background: '#2E6B34' }}>
+        {/* Header — the contact being texted: FarmLink itself */}
+        <div className="pt-8 pb-2.5 px-4 flex items-center gap-2.5" style={{ background: '#21512C' }}>
           <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center text-sm">🌱</div>
           <div>
             <div className="font-sans font-bold text-[13px] text-white">{title}</div>
-            <div className="font-sans text-[10px] text-white/70">FarmLink Assistant</div>
+            <div className="font-sans text-[10px] text-white/70">{FARMLINK_NUMBER_DISPLAY}</div>
           </div>
         </div>
         {/* Messages */}
@@ -81,7 +82,7 @@ export function PhoneSMS({ script, title, autoPlay = false, compact = false }: P
                 <div className={`max-w-[82%] px-3 py-2 font-sans font-normal whitespace-pre-line ${compact ? 'text-[11.5px]' : 'text-[12.5px]'}`}
                   style={{
                     borderRadius: isUser ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                    background: isUser ? '#2E6B34' : '#fff',
+                    background: isUser ? '#2A5E33' : '#fff',
                     color: isUser ? '#fff' : '#1A1A1A',
                     lineHeight: 1.5,
                     boxShadow: isUser ? 'none' : '0 1px 2px rgba(0,0,0,0.05)',
@@ -95,7 +96,7 @@ export function PhoneSMS({ script, title, autoPlay = false, compact = false }: P
             <div className="flex" style={{ animation: 'fadeIn 0.2s ease' }}>
               <div className="bg-white px-4 py-2.5 rounded-[14px] flex gap-[5px] items-center" style={{ boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
                 {[0, 1, 2].map(i => (
-                  <div key={i} className="w-1.5 h-1.5 rounded-full" style={{ background: '#2E6B34', animation: `typingDot 1.2s infinite ${i * 0.2}s` }} />
+                  <div key={i} className="w-1.5 h-1.5 rounded-full" style={{ background: '#2A5E33', animation: `typingDot 1.2s infinite ${i * 0.2}s` }} />
                 ))}
               </div>
             </div>
@@ -107,11 +108,11 @@ export function PhoneSMS({ script, title, autoPlay = false, compact = false }: P
             {idx < script.length && !autoPlay ? script[idx]?.text?.slice(0, 30) + '...' : 'Type a message...'}
           </div>
           {!autoPlay && idx < script.length ? (
-            <button onClick={pushMessage} className="w-8 h-8 rounded-full border-none cursor-pointer flex items-center justify-center shrink-0" style={{ background: '#2E6B34' }}>
+            <button onClick={pushMessage} className="w-8 h-8 rounded-full border-none cursor-pointer flex items-center justify-center shrink-0" style={{ background: '#2A5E33' }}>
               <Icon name="send" size={14} className="text-white" />
             </button>
           ) : idx >= script.length ? (
-            <button onClick={reset} className="px-3 py-1.5 rounded-2xl border-none cursor-pointer text-[10px] font-semibold font-sans" style={{ background: '#E8F5E3', color: '#2E6B34' }}>
+            <button onClick={reset} className="px-3 py-1.5 rounded-2xl border-none cursor-pointer text-[10px] font-semibold font-sans" style={{ background: '#EBF4E6', color: '#2A5E33' }}>
               Replay
             </button>
           ) : null}

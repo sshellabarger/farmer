@@ -1,24 +1,36 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import { Header } from '@/components/header';
-import { Icon } from '@/components/icons';
+import { FARMLINK_NUMBER_DISPLAY } from '@/lib/constants';
 
 type Step = 'role' | 'details' | 'business' | 'verify';
 
-export default function SignupPage() {
+const inputCls =
+  'w-full px-4 py-3 border border-earth-200 rounded-xl text-[15px] focus:outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 bg-bg';
+const labelCls = 'block text-xs font-bold text-text-muted uppercase tracking-[0.08em] mb-1.5';
+const primaryBtnCls =
+  'py-3.5 text-white rounded-full font-bold text-[15px] transition-opacity hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer border-none';
+const primaryBtnStyle = { background: 'linear-gradient(135deg, #21512C 0%, #3D7A47 100%)' };
+
+function SignupContent() {
   const { login } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const [step, setStep] = useState<Step>('role');
+  // Marketing pages link here with ?role=farmer / ?role=market — skip straight to details.
+  const preselect = searchParams.get('role');
+  const initialRole = preselect === 'farmer' || preselect === 'market' ? preselect : null;
+
+  const [step, setStep] = useState<Step>(initialRole ? 'details' : 'role');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   // Form state
-  const [role, setRole] = useState<'farmer' | 'market' | null>(null);
+  const [role, setRole] = useState<'farmer' | 'market' | null>(initialRole);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
@@ -101,292 +113,240 @@ export default function SignupPage() {
   const stepNumber = step === 'role' ? 1 : step === 'details' ? 2 : step === 'business' ? 3 : 4;
 
   return (
-    <div className="min-h-screen bg-earth-15">
+    <div className="min-h-screen bg-bg font-sans">
       <Header />
-      <div className="max-w-[480px] mx-auto px-4 sm:px-6 py-8 sm:py-12">
-        <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-earth-100">
-          {/* Card header */}
-          <div
-            className="px-6 py-5 text-center"
-            style={{ background: 'linear-gradient(135deg, #1a3409, #2d5016 40%, #4a7c28)' }}
-          >
-            <div className="w-14 h-14 rounded-2xl bg-white/[0.13] flex items-center justify-center mx-auto mb-3">
-              <Icon name="leaf" size={28} />
-            </div>
-            <h1 className="text-white font-display font-extrabold text-xl m-0">
-              Create Your Account
-            </h1>
-            <p className="text-white/50 text-xs mt-1">
-              {step === 'role' && 'Choose your account type'}
-              {step === 'details' && 'Your contact information'}
-              {step === 'business' && `${role === 'farmer' ? 'Farm' : 'Market'} details`}
-              {step === 'verify' && 'Verify your phone number'}
-            </p>
-            {/* Progress dots */}
-            <div className="flex justify-center gap-2 mt-3">
-              {[1, 2, 3, 4].map(n => (
-                <div
-                  key={n}
-                  className="w-2 h-2 rounded-full transition-all"
-                  style={{
-                    background: n <= stepNumber ? '#fff' : 'rgba(255,255,255,0.25)',
-                    width: n === stepNumber ? 20 : 8,
-                  }}
-                />
-              ))}
-            </div>
+      <div className="max-w-[480px] mx-auto px-4 sm:px-6 py-10 sm:py-14">
+        <div className="text-center mb-7">
+          <h1 className="h-display mb-2" style={{ fontSize: 'clamp(28px, 5vw, 36px)' }}>
+            {step === 'verify' ? 'Almost there' : 'Join the network'}
+          </h1>
+          <p className="text-[15px] text-text-soft m-0">
+            {step === 'role' && 'Free during the Little Rock pilot. Takes about two minutes.'}
+            {step === 'details' && 'Your contact information.'}
+            {step === 'business' && `Tell us about your ${role === 'farmer' ? 'farm' : 'market'}.`}
+            {step === 'verify' && 'Verify the phone number you’ll text from.'}
+          </p>
+          {/* Progress dots */}
+          <div className="flex justify-center gap-2 mt-4">
+            {[1, 2, 3, 4].map(n => (
+              <div
+                key={n}
+                className="h-2 rounded-full transition-all"
+                style={{
+                  background: n <= stepNumber ? '#2A5E33' : '#DCD8CC',
+                  width: n === stepNumber ? 22 : 8,
+                }}
+              />
+            ))}
           </div>
+        </div>
 
-          <div className="p-6">
-            {error && (
-              <div className="mb-4 px-4 py-3 bg-red-50 text-red-700 rounded-xl text-sm border border-red-100">
-                {error}
-              </div>
-            )}
+        <div className="bg-white rounded-[20px] border border-border p-6 sm:p-7" style={{ boxShadow: '0 3px 18px rgba(20,46,27,0.05)' }}>
+          {error && (
+            <div className="mb-4 px-4 py-3 bg-red-50 text-red-500 rounded-xl text-sm border border-red-50">
+              {error}
+            </div>
+          )}
 
-            {/* Step 1: Choose Role */}
-            {step === 'role' && (
-              <div>
-                <p className="text-sm text-earth-600 mb-4 text-center">
-                  How will you use FarmLink?
-                </p>
-                <div className="grid grid-cols-1 gap-3">
-                  <button
-                    onClick={() => { setRole('farmer'); setError(''); setStep('details'); }}
-                    className="p-5 rounded-xl border-2 transition-all cursor-pointer bg-white hover:border-farm-400 hover:bg-farm-50 text-left"
-                    style={{ borderColor: '#e8e0d4' }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="text-3xl">🌱</div>
-                      <div>
-                        <div className="font-bold text-earth-900 text-sm">I&apos;m a Farmer</div>
-                        <div className="text-[11px] text-earth-500 mt-1">Farms, ranches, and growers who produce food and want to sell or distribute it locally</div>
-                      </div>
+          {/* Step 1: Choose Role */}
+          {step === 'role' && (
+            <div>
+              <p className="text-sm text-text-soft mb-4 text-center">How will you use FarmLink?</p>
+              <div className="grid grid-cols-1 gap-3">
+                <button
+                  onClick={() => { setRole('farmer'); setError(''); setStep('details'); }}
+                  className="p-5 rounded-2xl border-2 border-earth-100 transition-all cursor-pointer bg-white hover:border-green-500 hover:bg-green-50 text-left"
+                >
+                  <div className="flex items-start gap-3.5">
+                    <div className="text-3xl">🌾</div>
+                    <div>
+                      <div className="font-display font-semibold text-text text-[17px]">I grow food</div>
+                      <div className="text-[13px] text-text-muted mt-1 leading-snug">Farms, ranches, and growers who want to sell or distribute locally</div>
                     </div>
-                  </button>
-                  <button
-                    onClick={() => { setRole('market'); setError(''); setStep('details'); }}
-                    className="p-5 rounded-xl border-2 transition-all cursor-pointer bg-white hover:border-blue-400 hover:bg-blue-50 text-left"
-                    style={{ borderColor: '#e8e0d4' }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="text-3xl">🏪</div>
-                      <div>
-                        <div className="font-bold text-earth-900 text-sm">I&apos;m a Market</div>
-                        <div className="text-[11px] text-earth-500 mt-1">Restaurants, grocery stores, food hubs, food banks, food pantries, co-ops, schools, or any organization that sources local food</div>
-                      </div>
-                    </div>
-                  </button>
-                </div>
-
-                <div className="mt-6 text-center text-xs text-earth-400">
-                  Already have an account?{' '}
-                  <button
-                    onClick={() => router.push('/login')}
-                    className="text-farm-600 font-semibold bg-transparent border-none cursor-pointer underline"
-                  >
-                    Sign in
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Step 2: Personal Details */}
-            {step === 'details' && (
-              <div>
-                <div className="mb-4">
-                  <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                    Full Name
-                  </label>
-                  <input
-                    type="text"
-                    value={name}
-                    onChange={e => setName(e.target.value)}
-                    placeholder="Sarah Mitchell"
-                    className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100"
-                    autoFocus
-                  />
-                </div>
-                <div className="mb-4">
-                  <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                    Email Address
-                  </label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={e => setEmail(e.target.value)}
-                    placeholder="sarah@greenacres.com"
-                    className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100"
-                  />
-                </div>
-                <div className="mb-4">
-                  <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                    Phone Number
-                  </label>
-                  <input
-                    type="tel"
-                    value={phone}
-                    onChange={e => setPhone(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleSubmitDetails()}
-                    placeholder="(501) 555-0201"
-                    className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100"
-                  />
-                  <div className="text-[11px] text-earth-400 mt-1.5">
-                    We&apos;ll send a verification code to this number
                   </div>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => { setStep('role'); setError(''); }}
-                    className="px-4 py-3 bg-earth-100 text-earth-600 rounded-xl font-semibold text-sm cursor-pointer border-none hover:bg-earth-200 transition-colors"
-                  >
-                    Back
-                  </button>
-                  <button
-                    onClick={handleSubmitDetails}
-                    className="flex-1 py-3 bg-farm-600 text-white rounded-xl font-semibold text-sm hover:bg-farm-700 transition-colors cursor-pointer border-none"
-                  >
-                    Continue
-                  </button>
+                </button>
+                <button
+                  onClick={() => { setRole('market'); setError(''); setStep('details'); }}
+                  className="p-5 rounded-2xl border-2 border-earth-100 transition-all cursor-pointer bg-white hover:border-accent-500 hover:bg-accent-50 text-left"
+                >
+                  <div className="flex items-start gap-3.5">
+                    <div className="text-3xl">🏪</div>
+                    <div>
+                      <div className="font-display font-semibold text-text text-[17px]">I buy food</div>
+                      <div className="text-[13px] text-text-muted mt-1 leading-snug">Restaurants, groceries, food hubs, food banks, schools, co-ops, and any organization sourcing local food</div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+
+              <div className="mt-6 text-center text-[13px] text-text-muted">
+                Already have an account?{' '}
+                <button
+                  onClick={() => router.push('/login')}
+                  className="text-green-700 font-semibold bg-transparent border-none cursor-pointer underline"
+                >
+                  Sign in
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Personal Details */}
+          {step === 'details' && (
+            <div>
+              <div className="mb-4">
+                <label className={labelCls}>Full Name</label>
+                <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Sarah Mitchell" className={inputCls} autoFocus />
+              </div>
+              <div className="mb-4">
+                <label className={labelCls}>Email Address</label>
+                <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="sarah@greenacres.com" className={inputCls} />
+              </div>
+              <div className="mb-5">
+                <label className={labelCls}>Phone Number</label>
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={e => setPhone(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleSubmitDetails()}
+                  placeholder="(501) 555-0201"
+                  className={inputCls}
+                />
+                <div className="text-xs text-text-muted mt-1.5">
+                  This is the number you&apos;ll text FarmLink from — we&apos;ll send a verification code to it.
                 </div>
               </div>
-            )}
-
-            {/* Step 3: Business Details */}
-            {step === 'business' && (
-              <div>
-                <div className="mb-4">
-                  <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                    {role === 'farmer' ? 'Farm Name' : 'Market / Business Name'}
-                  </label>
-                  <input
-                    type="text"
-                    value={businessName}
-                    onChange={e => setBusinessName(e.target.value)}
-                    placeholder={role === 'farmer' ? 'Green Acres Farm' : 'ABC Market'}
-                    className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100"
-                    autoFocus
-                  />
-                </div>
-                <div className="mb-4">
-                  <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                    Location
-                  </label>
-                  <input
-                    type="text"
-                    value={location}
-                    onChange={e => setLocation(e.target.value)}
-                    placeholder="Little Rock, AR"
-                    className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100"
-                  />
-                </div>
-
-                {role === 'farmer' && (
-                  <div className="mb-4">
-                    <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                      Specialty <span className="text-earth-300">(optional)</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={specialty}
-                      onChange={e => setSpecialty(e.target.value)}
-                      placeholder="Organic vegetables, herbs, etc."
-                      className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100"
-                    />
-                  </div>
-                )}
-
-                {role === 'market' && (
-                  <>
-                    <div className="mb-4">
-                      <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-1.5">
-                        Market Type
-                      </label>
-                      <select
-                        value={marketType}
-                        onChange={e => setMarketType(e.target.value)}
-                        className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100 bg-white"
-                      >
-                        <option value="farmers_market">Farmers Market</option>
-                        <option value="restaurant">Restaurant</option>
-                        <option value="grocery">Grocery Store</option>
-                        <option value="co_op">Co-op</option>
-                        <option value="food_hub">Food Hub</option>
-                        <option value="food_bank">Food Bank</option>
-                        <option value="food_pantry">Food Pantry</option>
-                        <option value="school">School / Institution</option>
-                        <option value="other">Other</option>
-                      </select>
-                    </div>
-                    <div className="mb-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
-                      <div className="flex items-start gap-2">
-                        <span className="text-base mt-0.5">📍</span>
-                        <div>
-                          <div className="text-xs font-semibold text-blue-800">Central Pickup Location</div>
-                          <div className="text-[11px] text-blue-600 mt-0.5">All orders are picked up from the FarmLink Depot at 10301 N Rodney Parham Rd, STE C1, Little Rock, AR 72227</div>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => { setStep('details'); setError(''); }}
-                    className="px-4 py-3 bg-earth-100 text-earth-600 rounded-xl font-semibold text-sm cursor-pointer border-none hover:bg-earth-200 transition-colors"
-                  >
-                    Back
-                  </button>
-                  <button
-                    onClick={handleSubmitBusiness}
-                    disabled={loading}
-                    className="flex-1 py-3 bg-farm-600 text-white rounded-xl font-semibold text-sm hover:bg-farm-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer border-none"
-                  >
-                    {loading ? 'Creating Account...' : 'Create Account & Verify'}
-                  </button>
-                </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { setStep('role'); setError(''); }}
+                  className="px-5 py-3.5 bg-earth-50 text-text-soft rounded-full font-semibold text-sm cursor-pointer border-none hover:bg-earth-100 transition-colors"
+                >
+                  Back
+                </button>
+                <button onClick={handleSubmitDetails} className={`flex-1 ${primaryBtnCls}`} style={primaryBtnStyle}>
+                  Continue
+                </button>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Step 4: Phone Verification */}
-            {step === 'verify' && (
-              <div>
-                <div className="mb-4 p-4 bg-green-50 rounded-xl border border-green-100 text-center">
-                  <div className="text-green-700 font-bold text-sm mb-1">Account Created!</div>
-                  <div className="text-green-600 text-xs">
-                    We sent a verification code to <span className="font-mono font-semibold">{phone}</span>
-                  </div>
-                </div>
-
-                <label className="block text-xs font-semibold text-earth-500 uppercase tracking-wide mb-2">
-                  Verification Code
-                </label>
+          {/* Step 3: Business Details */}
+          {step === 'business' && (
+            <div>
+              <div className="mb-4">
+                <label className={labelCls}>{role === 'farmer' ? 'Farm Name' : 'Market / Business Name'}</label>
                 <input
                   type="text"
-                  value={code}
-                  onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  onKeyDown={e => e.key === 'Enter' && code.length === 6 && handleVerify()}
-                  placeholder="000000"
-                  maxLength={6}
-                  className="w-full px-4 py-3 border border-earth-200 rounded-xl text-sm text-center tracking-[0.5em] font-mono text-lg focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100 mb-4"
+                  value={businessName}
+                  onChange={e => setBusinessName(e.target.value)}
+                  placeholder={role === 'farmer' ? 'Green Acres Farm' : 'ABC Market'}
+                  className={inputCls}
                   autoFocus
                 />
-                <button
-                  onClick={handleVerify}
-                  disabled={code.length !== 6 || loading}
-                  className="w-full py-3 bg-farm-600 text-white rounded-xl font-semibold text-sm hover:bg-farm-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer border-none mb-3"
-                >
-                  {loading ? 'Verifying...' : 'Verify & Sign In'}
-                </button>
+              </div>
+              <div className="mb-4">
+                <label className={labelCls}>Location</label>
+                <input type="text" value={location} onChange={e => setLocation(e.target.value)} placeholder="Little Rock, AR" className={inputCls} />
+              </div>
 
-                <div className="mt-3 px-4 py-3 bg-farm-50 rounded-xl text-xs text-farm-700 text-center">
-                  <strong>Dev mode:</strong> Any 6-digit code works (try 123456)
+              {role === 'farmer' && (
+                <div className="mb-4">
+                  <label className={labelCls}>
+                    Specialty <span className="text-earth-300 normal-case font-medium">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={specialty}
+                    onChange={e => setSpecialty(e.target.value)}
+                    placeholder="Organic vegetables, herbs, etc."
+                    className={inputCls}
+                  />
+                </div>
+              )}
+
+              {role === 'market' && (
+                <>
+                  <div className="mb-4">
+                    <label className={labelCls}>Market Type</label>
+                    <select value={marketType} onChange={e => setMarketType(e.target.value)} className={`${inputCls} bg-white`}>
+                      <option value="farmers_market">Farmers Market</option>
+                      <option value="restaurant">Restaurant</option>
+                      <option value="grocery">Grocery Store</option>
+                      <option value="co_op">Co-op</option>
+                      <option value="food_hub">Food Hub</option>
+                      <option value="food_bank">Food Bank</option>
+                      <option value="food_pantry">Food Pantry</option>
+                      <option value="school">School / Institution</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="mb-4 p-3.5 bg-blue-50 rounded-xl">
+                    <div className="flex items-start gap-2">
+                      <span className="text-base mt-0.5">📍</span>
+                      <div>
+                        <div className="text-xs font-bold text-blue-500">Central Pickup Location</div>
+                        <div className="text-xs text-text-soft mt-0.5">All orders are picked up from the FarmLink Depot at 10301 N Rodney Parham Rd, STE C1, Little Rock, AR 72227</div>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { setStep('details'); setError(''); }}
+                  className="px-5 py-3.5 bg-earth-50 text-text-soft rounded-full font-semibold text-sm cursor-pointer border-none hover:bg-earth-100 transition-colors"
+                >
+                  Back
+                </button>
+                <button onClick={handleSubmitBusiness} disabled={loading} className={`flex-1 ${primaryBtnCls}`} style={primaryBtnStyle}>
+                  {loading ? 'Creating Account…' : 'Create Account & Verify'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 4: Phone Verification */}
+          {step === 'verify' && (
+            <div>
+              <div className="mb-4 p-4 bg-green-50 rounded-xl text-center">
+                <div className="text-green-700 font-bold text-sm mb-1">Account created!</div>
+                <div className="text-text-soft text-xs">
+                  We sent a verification code to <span className="font-mono font-semibold">{phone}</span>
                 </div>
               </div>
-            )}
-          </div>
+
+              <label className={labelCls}>Verification Code</label>
+              <input
+                type="text"
+                value={code}
+                onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                onKeyDown={e => e.key === 'Enter' && code.length === 6 && handleVerify()}
+                placeholder="000000"
+                maxLength={6}
+                className="w-full px-4 py-3 border border-earth-200 rounded-xl text-center tracking-[0.5em] font-mono text-lg focus:outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 mb-4 bg-bg"
+                autoFocus
+              />
+              <button onClick={handleVerify} disabled={code.length !== 6 || loading} className={`w-full ${primaryBtnCls}`} style={primaryBtnStyle}>
+                {loading ? 'Verifying…' : 'Verify & Sign In'}
+              </button>
+
+              <div className="mt-4 px-4 py-3 bg-green-50/70 border border-green-100 rounded-xl text-[13px] text-green-700 text-center leading-relaxed">
+                💡 Once you&apos;re in, you can run everything by texting{' '}
+                <strong className="font-bold">{FARMLINK_NUMBER_DISPLAY}</strong> — save it to your contacts.
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SignupPage() {
+  return (
+    <Suspense>
+      <SignupContent />
+    </Suspense>
   );
 }

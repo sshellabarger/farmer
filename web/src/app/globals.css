@@ -1,60 +1,94 @@
 @import "tailwindcss";
 
+/* ──────────────────────────────────────────────────────────────
+   FarmLink design system — one palette, one type scale.
+   Deep farm greens on warm paper, with a single harvest accent.
+   Legacy token names (farm-*, earth-*) are remapped to this
+   palette so older surfaces stay in harmony automatically.
+   ────────────────────────────────────────────────────────────── */
 @theme {
-  /* Farm greens */
-  --color-farm-900: #1a3409;
-  --color-farm-800: #2d5016;
-  --color-farm-700: #3a6620;
-  --color-farm-600: #4a7c28;
-  --color-farm-500: #5a9230;
-  --color-farm-50: #e8f5e9;
+  /* Greens (primary) */
+  --color-green-900: #142E1B;
+  --color-green-800: #1B3F24;
+  --color-green-700: #21512C;
+  --color-green-600: #2A5E33;
+  --color-green-500: #3D7A47;
+  --color-green-400: #559B61;
+  --color-green-100: #DCEDD6;
+  --color-green-50: #EBF4E6;
 
-  /* Redesign greens */
-  --color-green-700: #1B4D22;
-  --color-green-600: #2E6B34;
-  --color-green-500: #3D8B47;
-  --color-green-400: #4A9B56;
-  --color-green-50: #E8F5E3;
+  /* Legacy farm-* aliases → primary greens */
+  --color-farm-900: #142E1B;
+  --color-farm-800: #1B3F24;
+  --color-farm-700: #21512C;
+  --color-farm-600: #2A5E33;
+  --color-farm-500: #3D7A47;
+  --color-farm-50: #EBF4E6;
 
-  /* Earth neutrals */
-  --color-earth-900: #2c2416;
-  --color-earth-700: #5a5044;
-  --color-earth-500: #8a7e72;
-  --color-earth-300: #c0b8ae;
-  --color-earth-200: #d0c8be;
-  --color-earth-100: #e8e0d6;
-  --color-earth-50: #f0ebe4;
-  --color-earth-25: #f5f0ea;
-  --color-earth-15: #faf8f5;
+  /* Warm neutrals (paper + earth) */
+  --color-earth-900: #26241D;
+  --color-earth-800: #383528;
+  --color-earth-700: #55524A;
+  --color-earth-600: #6B6A60;
+  --color-earth-500: #8B897E;
+  --color-earth-400: #A6A398;
+  --color-earth-300: #C5C1B4;
+  --color-earth-200: #DCD8CC;
+  --color-earth-100: #EAE6DB;
+  --color-earth-50: #F1EDE4;
+  --color-earth-25: #F6F3EC;
+  --color-earth-15: #FAF8F4;
 
-  /* Accent colors */
-  --color-accent-500: #D4763C;
-  --color-accent-50: #FFF3EB;
-  --color-blue-500: #3B7DD8;
-  --color-blue-50: #EBF2FD;
-  --color-red-500: #C44B3F;
-  --color-red-50: #FDECEB;
+  /* Accents */
+  --color-accent-600: #B5562A;
+  --color-accent-500: #C9622F;
+  --color-accent-50: #FBEFE6;
+  --color-clay-500: #8B7355;
+  --color-clay-50: #F3EDE4;
+  --color-blue-500: #3B6FA8;
+  --color-blue-50: #EBF1F8;
+  --color-red-500: #BC4639;
+  --color-red-50: #FBEDEB;
+  --color-gold-500: #D9A514;
 
   /* Text */
-  --color-text: #1A1A1A;
-  --color-text-soft: #5C5C5C;
-  --color-text-muted: #9A9A9A;
+  --color-text: #1E231B;
+  --color-text-soft: #545A4E;
+  --color-text-muted: #8C9085;
 
   /* Borders */
-  --color-border: #E8E4DE;
-  --color-border-light: #F0EDE8;
+  --color-border: #E4DFD3;
+  --color-border-light: #EFEBE1;
 
   /* Background */
-  --color-bg: #FAF8F5;
-  --color-bg-alt: #F3EFE9;
+  --color-bg: #FAF8F4;
+  --color-bg-alt: #F2EEE5;
 
   /* Fonts */
-  --font-display: 'Playfair Display', Georgia, serif;
-  --font-sans: 'Source Sans 3', -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-sans: 'Source Sans 3', -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
-/* Animations */
+/* ── Shared type styles ── */
+.kicker {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-green-600);
+}
+
+.h-display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+  color: var(--color-text);
+}
+
+/* ── Animations ── */
 @keyframes fadeSlide {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -120,5 +154,9 @@
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes growBar {
+  from { width: 0; }
+}
+
 ::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-thumb { background: #d0c8be; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #C5C1B4; border-radius: 3px; }

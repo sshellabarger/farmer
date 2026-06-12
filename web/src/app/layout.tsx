@@ -5,8 +5,9 @@ import { PwaRegister } from '@/components/pwa-register';
 import { ErrorReporter } from '@/components/error-reporter';
 
 export const metadata: Metadata = {
-  title: 'FarmLink — Arkansas Local Food Network',
-  description: 'Text-first platform connecting local farms and markets',
+  title: 'FarmLink — Sell your harvest with a text',
+  description:
+    'FarmLink connects Arkansas farms with restaurants, groceries, food banks, and more through plain text messages. List inventory, take orders, and get paid — no apps to learn.',
   manifest: '/manifest.webmanifest',
   appleWebApp: {
     capable: true,
@@ -24,7 +25,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#2E6B34',
+  themeColor: '#2A5E33',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -32,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <head>
         <link
-          href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700;800;900&family=Source+Sans+3:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500..800&family=Source+Sans+3:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
           rel="stylesheet"
         />
         {/* Emergency SW cleanup — runs before React hydrates */}
