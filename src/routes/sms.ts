@@ -5,6 +5,21 @@ import { sendSms } from '../services/sms.js';
 import { notifyError } from '../services/error-notify.js';
 import { classifyError } from '../utils/errors.js';
 import { byDateDesc } from '../utils/sort.js';
+import { authenticate } from '../middleware/rbac.js';
+
+// Normalize to E.164 (+1XXXXXXXXXX) the same way the web clients do, so the
+// ownership check can't be dodged with formatting differences.
+function normalizePhone(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return raw.startsWith('+') ? raw : `+${digits}`;
+}
+
+function ownsPhone(user: { role: string; phone: string | null }, phone: string): boolean {
+  if (user.role === 'admin') return true;
+  return !!user.phone && normalizePhone(user.phone) === normalizePhone(phone);
+}
 
 const telnyxInboundSchema = z.object({
   data: z.object({
@@ -105,13 +120,18 @@ export async function smsRoutes(app: FastifyInstance) {
     reply.send({ ok: true });
   });
 
-  // Direct chat endpoint for web testing
-  app.post('/chat', async (request, reply) => {
+  // Direct chat endpoint for the web app. Acts as the phone's owner inside the
+  // AI tool-calling engine, so callers may only chat as their own number
+  // (admins may impersonate any number for support/testing).
+  app.post('/chat', { preHandler: authenticate(app) }, async (request, reply) => {
     const schema = z.object({ phone: z.string().min(10), message: z.string().min(1) });
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send({ error: 'Need phone and message' });
 
     const { phone, message } = parsed.data;
+    if (!ownsPhone(request.authUser!, phone)) {
+      return reply.status(403).send({ error: 'Forbidden: you can only chat as your own phone number' });
+    }
     try {
       const responseText = await processInboundMessage({ db: app.db, env: app.env, phone, message, messageSid: `web-${Date.now()}` });
       reply.send({ response: responseText });
@@ -121,9 +141,12 @@ export async function smsRoutes(app: FastifyInstance) {
     }
   });
 
-  // Conversation history
-  app.get('/history/:phone', async (request, reply) => {
+  // Conversation history — own number only (admins may view any).
+  app.get('/history/:phone', { preHandler: authenticate(app) }, async (request, reply) => {
     const { phone } = request.params as { phone: string };
+    if (!ownsPhone(request.authUser!, phone)) {
+      return reply.status(403).send({ error: 'Forbidden: you can only view your own conversation history' });
+    }
 
     const convoSnap = await app.db
       .collection('conversations')
@@ -143,21 +166,18 @@ export async function smsRoutes(app: FastifyInstance) {
     reply.send({ messages });
   });
 
-  // List conversations
-  app.get('/conversations', async (request, reply) => {
-    const authHeader = request.headers.authorization;
-    let authUserId: string | undefined;
-    if (authHeader?.startsWith('Bearer ')) {
-      const { verifyJwt } = await import('../utils/jwt.js');
-      const payload = verifyJwt(authHeader.slice(7), app.env.JWT_SECRET);
-      if (payload?.sub) authUserId = payload.sub;
-    }
-
+  // List conversations — own conversations plus partners of farms/markets the
+  // caller owns. Admins see everything.
+  app.get('/conversations', { preHandler: authenticate(app) }, async (request, reply) => {
+    const user = request.authUser!;
     const { farm_id, market_id } = request.query as { farm_id?: string; market_id?: string };
 
-    let includeUserIds: string[] = authUserId ? [authUserId] : [];
+    let includeUserIds: string[] = user.role === 'admin' ? [] : [user.id];
 
     if (farm_id) {
+      if (user.role !== 'admin' && farm_id !== user.farmId) {
+        return reply.status(403).send({ error: 'Forbidden: you do not own this farm' });
+      }
       const relsSnap = await app.db.collection('farm_market_rels')
         .where('farm_id', '==', farm_id).get();
       for (const d of relsSnap.docs) {
@@ -167,6 +187,9 @@ export async function smsRoutes(app: FastifyInstance) {
       }
     }
     if (market_id) {
+      if (user.role !== 'admin' && market_id !== user.marketId) {
+        return reply.status(403).send({ error: 'Forbidden: you do not own this market' });
+      }
       const relsSnap = await app.db.collection('farm_market_rels')
         .where('market_id', '==', market_id).get();
       for (const d of relsSnap.docs) {
@@ -177,8 +200,10 @@ export async function smsRoutes(app: FastifyInstance) {
     }
 
     let query: FirebaseFirestore.Query = app.db.collection('conversations');
-    if (includeUserIds.length > 0 && includeUserIds.length <= 30) {
-      query = query.where('user_id', 'in', includeUserIds);
+    if (includeUserIds.length > 0) {
+      // Firestore 'in' caps at 30 values — keep the filter rather than
+      // falling back to an unscoped query, which would leak other users' data.
+      query = query.where('user_id', 'in', includeUserIds.slice(0, 30));
     }
 
     const snapshot = await query.get();

@@ -5,6 +5,7 @@ import type { UserRole } from '../types/schema.js';
 export interface AuthUser {
   id: string;
   role: UserRole;
+  phone: string | null;
   farmId: string | null;
   marketId: string | null;
 }
@@ -33,6 +34,7 @@ export function authenticate(app: FastifyInstance) {
     request.authUser = {
       id: userDoc.id,
       role: user.role as UserRole,
+      phone: (user.phone as string) ?? null,
       farmId: farmSnap.empty ? null : farmSnap.docs[0].id,
       marketId: marketSnap.empty ? null : marketSnap.docs[0].id,
     };

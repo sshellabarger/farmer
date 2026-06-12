@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { api } from '@/lib/api';
 import { Icon } from './icons';
 
 interface Message {
@@ -52,8 +53,7 @@ export function LiveChat({ defaultPhone = '' }: LiveChatProps) {
 
     // Load history
     try {
-      const res = await fetch(`/api/sms/history/${encodeURIComponent(formatted)}`);
-      const data = await res.json();
+      const data = await api.getChatHistory(formatted);
       setMessages(data.messages || []);
     } catch {
       setMessages([]);
@@ -74,17 +74,12 @@ export function LiveChat({ defaultPhone = '' }: LiveChatProps) {
     setSending(true);
 
     try {
-      const res = await fetch('/api/sms/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: activePhone, message: userMsg.body }),
-      });
-      const data = await res.json();
+      const data = await api.sendChat(activePhone, userMsg.body);
 
       const botMsg: Message = {
         id: `bot-${Date.now()}`,
         direction: 'outbound',
-        body: data.response || data.error || 'No response',
+        body: data.response || 'No response',
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, botMsg]);
@@ -92,7 +87,7 @@ export function LiveChat({ defaultPhone = '' }: LiveChatProps) {
       const errorMsg: Message = {
         id: `err-${Date.now()}`,
         direction: 'outbound',
-        body: '⚠️ Connection error. Is the API server running on port 3000?',
+        body: err instanceof Error ? `⚠️ ${err.message}` : '⚠️ Connection error. Is the API server running on port 3000?',
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, errorMsg]);

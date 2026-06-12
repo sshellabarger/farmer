@@ -43,11 +43,6 @@ export function Header() {
           <NavBtn active={pathname === '/about'} onClick={() => router.push('/about')}>
             Revenue Network
           </NavBtn>
-          {!isAuthenticated && (
-            <NavBtn active={pathname === '/chat'} onClick={() => router.push('/chat')}>
-              Live Chat
-            </NavBtn>
-          )}
 
           {isAuthenticated ? (
             <>
@@ -69,9 +64,14 @@ export function Header() {
                 Settings
               </NavBtn>
               {user?.role === 'admin' && (
-                <NavBtn active={pathname === '/admin'} onClick={() => router.push('/admin')}>
-                  Admin
-                </NavBtn>
+                <>
+                  <NavBtn active={pathname === '/admin'} onClick={() => router.push('/admin')}>
+                    Admin
+                  </NavBtn>
+                  <NavBtn active={pathname === '/chat'} onClick={() => router.push('/chat')}>
+                    Live Chat
+                  </NavBtn>
+                </>
               )}
               <NavBtn active={false} onClick={() => { logout(); router.push('/'); }}>
                 Logout
@@ -105,11 +105,6 @@ export function Header() {
           <MobileNavBtn active={pathname === '/about'} onClick={() => { router.push('/about'); setMenuOpen(false); }}>
             Revenue Network
           </MobileNavBtn>
-          {!isAuthenticated && (
-            <MobileNavBtn active={pathname === '/chat'} onClick={() => { router.push('/chat'); setMenuOpen(false); }}>
-              Live Chat
-            </MobileNavBtn>
-          )}
           {isAuthenticated ? (
             <>
               <MobileNavBtn active={pathname.startsWith(dashPath)} onClick={() => { router.push(dashPath); setMenuOpen(false); }}>
@@ -130,9 +125,14 @@ export function Header() {
                 Settings
               </MobileNavBtn>
               {user?.role === 'admin' && (
-                <MobileNavBtn active={pathname === '/admin'} onClick={() => { router.push('/admin'); setMenuOpen(false); }}>
-                  Admin
-                </MobileNavBtn>
+                <>
+                  <MobileNavBtn active={pathname === '/admin'} onClick={() => { router.push('/admin'); setMenuOpen(false); }}>
+                    Admin
+                  </MobileNavBtn>
+                  <MobileNavBtn active={pathname === '/chat'} onClick={() => { router.push('/chat'); setMenuOpen(false); }}>
+                    Live Chat
+                  </MobileNavBtn>
+                </>
               )}
               <MobileNavBtn active={false} onClick={() => { logout(); router.push('/'); setMenuOpen(false); }}>
                 Logout

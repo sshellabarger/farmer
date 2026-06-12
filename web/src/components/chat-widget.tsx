@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '@/lib/auth-context';
+import { api } from '@/lib/api';
 import { Icon } from './icons';
 
 interface Message {
@@ -47,8 +48,7 @@ export function ChatWidget() {
   const loadHistory = useCallback(async () => {
     if (loaded || !formattedPhone) return;
     try {
-      const res = await fetch(`/api/sms/history/${encodeURIComponent(formattedPhone)}`);
-      const data = await res.json();
+      const data = await api.getChatHistory(formattedPhone);
       setMessages(data.messages || []);
     } catch {
       setMessages([]);
@@ -77,25 +77,20 @@ export function ChatWidget() {
     setSending(true);
 
     try {
-      const res = await fetch('/api/sms/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: formattedPhone, message: userMsg.body }),
-      });
-      const data = await res.json();
+      const data = await api.sendChat(formattedPhone, userMsg.body);
 
       const botMsg: Message = {
         id: `bot-${Date.now()}`,
         direction: 'outbound',
-        body: data.response || data.error || 'No response',
+        body: data.response || 'No response',
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, botMsg]);
-    } catch {
+    } catch (err) {
       const errorMsg: Message = {
         id: `err-${Date.now()}`,
         direction: 'outbound',
-        body: 'Connection error. Is the API server running?',
+        body: err instanceof Error ? err.message : 'Connection error. Is the API server running?',
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, errorMsg]);
@@ -136,12 +131,7 @@ export function ChatWidget() {
 
     try {
       // Upload the image
-      const formData = new FormData();
-      formData.append('file', file);
-      const uploadRes = await fetch('/api/uploads', { method: 'POST', body: formData });
-      const uploadData = await uploadRes.json();
-
-      if (!uploadRes.ok) throw new Error(uploadData.error || 'Upload failed');
+      const uploadData = await api.uploadImage(file);
 
       // Update the upload message with the image
       setMessages((prev) =>
@@ -158,17 +148,12 @@ export function ChatWidget() {
         : `I've uploaded a photo: ${uploadData.url}. Please use this for my inventory listing.`;
       setInput('');
 
-      const res = await fetch('/api/sms/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: formattedPhone, message: chatMessage }),
-      });
-      const data = await res.json();
+      const data = await api.sendChat(formattedPhone, chatMessage);
 
       const botMsg: Message = {
         id: `bot-${Date.now()}`,
         direction: 'outbound',
-        body: data.response || data.error || 'No response',
+        body: data.response || 'No response',
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, botMsg]);
