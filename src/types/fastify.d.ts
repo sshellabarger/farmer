@@ -10,5 +10,8 @@ declare module 'fastify' {
 
   interface FastifyRequest {
     authUser?: AuthUser;
+    // Exact request bytes, captured by the webhook routes' preParsing hook so
+    // signatures can be verified against what the provider actually signed.
+    rawBody?: Buffer;
   }
 }

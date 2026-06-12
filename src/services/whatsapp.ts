@@ -119,8 +119,9 @@ export function verifyWebhookSignature(
   const expected =
     'sha256=' +
     crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
-  return crypto.timingSafeEqual(
-    Buffer.from(expected),
-    Buffer.from(signatureHeader),
-  );
+  // Hash both sides so timingSafeEqual always gets equal-length buffers —
+  // it throws on length mismatch, which a malformed header would trigger.
+  const digestA = crypto.createHash('sha256').update(expected).digest();
+  const digestB = crypto.createHash('sha256').update(signatureHeader).digest();
+  return crypto.timingSafeEqual(digestA, digestB);
 }

@@ -1,11 +1,35 @@
-import type { FastifyInstance } from 'fastify';
+import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { processInboundMessage } from '../services/conversation.js';
 import { sendSms } from '../services/sms.js';
+import { verifyTelnyxWebhookSignature } from '../services/telnyx.js';
 import { notifyError } from '../services/error-notify.js';
 import { classifyError } from '../utils/errors.js';
 import { byDateDesc } from '../utils/sort.js';
 import { authenticate } from '../middleware/rbac.js';
+
+// Buffer the request body before parsing so webhook signatures can be checked
+// against the exact bytes the provider signed (JSON.stringify of the parsed
+// body can differ in whitespace/escaping and break verification).
+async function captureRawBody(request: FastifyRequest, _reply: FastifyReply, payload: Readable): Promise<Readable> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of payload) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const raw = Buffer.concat(chunks);
+  request.rawBody = raw;
+  const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
+  stream.receivedEncodedLength = raw.length;
+  return stream;
+}
+
+// Constant-time string comparison that tolerates length differences
+// (timingSafeEqual throws on mismatched lengths).
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  const digestA = crypto.createHash('sha256').update(a).digest();
+  const digestB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(digestA, digestB);
+}
 
 // Normalize to E.164 (+1XXXXXXXXXX) the same way the web clients do, so the
 // ownership check can't be dodged with formatting differences.
@@ -36,8 +60,29 @@ const telnyxInboundSchema = z.object({
 });
 
 export async function smsRoutes(app: FastifyInstance) {
-  // Telnyx inbound webhook
-  app.post('/inbound', async (request, reply) => {
+  // Telnyx inbound webhook. Telnyx signs every webhook, so an unverifiable
+  // request is spoofed — anyone who finds this URL could otherwise drive the
+  // AI engine (and its side effects) as any registered user.
+  app.post('/inbound', { preParsing: captureRawBody }, async (request, reply) => {
+    if (app.env.TELNYX_PUBLIC_KEY) {
+      const valid = verifyTelnyxWebhookSignature({
+        publicKey: app.env.TELNYX_PUBLIC_KEY,
+        signatureHeader: (request.headers['telnyx-signature-ed25519'] as string) || '',
+        timestampHeader: (request.headers['telnyx-timestamp'] as string) || '',
+        rawBody: request.rawBody ?? Buffer.from(JSON.stringify(request.body)),
+      });
+      if (!valid) {
+        app.log.warn({ ip: request.ip }, 'Rejected Telnyx webhook: invalid or missing signature');
+        return reply.status(403).send({ error: 'Invalid signature' });
+      }
+    } else if (app.env.NODE_ENV === 'production') {
+      // No key to verify against: reject rather than accept spoofable traffic.
+      app.log.warn({ ip: request.ip }, 'Rejected Telnyx webhook: TELNYX_PUBLIC_KEY not configured');
+      return reply.status(403).send({ error: 'Webhook signature verification not configured' });
+    } else {
+      app.log.warn('TELNYX_PUBLIC_KEY not set — accepting unsigned Telnyx webhook (development only)');
+    }
+
     const parsed = telnyxInboundSchema.safeParse(request.body);
     if (!parsed.success) {
       app.log.warn({ errors: parsed.error.flatten() }, 'Invalid Telnyx webhook payload');
@@ -79,10 +124,12 @@ export async function smsRoutes(app: FastifyInstance) {
   });
 
   // WhatsApp inbound messages
-  app.post('/whatsapp/inbound', async (request, reply) => {
+  app.post('/whatsapp/inbound', { preParsing: captureRawBody }, async (request, reply) => {
     if (app.env.META_APP_SECRET) {
       const signature = (request.headers['x-hub-signature-256'] as string) || '';
-      const rawBody = JSON.stringify(request.body);
+      // Meta signs the raw bytes; fall back to re-serializing only if the
+      // raw body wasn't captured.
+      const rawBody = request.rawBody ? request.rawBody.toString('utf8') : JSON.stringify(request.body);
       const { verifyWebhookSignature } = await import('../services/whatsapp.js');
       if (!verifyWebhookSignature(app.env.META_APP_SECRET, rawBody, signature)) {
         return reply.status(403).send({ error: 'Invalid signature' });
@@ -245,8 +292,22 @@ export async function smsRoutes(app: FastifyInstance) {
     reply.send({ conversations: results });
   });
 
-  // voip.ms inbound
+  // voip.ms inbound. voip.ms can't sign callbacks, so the callback URL set in
+  // the voip.ms portal embeds a shared secret (?secret=...) that we require
+  // here — otherwise anyone who finds this URL can spoof texts from any number.
   const handleVoipmsInbound = async (request: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
+    if (app.env.VOIPMS_WEBHOOK_SECRET) {
+      const provided = (request.query as Record<string, string>).secret || '';
+      if (!timingSafeEqualStrings(provided, app.env.VOIPMS_WEBHOOK_SECRET)) {
+        app.log.warn({ ip: request.ip }, 'Rejected voip.ms webhook: bad or missing secret');
+        return reply.status(403).type('text/plain').send('forbidden');
+      }
+    } else {
+      // Warn-and-accept until the portal URL carries the secret — hard-failing
+      // here before that change would drop all live inbound texts.
+      app.log.warn('VOIPMS_WEBHOOK_SECRET not set — accepting unauthenticated voip.ms webhook');
+    }
+
     const params = { ...(request.query as Record<string, string>), ...(request.body as Record<string, string> ?? {}) };
     const from = params.from;
     const message = params.message;

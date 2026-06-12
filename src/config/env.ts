@@ -13,6 +13,11 @@ const envSchema = z.object({
   TELNYX_API_KEY: z.string().default(''),
   TELNYX_PHONE_NUMBER: z.string().default(''),
   TELNYX_MESSAGING_PROFILE_ID: z.string().optional(),
+  // Base64 ed25519 public key from the Telnyx portal, used to verify inbound
+  // webhook signatures. When blank, the webhook rejects all traffic in
+  // production (Telnyx always signs, so unsigned means spoofed) but accepts
+  // in development for local testing.
+  TELNYX_PUBLIC_KEY: z.string().default(''),
   // WhatsApp Cloud API
   WHATSAPP_ACCESS_TOKEN: z.string().optional(),
   WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
@@ -23,6 +28,12 @@ const envSchema = z.object({
   VOIPMS_USERNAME: z.string().optional(),
   VOIPMS_PASSWORD: z.string().optional(),
   VOIPMS_DID: z.string().optional(),
+  // voip.ms SMS callbacks can't be signed, so the callback URL configured in
+  // the voip.ms portal must embed this shared secret as ?secret=<value>.
+  // IMPORTANT: set the portal URL first, then this var — setting this var
+  // while the portal URL lacks ?secret= will reject all inbound texts.
+  // Blank disables the check (logged as a warning on every inbound).
+  VOIPMS_WEBHOOK_SECRET: z.string().default(''),
 
   // Email (Resend)
   RESEND_API_KEY: z.string().default(''),
