@@ -2,7 +2,22 @@
 // Firestore is schemaless; these define the expected shape of documents.
 
 export type UserRole = 'farmer' | 'market' | 'both' | 'admin';
-export type MarketType = 'grocery' | 'restaurant' | 'co-op' | 'farmers_market';
+
+// Canonical market types — single source of truth, must stay in sync with the
+// web signup form options. Older market docs may carry legacy 'co-op' (hyphen);
+// normalize to 'co_op' on write, tolerate on read.
+export const MARKET_TYPES = [
+  'farmers_market',
+  'restaurant',
+  'grocery',
+  'co_op',
+  'food_hub',
+  'food_bank',
+  'food_pantry',
+  'school',
+  'other',
+] as const;
+export type MarketType = (typeof MARKET_TYPES)[number];
 export type DeliveryPref = 'pickup' | 'delivery' | 'either';
 export type InventoryStatus = 'available' | 'partial' | 'reserved' | 'sold';
 export type OrderStatus = 'pending' | 'confirmed' | 'in_transit' | 'delivered' | 'cancelled';

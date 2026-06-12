@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { verifyJwt } from '../utils/jwt.js';
+import { MARKET_TYPES } from '../types/schema.js';
 
 const addressSchema = z.object({
   street: z.string(),
@@ -115,7 +116,10 @@ export async function profileRoutes(app: FastifyInstance) {
     const schema = z.object({
       name: z.string().min(1).optional(),
       location: z.string().optional(),
-      type: z.enum(['grocery', 'restaurant', 'co-op', 'farmers_market']).optional(),
+      // Accept legacy 'co-op' from older clients/docs, normalize to 'co_op'.
+      type: z.enum([...MARKET_TYPES, 'co-op'] as const)
+        .transform((t) => (t === 'co-op' ? 'co_op' : t))
+        .optional(),
       delivery_pref: z.enum(['pickup', 'delivery', 'either']).optional(),
       phone: z.string().nullable().optional(),
       email: z.string().email().nullable().optional(),

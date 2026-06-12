@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { signJwt, verifyJwt } from '../utils/jwt.js';
 import { sendOtp, verifyOtp } from '../services/otp.js';
+import { MARKET_TYPES } from '../types/schema.js';
 import { v4 as uuid } from 'uuid';
 
 export async function authRoutes(app: FastifyInstance) {
@@ -14,7 +15,7 @@ export async function authRoutes(app: FastifyInstance) {
       role: z.enum(['farmer', 'market']),
       businessName: z.string().min(1, 'Business name is required'),
       location: z.string().min(1, 'Location is required'),
-      marketType: z.enum(['farmers_market', 'restaurant', 'grocery', 'co_op', 'other']).optional(),
+      marketType: z.enum(MARKET_TYPES).optional(),
       deliveryPref: z.enum(['pickup', 'delivery', 'both']).optional(),
       specialty: z.string().optional(),
     });

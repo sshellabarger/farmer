@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { authenticate, requireRole, requireFarmOwner } from '../middleware/rbac.js';
 import { byDateDesc, byNumberAsc } from '../utils/sort.js';
 import { classifyFreshness } from '../utils/freshness.js';
+import { MARKET_TYPES } from '../types/schema.js';
 import { v4 as uuid } from 'uuid';
 
 export async function farmRoutes(app: FastifyInstance) {
@@ -317,7 +318,7 @@ export async function farmRoutes(app: FastifyInstance) {
       name: z.string().min(1),
       phone: z.string().optional(),
       location: z.string().optional(),
-      type: z.enum(['grocery', 'restaurant', 'farmers_market', 'co_op', 'other']).optional().default('grocery'),
+      type: z.enum(MARKET_TYPES).optional().default('grocery'),
       priority: z.number().int().positive().optional().default(99),
       notification_delay_min: z.number().int().min(0).optional().default(0),
     });

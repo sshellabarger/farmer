@@ -104,7 +104,7 @@ export default function SettingsPage() {
       if (data.market) {
         setMarketName(data.market.name || '');
         setMarketLocation(data.market.location || '');
-        setMarketType(data.market.type || 'grocery');
+        setMarketType(data.market.type === 'co-op' ? 'co_op' : data.market.type || 'grocery');
         setMarketDeliveryPref(data.market.delivery_pref || 'either');
         setMarketPhone(data.market.phone || '');
         setMarketEmail(data.market.email || '');
@@ -359,10 +359,15 @@ export default function SettingsPage() {
                       value={marketType}
                       onChange={setMarketType}
                       options={[
-                        { value: 'grocery', label: 'Grocery' },
+                        { value: 'farmers_market', label: 'Farmers Market' },
                         { value: 'restaurant', label: 'Restaurant' },
-                        { value: 'co-op', label: 'Co-op' },
-                        { value: 'farmers_market', label: "Farmers Market" },
+                        { value: 'grocery', label: 'Grocery' },
+                        { value: 'co_op', label: 'Co-op' },
+                        { value: 'food_hub', label: 'Food Hub' },
+                        { value: 'food_bank', label: 'Food Bank' },
+                        { value: 'food_pantry', label: 'Food Pantry' },
+                        { value: 'school', label: 'School / Institution' },
+                        { value: 'other', label: 'Other' },
                       ]}
                     />
                     <SelectField

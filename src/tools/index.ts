@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
+import { MARKET_TYPES } from '../types/schema.js';
 import { inventoryAdd, inventoryUpdate, inventoryQuery, inventoryClearAll, producePhoto } from './inventory.js';
 import { orderCreate, orderUpdate, orderQuery } from './orders.js';
 import { marketQuery } from './markets.js';
@@ -41,7 +42,7 @@ export const toolDefinitions: Anthropic.Tool[] = [
         market_name: { type: 'string', description: "Business/organization name (defaults to \"<name>'s Market\" if omitted)" },
         market_type: {
           type: 'string',
-          enum: ['grocery', 'restaurant', 'co-op', 'farmers_market', 'food_hub', 'food_bank', 'food_pantry', 'school', 'other'],
+          enum: [...MARKET_TYPES],
           description: 'Type of market/organization (defaults to grocery)',
         },
         specialty: { type: 'string', description: 'Farm specialty (e.g., "organic vegetables")' },

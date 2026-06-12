@@ -9,7 +9,8 @@ export async function userSignup(input: Record<string, unknown>, ctx: ToolContex
   const location = input.location as string;
   const farmName = (input.farm_name as string) || `${name}'s Farm`;
   const marketName = (input.market_name as string) || `${name}'s Market`;
-  const marketType = (input.market_type as string) || 'grocery';
+  const rawMarketType = (input.market_type as string) || 'grocery';
+  const marketType = rawMarketType === 'co-op' ? 'co_op' : rawMarketType;
   const specialty = (input.specialty as string) || null;
 
   if (!name || !role || !location) {
