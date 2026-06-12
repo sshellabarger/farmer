@@ -7,6 +7,7 @@ import rateLimit from '@fastify/rate-limit';
 import { getEnv } from './config/env.js';
 import { getDb } from './db/firestore.js';
 import { serializeTimestamps } from './utils/serialize.js';
+import { createErrorHandler } from './utils/http-error-handler.js';
 import { smsRoutes } from './routes/sms.js';
 import { farmRoutes } from './routes/farms.js';
 import { marketRoutes } from './routes/markets.js';
@@ -50,6 +51,10 @@ async function start() {
   app.addHook('preSerialization', async (_req, _reply, payload) => serializeTimestamps(payload));
 
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+
+  // Same handler as the Cloud Functions entrypoint; alerts stay off outside
+  // production so local dev errors don't text/email the alert channels.
+  app.setErrorHandler(createErrorHandler({ env, notify: env.NODE_ENV === 'production' }));
 
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(smsRoutes, { prefix: '/api/sms' });

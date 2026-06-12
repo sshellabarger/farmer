@@ -2,7 +2,7 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { onTaskDispatched } from 'firebase-functions/v2/tasks';
 import { setGlobalOptions } from 'firebase-functions/v2';
-import Fastify, { type FastifyRequest, type FastifyReply, type FastifyError } from 'fastify';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import formbody from '@fastify/formbody';
 import sensible from '@fastify/sensible';
@@ -31,6 +31,7 @@ import { errorRoutes } from './routes/errors.js';
 import { reminderRoutes } from './routes/reminders.js';
 import { adminRoutes } from './routes/admin.js';
 import { serializeTimestamps } from './utils/serialize.js';
+import { createErrorHandler } from './utils/http-error-handler.js';
 
 setGlobalOptions({
   region: 'us-central1',
@@ -65,6 +66,14 @@ async function getApp() {
   app.addHook('preSerialization', async (_req: FastifyRequest, _reply: FastifyReply, payload: unknown) => serializeTimestamps(payload));
 
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+
+  // Global error handler — any unhandled route error gets logged, alerted
+  // (text + email with AI-researched fix), and returned as a clean 500.
+  // Zod validation failures come back as 400s without alerting.
+  // Must be set BEFORE the route registrations below: each awaited register()
+  // boots immediately and its routes keep whatever error handler existed at
+  // that moment, so a handler set afterwards never applies to them.
+  app.setErrorHandler(createErrorHandler({ env }));
 
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(smsRoutes, { prefix: '/api/sms' });
@@ -102,29 +111,6 @@ async function getApp() {
     const jwt = signJwt({ sub: data.userId, role: data.role }, env.JWT_SECRET);
     const page = data.role === 'market' ? 'market' : 'farmer';
     return reply.redirect(`/${page}?token=${jwt}&tab=${data.tab}`);
-  });
-
-  // Global error handler — any unhandled route error gets logged, alerted
-  // (text + email with AI-researched fix), and returned as a clean 500.
-  app.setErrorHandler(async (error: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
-    request.log.error(error);
-    const status = error.statusCode && error.statusCode >= 400 ? error.statusCode : 500;
-    // Only alert on real server-side failures (5xx), not client/validation 4xx.
-    if (status >= 500) {
-      try {
-        const { notifyError } = await import('./services/error-notify.js');
-        // Awaited so the alert completes before the function instance freezes.
-        await notifyError({
-          env,
-          err: error,
-          source: 'api-route',
-          context: { route: request.url, method: request.method },
-        });
-      } catch (e) {
-        console.error('notifyError failed:', e);
-      }
-    }
-    reply.status(status).send({ error: status >= 500 ? 'Internal server error' : error.message });
   });
 
   await app.ready();
