@@ -2,6 +2,10 @@
 
 Items listed here have been triaged. The daily scheduled task should only report feedback IDs not present in this file.
 
+## Run: 2026-06-09 (daily triage)
+
+- No new items. Open feedback `4ccfa6a7` (potluck food rescue donation) and `d15c0f00` (auto-update ALFN/Local Food Marketplace) both already triaged Jun 8 and still `open` in Firestore. Error alerts `054210f7` (last seen Jun 7 18:43 UTC) and `34521a55` (Jun 1) unchanged — no new sends since last run. No action needed.
+
 ## Run: 2026-06-08 (daily triage)
 
 - `4ccfa6a7-5997-49c6-9867-d53c3e086680` — Option to donate food to potluck food rescue (feature, web, Jun 8) — Wants in-app donation flow that currently requires admin.foodrescuehero.org/donations/intake/potluck. Implementation surface: new outbound integration (Food Rescue Hero API, if exists) following telnyx.ts fetch+env-key pattern; new tool in src/tools/ + route + web action. Blocked on Food Rescue Hero API availability/credentials (unconfirmed by submitter).
