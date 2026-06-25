@@ -1,7 +1,8 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
 import { DEPOT } from '../config/depot.js';
-import { notifyByPhone } from './push.js';
+import { notifyByPhoneSmsFirst, sendPushToUser } from './push.js';
+import { sendSms } from './sms.js';
 import { v4 as uuid } from 'uuid';
 
 export async function sendOrderStatusNotification(params: {
@@ -53,30 +54,96 @@ export async function sendOrderStatusNotification(params: {
   }
 
   for (const notif of notifications) {
-    const notifId = uuid();
-    await db.collection('notifications').doc(notifId).set({
-      market_id: order.market_id,
-      order_id: orderId,
-      type: 'order_update',
-      channel: 'push_or_sms',
-      status: 'pending',
-      scheduled_for: new Date(),
-      created_at: new Date(),
-    });
-
-    // Prefer free push (if the recipient has the app), fall back to SMS.
-    const channel = await notifyByPhone(db, env, notif.phone, {
+    // SMS is the authoritative channel for order updates; push is best-effort
+    // inside the helper and never counts as delivery (a stale-but-registered
+    // FCM token must not silently swallow an order notification).
+    const channel = await notifyByPhoneSmsFirst(db, env, notif.phone, {
       title: `Order ${order.order_number}`,
       body: notif.message,
       url: '/',
       sms: notif.message,
     });
-    await db.collection('notifications').doc(notifId).update({
-      status: channel === 'none' ? 'failed' : 'sent',
+    await db.collection('notifications').doc(uuid()).set({
+      market_id: order.market_id,
+      order_id: orderId,
+      type: 'order_update',
       channel,
-      sent_at: new Date(),
+      status: channel === 'none' ? 'failed' : 'sent',
+      created_at: new Date(),
+      sent_at: channel === 'none' ? null : new Date(),
     });
   }
+}
+
+/**
+ * Notify the farmer that a new (pending) order has been placed.
+ *
+ * Order creation previously sent nothing, so farmers missed orders entirely
+ * (see ORD-MQS2AO6R / feedback fd6648b0). A new order is action-critical — the
+ * farmer must confirm before anything moves — so SMS is the authoritative
+ * channel, mirroring the reminders fix: best-effort push is fire-and-forget and
+ * never counts as delivery (FCM "success" only means Google accepted it), and
+ * the send is logged to the notifications collection for auditing.
+ *
+ * Safe to call best-effort from order-creation paths; the caller should still
+ * wrap it so a notification failure never blocks order creation.
+ */
+export async function sendNewOrderNotification(params: {
+  db: Firestore;
+  env: Env;
+  orderId: string;
+}): Promise<'sms' | 'none'> {
+  const { db, env, orderId } = params;
+
+  const orderDoc = await db.collection('orders').doc(orderId).get();
+  if (!orderDoc.exists) return 'none';
+  const order = orderDoc.data()!;
+
+  const farmDoc = await db.collection('farms').doc(order.farm_id).get();
+  const marketDoc = await db.collection('markets').doc(order.market_id).get();
+  if (!farmDoc.exists || !marketDoc.exists) return 'none';
+  const farm = farmDoc.data()!;
+  const market = marketDoc.data()!;
+
+  const farmerUserDoc = await db.collection('users').doc(farm.user_id).get();
+  const farmerPhone = farmerUserDoc.data()?.phone;
+  if (!farmerPhone) return 'none';
+
+  const itemsSnap = await db.collection('orders').doc(orderId).collection('order_items').get();
+  const itemSummary = itemsSnap.docs.map((d) => { const i = d.data(); return `  ${i.product_name}: ${i.quantity} ${i.unit}`; }).join('\n');
+
+  const message = `New order ${order.order_number} from ${market.name}:\n${itemSummary}\nTotal: $${Number(order.total).toFixed(2)}\n\nOpen FarmLink to confirm.`;
+
+  // Best-effort push (free, only shows if the farmer has the app) — never counts
+  // as delivery, so it does not gate the audit status below.
+  if (farmerUserDoc.exists) {
+    sendPushToUser(db, farmerUserDoc.id, {
+      title: `New order ${order.order_number}`,
+      body: message,
+      url: '/',
+    }).catch(() => {});
+  }
+
+  // SMS is the authoritative channel: only mark the notification sent on SMS success.
+  let smsOk = true;
+  try {
+    await sendSms({ env, to: farmerPhone, body: message });
+  } catch {
+    smsOk = false;
+  }
+
+  await db.collection('notifications').doc(uuid()).set({
+    market_id: order.market_id,
+    farm_id: order.farm_id,
+    order_id: orderId,
+    type: 'new_order',
+    channel: 'sms',
+    status: smsOk ? 'sent' : 'failed',
+    created_at: new Date(),
+    sent_at: smsOk ? new Date() : null,
+  }).catch(() => {});
+
+  return smsOk ? 'sms' : 'none';
 }
 
 /**

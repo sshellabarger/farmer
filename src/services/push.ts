@@ -96,3 +96,37 @@ export async function notifyByPhone(
     return 'none';
   }
 }
+
+/**
+ * Notify a person by phone with SMS as the AUTHORITATIVE channel.
+ *
+ * Unlike notifyByPhone (which prefers push and skips SMS when FCM accepts the
+ * message), this always sends the SMS and treats it as the source of truth.
+ * Push is sent best-effort in parallel — fire-and-forget, never counts as
+ * delivery, because FCM "success" only means Google accepted the message, not
+ * that the user saw it. Use this for time/action-critical messages (orders,
+ * reminders) where a silent push failure is unacceptable. Returns 'sms' only if
+ * the SMS actually goes out, otherwise 'none'.
+ */
+export async function notifyByPhoneSmsFirst(
+  db: Firestore,
+  env: Env,
+  phone: string,
+  payload: { title: string; body: string; url?: string; sms?: string },
+): Promise<'sms' | 'none'> {
+  const snap = await db.collection('users').where('phone', '==', phone).limit(1).get();
+  if (!snap.empty) {
+    const userId = snap.docs[0].id;
+    const tokens: string[] = snap.docs[0].data()?.fcm_tokens || [];
+    if (tokens.length > 0) {
+      // Best-effort only; do not await for delivery semantics.
+      sendPushToTokens(db, userId, tokens, payload).catch(() => {});
+    }
+  }
+  try {
+    await sendSms({ env, to: phone, body: payload.sms || payload.body });
+    return 'sms';
+  } catch {
+    return 'none';
+  }
+}

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { sendOrderStatusNotification, calculateNextDropoff } from '../services/order-notifications.js';
+import { sendOrderStatusNotification, sendNewOrderNotification, calculateNextDropoff } from '../services/order-notifications.js';
 import { DEPOT } from '../config/depot.js';
 import { authenticate, requireOrderParty, requireOrderCreateParty } from '../middleware/rbac.js';
 import { byDateDesc } from '../utils/sort.js';
@@ -171,6 +171,13 @@ export async function orderRoutes(app: FastifyInstance) {
       notes: data.notes ?? null,
       created_at: new Date(),
     });
+
+    // Notify the farmer of the new pending order (best-effort; must never block creation).
+    try {
+      await sendNewOrderNotification({ db: app.db, env: app.env, orderId });
+    } catch (err) {
+      app.log.error({ err, orderId }, 'Failed to send new-order notification');
+    }
 
     reply.status(201).send({ id: orderId, ...order });
   });

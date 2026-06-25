@@ -1,6 +1,6 @@
 import type { ToolContext } from './index.js';
 import { v4 as uuid } from 'uuid';
-import { calculateNextDropoff } from '../services/order-notifications.js';
+import { calculateNextDropoff, sendNewOrderNotification } from '../services/order-notifications.js';
 import { DEPOT } from '../config/depot.js';
 import { byDateDesc } from '../utils/sort.js';
 
@@ -89,6 +89,13 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
     const newRemaining = inv.remaining - oi.quantity;
     const newStatus = newRemaining <= 0 ? 'sold' : newRemaining < inv.quantity ? 'partial' : 'available';
     await invRef.update({ remaining: Math.max(0, newRemaining), status: newStatus });
+  }
+
+  // Notify the farmer of the new pending order (best-effort; must never block creation).
+  try {
+    await sendNewOrderNotification({ db, env: ctx.env, orderId });
+  } catch {
+    // Order is already created; a notification failure must not fail the tool call.
   }
 
   return {
