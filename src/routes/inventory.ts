@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireRole, requireInventoryFarmOwner } from '../middleware/rbac.js';
 import { byDateDesc } from '../utils/sort.js';
-import { classifyFreshness } from '../utils/freshness.js';
+import { classifyFreshness, validateHarvestDate } from '../utils/freshness.js';
 import { syncFarmToLfm } from '../services/lfm-sync.js';
 import { v4 as uuid } from 'uuid';
 
@@ -86,14 +86,23 @@ export async function inventoryRoutes(app: FastifyInstance) {
     const data = schema.parse(request.body);
     const id = uuid();
 
+    let harvestDateValue: Date;
+    if (data.harvest_date) {
+      const r = validateHarvestDate(data.harvest_date);
+      if (!r.ok) return reply.badRequest(r.message);
+      harvestDateValue = r.date;
+    } else {
+      harvestDateValue = new Date();
+    }
+
     const inv = {
       farm_id: data.farm_id,
       product_id: data.product_id,
       quantity: data.quantity,
       remaining: data.quantity,
       price: data.price,
-      // Default to today's date when none is given so every listing has a harvest date.
-      harvest_date: data.harvest_date ? new Date(data.harvest_date) : new Date(),
+      // Validated above; defaults to today when none is given.
+      harvest_date: harvestDateValue,
       image_url: data.image_url || null,
       status: 'available',
       listed_at: new Date(),
@@ -118,7 +127,15 @@ export async function inventoryRoutes(app: FastifyInstance) {
     if (remaining !== undefined) updates.remaining = remaining;
     if (price !== undefined) updates.price = price;
     if (image_url !== undefined) updates.image_url = image_url;
-    if (harvest_date !== undefined) updates.harvest_date = harvest_date ? new Date(harvest_date as string) : null;
+    if (harvest_date !== undefined) {
+      if (harvest_date) {
+        const r = validateHarvestDate(harvest_date as string);
+        if (!r.ok) return reply.badRequest(r.message);
+        updates.harvest_date = r.date;
+      } else {
+        updates.harvest_date = null;
+      }
+    }
     if (quantity !== undefined) updates.quantity = quantity;
 
     // Derive status from quantities so it never drifts out of sync (e.g. editing

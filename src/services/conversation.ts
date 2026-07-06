@@ -41,6 +41,10 @@ INVENTORY RULES:
 - Only add inventory items the user EXPLICITLY lists in their current message. Add exactly those items — never re-add or duplicate items that already appear in CURRENT CONTEXT.
 - Items shown in CURRENT CONTEXT already exist; do not call inventory_add for them again. To change an existing item, use inventory_update.
 
+DATES:
+- Today's date is given in CURRENT CONTEXT below. Resolve every relative or partial date ("today", "the 14th", "last Sunday", "July 3") against it, and always use the current year unless the farmer clearly names a different one.
+- A harvest date is in the recent past or the next couple of weeks — never a prior year. If a date you're about to save resolves to more than ~2 weeks ago, confirm it with the farmer first.
+
 CENTRAL DEPOT:
 All orders flow through the FarmLink Depot at ${DEPOT.short}.
 - Farmers DROP OFF orders at the depot on a scheduled date
@@ -249,7 +253,15 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
     messages.pop();
   }
 
-  const contextBlock = contextParts.length > 0 ? `\n\nCURRENT CONTEXT:\n${contextParts.join('\n')}` : '';
+  // Always give the model the current date so it never guesses the year when a
+  // farmer supplies a relative or partial date (root cause of wrong-year harvest dates).
+  const now = new Date();
+  const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/Chicago' });
+  const dateBlock = `\n\nCURRENT CONTEXT:\nToday's date is ${todayStr} (${weekday}).`;
+  const contextBlock = contextParts.length > 0
+    ? `${dateBlock}\n${contextParts.join('\n')}`
+    : dateBlock;
   const toolContext: ToolContext = { db, env, userId: user?.id, phone };
 
   let response = await client.messages.create({

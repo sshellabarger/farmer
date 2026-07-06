@@ -39,6 +39,41 @@ export function shelfLifeDays(category?: string, productName?: string): number {
   return DEFAULT_SHELF_LIFE_DAYS;
 }
 
+// Plausibility bounds for a harvest date. Produce freshness is measured in
+// days, so a date far in the past — or in the future — is almost always a typo
+// or a wrong-year inference (e.g. an SMS assistant that guessed the year).
+// Loosen these if you stock long-storage or shelf-stable goods.
+export const MAX_HARVEST_AGE_DAYS = 120;
+export const MAX_HARVEST_FUTURE_DAYS = 30;
+
+export type HarvestDateResult =
+  | { ok: true; date: Date }
+  | { ok: false; message: string };
+
+/**
+ * Parse and sanity-check a harvest date before it is stored. Rejects
+ * unparseable dates, dates more than MAX_HARVEST_AGE_DAYS in the past, and
+ * dates more than MAX_HARVEST_FUTURE_DAYS in the future. Callers should only
+ * pass a value the user actually supplied (handle "no date"/"clear" first).
+ */
+export function validateHarvestDate(
+  input: Date | string,
+  now: Date = new Date(),
+): HarvestDateResult {
+  const date = input instanceof Date ? input : new Date(input);
+  if (isNaN(date.getTime())) {
+    return { ok: false, message: `"${String(input)}" isn't a date I can read. Try YYYY-MM-DD.` };
+  }
+  const ageDays = Math.floor((now.getTime() - date.getTime()) / 86400000);
+  if (ageDays > MAX_HARVEST_AGE_DAYS) {
+    return { ok: false, message: `That harvest date is ${ageDays} days ago — that looks off. Double-check the year?` };
+  }
+  if (-ageDays > MAX_HARVEST_FUTURE_DAYS) {
+    return { ok: false, message: `That harvest date is ${-ageDays} days in the future — that looks off. Double-check the year?` };
+  }
+  return { ok: true, date };
+}
+
 export function classifyFreshness(
   harvestDate: Date | { toDate(): Date } | string | null | undefined,
   category?: string,

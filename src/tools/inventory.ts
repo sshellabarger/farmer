@@ -1,4 +1,5 @@
 import type { ToolContext } from './index.js';
+import { validateHarvestDate } from '../utils/freshness.js';
 import { v4 as uuid } from 'uuid';
 
 export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolContext) {
@@ -16,6 +17,17 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
   const price = input.price as number | undefined;
   const category = (input.category as string) || 'General';
   const harvestDate = input.harvest_date as string | undefined;
+
+  // Validate the harvest date up front so a wrong-year/typo date never reaches
+  // storage (defaults to today when the farmer didn't specify one).
+  let harvestDateValue: Date;
+  if (harvestDate) {
+    const r = validateHarvestDate(harvestDate);
+    if (!r.ok) return { error: 'invalid_harvest_date', message: r.message };
+    harvestDateValue = r.date;
+  } else {
+    harvestDateValue = new Date();
+  }
 
   // Find or create product
   const prodSnap = await db.collection('products')
@@ -60,8 +72,8 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
     quantity,
     remaining: quantity,
     price: finalPrice,
-    // Default to today when the farmer didn't specify, so every listing has a harvest date.
-    harvest_date: harvestDate ? new Date(harvestDate) : new Date(),
+    // Validated above; defaults to today when the farmer didn't specify one.
+    harvest_date: harvestDateValue,
     status: 'available',
     listed_at: new Date(),
   });
@@ -73,7 +85,7 @@ export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolCont
     quantity,
     unit,
     price: finalPrice,
-    harvest_date: harvestDate || new Date().toISOString().slice(0, 10),
+    harvest_date: harvestDateValue.toISOString().slice(0, 10),
     farm_name: farm.name,
     // Photo flow: tell the assistant whether a saved photo exists for this product,
     // so it can offer the right options (see produce_photo tool).
@@ -104,7 +116,15 @@ export async function inventoryUpdate(input: Record<string, unknown>, ctx: ToolC
   if (input.remaining !== undefined) updates.remaining = input.remaining;
   if (input.price !== undefined) updates.price = input.price;
   if (input.status !== undefined) updates.status = input.status;
-  if (input.harvest_date !== undefined) updates.harvest_date = input.harvest_date ? new Date(input.harvest_date as string) : null;
+  if (input.harvest_date !== undefined) {
+    if (input.harvest_date) {
+      const r = validateHarvestDate(input.harvest_date as string);
+      if (!r.ok) return { error: 'invalid_harvest_date', message: r.message };
+      updates.harvest_date = r.date;
+    } else {
+      updates.harvest_date = null;
+    }
+  }
 
   if (Object.keys(updates).length === 0) {
     return { error: 'No fields to update' };
