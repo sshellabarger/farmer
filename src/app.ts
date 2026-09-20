@@ -84,22 +84,15 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
   await app.register(reminderRoutes, { prefix: '/api/reminders' });
   await app.register(adminRoutes, { prefix: '/api/admin' });
 
-  // Short view-link redirect: /api/view/:token → dashboard with a signed JWT
-  app.get('/api/view/:token', async (request: FastifyRequest, reply: FastifyReply) => {
-    const { token } = request.params as { token: string };
-    if (!token) return reply.status(404).send('Not found.');
-    const doc = await db.collection('view_links').doc(token).get();
-    if (!doc.exists) return reply.status(410).send('Link expired or invalid.');
-
-    const data = doc.data()!;
-    const expiresAt = data.expires_at?.toDate?.() || new Date(data.expires_at);
-    if (expiresAt < new Date()) return reply.status(410).send('Link expired.');
-
-    const { signJwt } = await import('./utils/jwt.js');
-    const jwt = signJwt({ sub: data.userId, role: data.role }, env.JWT_SECRET);
-    const page = data.role === 'market' ? 'market' : 'farmer';
-    return reply.redirect(`/${page}?token=${jwt}&tab=${data.tab}`);
-  });
+  // v1 texted "view" links (/api/view/<token> → dashboard with a minted JWT)
+  // are retired. The route stays registered so old texts land on an
+  // intentional message instead of a 404 (SPEC §4.4 step 12).
+  app.get('/api/view/:token', async (_request: FastifyRequest, reply: FastifyReply) =>
+    reply
+      .status(410)
+      .type('text/html; charset=utf-8')
+      .send('<p>This link has expired. FarmLink is becoming the St. Joseph Center of Arkansas farmers market manager.</p>'),
+  );
 
   return app;
 }

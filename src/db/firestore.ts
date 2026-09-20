@@ -1,4 +1,4 @@
-import { initializeApp, cert, getApps, type App } from 'firebase-admin/app';
+import { initializeApp, getApps, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
 let app: App | undefined;
@@ -16,20 +16,28 @@ export function getDb(): Firestore {
   return db;
 }
 
+/**
+ * Top-level collections the application still reads or writes after the
+ * Phase 1 code retirement. Documentation, not enforcement — code uses
+ * `.collection('…')` literals. The v1 ordering collections (markets,
+ * products, inventory, farm_market_rels, orders, recurring_orders,
+ * deliveries, upload_links, conversations) are no longer referenced by code
+ * and are exported + deleted in the Phase 1 data step (SPEC §4.5).
+ */
 export const collections = {
+  /** Admin/login accounts. `farms` and `users` stay untouched until the D3 producers migration. */
   users: 'users',
   farms: 'farms',
-  markets: 'markets',
-  products: 'products',
-  inventory: 'inventory',
-  farmMarketRels: 'farm_market_rels',
-  orders: 'orders',
-  orderItems: (orderId: string) => `orders/${orderId}/order_items`,
-  recurringOrders: 'recurring_orders',
-  recurringOrderItems: (roId: string) => `recurring_orders/${roId}/recurring_order_items`,
-  deliveries: 'deliveries',
-  conversations: 'conversations',
-  messages: (convoId: string) => `conversations/${convoId}/messages`,
-  notifications: 'notifications',
+  otps: 'otps',
+  reminders: 'reminders',
   feedback: 'feedback',
+  invites: 'invites',
+  admin_broadcasts: 'admin_broadcasts',
+  error_alerts: 'error_alerts',
+  /** Every text sent or received, from Phase 1 on (SPEC §7.2). */
+  messages: 'messages',
+  /** v1 audit rows; reminders.ts still writes here. Data exists until Phase 1 data deletion. */
+  notifications: 'notifications',
+  /** v1 view-link tokens; no longer written. Data exists until Phase 1 data deletion. */
+  view_links: 'view_links',
 } as const;

@@ -7,23 +7,9 @@ const envSchema = z.object({
   GCLOUD_PROJECT: z.string().optional(),
   FIREBASE_CONFIG: z.string().optional(),
 
-  // SMS Provider: telnyx | voipms | whatsapp
-  SMS_PROVIDER: z.enum(['telnyx', 'voipms', 'whatsapp']).default('telnyx'),
-  // Telnyx
-  TELNYX_API_KEY: z.string().default(''),
-  TELNYX_PHONE_NUMBER: z.string().default(''),
-  TELNYX_MESSAGING_PROFILE_ID: z.string().optional(),
-  // Base64 ed25519 public key from the Telnyx portal, used to verify inbound
-  // webhook signatures. When blank, the webhook rejects all traffic in
-  // production (Telnyx always signs, so unsigned means spoofed) but accepts
-  // in development for local testing.
-  TELNYX_PUBLIC_KEY: z.string().default(''),
-  // WhatsApp Cloud API
-  WHATSAPP_ACCESS_TOKEN: z.string().optional(),
-  WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
-  WHATSAPP_BUSINESS_ACCOUNT_ID: z.string().optional(),
-  WHATSAPP_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
-  META_APP_SECRET: z.string().optional(),
+  // SMS provider. voip.ms is the only one (SPEC §9 D5); the enum stays so a
+  // console/test provider can be added in Phase 2 without changing callers.
+  SMS_PROVIDER: z.enum(['voipms']).default('voipms'),
   // voip.ms
   VOIPMS_USERNAME: z.string().optional(),
   VOIPMS_PASSWORD: z.string().optional(),
@@ -35,14 +21,15 @@ const envSchema = z.object({
   // Blank disables the check (logged as a warning on every inbound).
   VOIPMS_WEBHOOK_SECRET: z.string().default(''),
 
-  // Email (Resend)
+  // Email (Resend). FROM_EMAIL has no default any more: blank means email
+  // sends fail loudly instead of going out from an org address by accident.
   RESEND_API_KEY: z.string().default(''),
-  FROM_EMAIL: z.string().default('farmlink@farmlink.us'),
+  FROM_EMAIL: z.string().default(''),
 
   // App URL (used for web links sent via SMS)
   APP_URL: z.string().default('http://localhost:3001'),
 
-  // Anthropic
+  // Anthropic — used only by services/error-notify.ts to diagnose alerts.
   ANTHROPIC_API_KEY: z.string().min(1),
 
   // App (LOCAL_PORT for dev; Cloud Functions sets PORT itself)
@@ -51,27 +38,14 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   JWT_SECRET: z.string().min(1),
 
-  // Cloud Tasks (for delayed notifications)
-  CLOUD_TASKS_QUEUE: z.string().default('notifications'),
-  CLOUD_TASKS_LOCATION: z.string().default('us-central1'),
-  CLOUD_FUNCTIONS_URL: z.string().optional(),
-
   // Error alerts — where to text/email errors (with AI-researched fix).
   // Leave blank to disable that channel. Alerts are throttled per error signature.
   ALERT_EMAIL: z.string().default(''),
   ALERT_PHONE: z.string().default(''),
 
-  // Firebase Storage bucket for image uploads (profile logos, produce photos).
-  STORAGE_BUCKET: z.string().default('arkansaslocalfoodnetwork.firebasestorage.app'),
-
-  // Local Food Marketplace (ALFN) availability sync.
-  // Leave LFM_API_BASE / LFM_API_KEY blank to run the sync in dry-run mode
-  // (it returns what *would* be pushed without calling out). LFM's documented
-  // key-based API is reporting-oriented; a write/availability endpoint likely
-  // requires approved-partner access — confirm with info@localfoodmarketplace.com.
-  LFM_API_BASE: z.string().default(''),
-  LFM_API_KEY: z.string().default(''),
-  LFM_MARKET_ID: z.string().default(''),
+  // Firebase Storage bucket for image uploads (logos, booth photos). No
+  // default: blank makes uploads fail rather than target an org bucket.
+  STORAGE_BUCKET: z.string().default(''),
 });
 
 export type Env = z.infer<typeof envSchema>;
