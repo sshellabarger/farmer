@@ -1,7 +1,7 @@
 {
   "name": "farmlink",
   "version": "0.1.0",
-  "description": "Text-first platform connecting farms with markets via AI-powered SMS",
+  "description": "SJCA farmers market manager (formerly FarmLink) — text-first, Firebase Cloud Functions + Firestore",
   "type": "module",
   "main": "dist/functions.js",
   "engines": {
@@ -10,9 +10,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:web": "cd web && npm run dev",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "start": "node dist/server.js",
-    "seed": "tsx src/db/seed-firestore.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
