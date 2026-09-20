@@ -1,7 +1,7 @@
 {
-  "name": "FarmLink — Arkansas Local Food Network",
-  "short_name": "FarmLink",
-  "description": "Text-first platform connecting local farms and markets.",
+  "name": "SJCA Market Manager",
+  "short_name": "SJCA Markets",
+  "description": "Farmers market management for St. Joseph Center of Arkansas.",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
