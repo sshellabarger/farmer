@@ -55,7 +55,7 @@ async function seed() {
   // "Both" role user — farmer + market buyer
   const [bothUser] = await db
     .insertInto('users')
-    .values({ name: 'Scott Shellabarger', phone: '+15015550300', role: 'both' as any })
+    .values({ name: '[owner]', phone: '+15015550300', role: 'both' as any })
     .returningAll()
     .execute();
 
@@ -100,7 +100,7 @@ async function seed() {
     .insertInto('farms')
     .values({
       user_id: bothUser.id,
-      name: 'Shellabarger Family Farm',
+      name: '[owner] Family Farm',
       location: 'Little Rock, AR',
       specialty: 'Organic Heirloom Produce',
       timezone: 'America/Chicago',
