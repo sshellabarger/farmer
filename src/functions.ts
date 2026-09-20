@@ -2,36 +2,10 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { onTaskDispatched } from 'firebase-functions/v2/tasks';
 import { setGlobalOptions } from 'firebase-functions/v2';
-import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
-import cors from '@fastify/cors';
-import formbody from '@fastify/formbody';
-import sensible from '@fastify/sensible';
-import multipart from '@fastify/multipart';
-import rateLimit from '@fastify/rate-limit';
+import type { FastifyInstance } from 'fastify';
 import { getDb } from './db/firestore.js';
 import { getEnv } from './config/env.js';
-import { smsRoutes } from './routes/sms.js';
-import { farmRoutes } from './routes/farms.js';
-import { marketRoutes } from './routes/markets.js';
-import { inventoryRoutes } from './routes/inventory.js';
-import { orderRoutes } from './routes/orders.js';
-import { authRoutes } from './routes/auth.js';
-import { relationshipRoutes } from './routes/relationships.js';
-import { recurringOrderRoutes } from './routes/recurring-orders.js';
-import { analyticsRoutes } from './routes/analytics.js';
-import { deliveryRoutes } from './routes/deliveries.js';
-import { productRoutes } from './routes/products.js';
-import { uploadRoutes } from './routes/uploads.js';
-import { profileRoutes } from './routes/profile.js';
-import { feedbackRoutes } from './routes/feedback.js';
-import { directoryRoutes } from './routes/directory.js';
-import { inviteRoutes } from './routes/invite.js';
-import { pushRoutes } from './routes/push.js';
-import { errorRoutes } from './routes/errors.js';
-import { reminderRoutes } from './routes/reminders.js';
-import { adminRoutes } from './routes/admin.js';
-import { serializeTimestamps } from './utils/serialize.js';
-import { createErrorHandler } from './utils/http-error-handler.js';
+import { buildApp } from './app.js';
 
 setGlobalOptions({
   region: 'us-central1',
@@ -39,80 +13,14 @@ setGlobalOptions({
   timeoutSeconds: 120,
 });
 
-let app: ReturnType<typeof Fastify> | null = null;
+let app: FastifyInstance | null = null;
 
-async function getApp() {
+// The Fastify app is built once per function instance and reused across
+// invocations. The plugin/route setup lives in buildApp() and is shared with
+// the local dev runner (src/server.ts).
+async function getApp(): Promise<FastifyInstance> {
   if (app) return app;
-
-  const env = getEnv();
-  const db = getDb();
-
-  app = Fastify({ logger: { level: 'info' } });
-
-  await app.register(cors, { origin: true });
-  await app.register(formbody);
-  await app.register(sensible);
-  await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });
-  await app.register(rateLimit, {
-    max: 100,
-    timeWindow: '1 minute',
-    keyGenerator: (req: any) => req.ip,
-  });
-
-  app.decorate('db', db);
-  app.decorate('env', env);
-
-  // Convert Firestore Timestamps to ISO strings in all JSON responses.
-  app.addHook('preSerialization', async (_req: FastifyRequest, _reply: FastifyReply, payload: unknown) => serializeTimestamps(payload));
-
-  app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
-
-  // Global error handler — any unhandled route error gets logged, alerted
-  // (text + email with AI-researched fix), and returned as a clean 500.
-  // Zod validation failures come back as 400s without alerting.
-  // Must be set BEFORE the route registrations below: each awaited register()
-  // boots immediately and its routes keep whatever error handler existed at
-  // that moment, so a handler set afterwards never applies to them.
-  app.setErrorHandler(createErrorHandler({ env }));
-
-  await app.register(authRoutes, { prefix: '/api/auth' });
-  await app.register(smsRoutes, { prefix: '/api/sms' });
-  await app.register(farmRoutes, { prefix: '/api/farms' });
-  await app.register(marketRoutes, { prefix: '/api/markets' });
-  await app.register(inventoryRoutes, { prefix: '/api/inventory' });
-  await app.register(orderRoutes, { prefix: '/api/orders' });
-  await app.register(relationshipRoutes, { prefix: '/api/farm-market-rels' });
-  await app.register(recurringOrderRoutes, { prefix: '/api/recurring-orders' });
-  await app.register(analyticsRoutes, { prefix: '/api/analytics' });
-  await app.register(deliveryRoutes, { prefix: '/api/deliveries' });
-  await app.register(productRoutes, { prefix: '/api/products' });
-  await app.register(uploadRoutes, { prefix: '/api/uploads' });
-  await app.register(profileRoutes, { prefix: '/api/profile' });
-  await app.register(feedbackRoutes, { prefix: '/api/feedback' });
-  await app.register(directoryRoutes, { prefix: '/api/directory' });
-  await app.register(inviteRoutes, { prefix: '/api/invite' });
-  await app.register(pushRoutes, { prefix: '/api/push' });
-  await app.register(errorRoutes, { prefix: '/api/errors' });
-  await app.register(reminderRoutes, { prefix: '/api/reminders' });
-  await app.register(adminRoutes, { prefix: '/api/admin' });
-
-  // Short view-link redirect: /api/view/:token → dashboard with a signed JWT
-  app.get('/api/view/:token', async (request: FastifyRequest, reply: FastifyReply) => {
-    const { token } = request.params as { token: string };
-    if (!token) return reply.status(404).send('Not found.');
-    const doc = await db.collection('view_links').doc(token).get();
-    if (!doc.exists) return reply.status(410).send('Link expired or invalid.');
-
-    const data = doc.data()!;
-    const expiresAt = data.expires_at?.toDate?.() || new Date(data.expires_at);
-    if (expiresAt < new Date()) return reply.status(410).send('Link expired.');
-
-    const { signJwt } = await import('./utils/jwt.js');
-    const jwt = signJwt({ sub: data.userId, role: data.role }, env.JWT_SECRET);
-    const page = data.role === 'market' ? 'market' : 'farmer';
-    return reply.redirect(`/${page}?token=${jwt}&tab=${data.tab}`);
-  });
-
+  app = await buildApp({ db: getDb(), env: getEnv() });
   await app.ready();
   return app;
 }
