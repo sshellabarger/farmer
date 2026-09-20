@@ -1,5 +1,7 @@
-/* FarmLink service worker — network-first + push notifications */
-const CACHE = 'farmlink-v3';
+/* SJCA Market Manager service worker — network-first + push notifications.
+   Bump the cache name on breaking changes: activate purges every other cache,
+   so installed clients pick up the new build. */
+const CACHE = 'sjca-v1';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -41,7 +43,7 @@ self.addEventListener('push', (event) => {
   let payload = {};
   try { payload = event.data ? event.data.json() : {}; } catch (_) { payload = {}; }
   const n = payload.notification || payload.data || {};
-  const title = n.title || 'FarmLink';
+  const title = n.title || 'SJCA Market Manager';
   const body = n.body || (event.data && event.data.text && event.data.text()) || '';
   const url = (payload.data && payload.data.url) || n.url || '/';
   event.waitUntil(

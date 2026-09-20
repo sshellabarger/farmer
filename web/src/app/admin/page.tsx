@@ -16,8 +16,6 @@ interface UserRow {
   farm_name: string | null;
   market_name: string | null;
   message_count: number;
-  order_count: number;
-  inventory_count: number;
   last_message_at: string | null;
   created_at: string;
 }
@@ -97,7 +95,8 @@ export default function AdminPage() {
     if (!isLoading && !isAuthenticated) {
       router.push('/login');
     } else if (!isLoading && isAuthenticated && user?.role !== 'admin') {
-      router.push('/farmer');
+      // /login shows the "market staff only" notice to signed-in non-admins.
+      router.push('/login');
     }
   }, [isLoading, isAuthenticated, user, router]);
 
@@ -188,8 +187,7 @@ export default function AdminPage() {
   const totalUsers = users.filter(u => u.role !== 'admin').length;
   const farmerCount = users.filter(u => u.role === 'farmer' || u.role === 'both').length;
   const marketCount = users.filter(u => u.role === 'market' || u.role === 'both').length;
-  const totalMessages = users.reduce((s, u) => s + u.message_count, 0);
-  const totalOrders = users.reduce((s, u) => s + u.order_count, 0);
+  const totalMessages = users.reduce((s, u) => s + (u.message_count ?? 0), 0);
   const activeThisWeek = users.filter(u => {
     if (!u.last_message_at) return false;
     const d = new Date(u.last_message_at);
@@ -209,14 +207,14 @@ export default function AdminPage() {
             Admin Dashboard
           </h1>
           <p className="text-sm mt-1" style={{ color: '#8a7e72' }}>
-            Platform utilization and broadcast messaging
+            Users and broadcast messaging
           </p>
         </div>
 
         {/* Tab bar */}
         <div className="flex gap-2 mb-6">
           {([
-            { id: 'utilization' as Tab, label: 'Utilization' },
+            { id: 'utilization' as Tab, label: 'Users' },
             { id: 'broadcast' as Tab, label: 'Broadcast Message' },
             { id: 'history' as Tab, label: 'Broadcast History' },
           ]).map(t => (
@@ -238,13 +236,12 @@ export default function AdminPage() {
         {tab === 'utilization' && (
           <>
             {/* Summary cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-6">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-6">
               {[
                 { label: 'Total Users', val: totalUsers, color: '#2A5E33' },
                 { label: 'Farmers', val: farmerCount, color: '#2A5E33' },
                 { label: 'Markets', val: marketCount, color: '#3B7DD8' },
                 { label: 'Messages', val: totalMessages, color: '#C9622F' },
-                { label: 'Orders', val: totalOrders, color: '#9333EA' },
                 { label: 'Active (7d)', val: activeThisWeek, color: '#059669' },
               ].map(s => (
                 <div key={s.label} className="bg-white rounded-xl p-4 border border-border-light" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
@@ -283,20 +280,18 @@ export default function AdminPage() {
 
             {/* Users table */}
             {loadingUsers ? (
-              <div className="text-center py-12 text-text-muted text-sm">Loading utilization data...</div>
+              <div className="text-center py-12 text-text-muted text-sm">Loading users...</div>
             ) : (
               <div className="bg-white rounded-xl border border-border-light overflow-hidden" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left" style={{ minWidth: 900 }}>
+                  <table className="w-full text-left" style={{ minWidth: 720 }}>
                     <thead>
                       <tr className="border-b border-border-light">
                         {[
                           { key: 'name' as keyof UserRow, label: 'User' },
                           { key: 'role' as keyof UserRow, label: 'Role' },
-                          { key: 'farm_name' as keyof UserRow, label: 'Farm / Market' },
+                          { key: 'farm_name' as keyof UserRow, label: 'Business' },
                           { key: 'message_count' as keyof UserRow, label: 'Messages' },
-                          { key: 'order_count' as keyof UserRow, label: 'Orders' },
-                          { key: 'inventory_count' as keyof UserRow, label: 'Inventory' },
                           { key: 'last_message_at' as keyof UserRow, label: 'Last Active' },
                           { key: 'created_at' as keyof UserRow, label: 'Joined' },
                         ].map(col => (
@@ -335,18 +330,8 @@ export default function AdminPage() {
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.message_count > 0 ? '#C9622F' : '#ccc' }}>
-                              {u.message_count}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.order_count > 0 ? '#9333EA' : '#ccc' }}>
-                              {u.order_count}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className="font-mono text-[14px] font-semibold" style={{ color: u.inventory_count > 0 ? '#2A5E33' : '#ccc' }}>
-                              {u.inventory_count}
+                            <span className="font-mono text-[14px] font-semibold" style={{ color: (u.message_count ?? 0) > 0 ? '#C9622F' : '#ccc' }}>
+                              {u.message_count ?? 0}
                             </span>
                           </td>
                           <td className="px-4 py-3">

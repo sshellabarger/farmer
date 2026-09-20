@@ -1,4 +1,4 @@
-// The FarmLink SMS number — the product's primary interface.
+// The program's SMS number — text is the primary channel for producers.
 // Display + deep-link helpers so every surface promotes the same number.
 export const FARMLINK_NUMBER_DISPLAY = '(501) 753-6622';
 export const FARMLINK_NUMBER_E164 = '+15017536622';
@@ -9,5 +9,3 @@ export function smsHref(body?: string): string {
   if (!body) return `sms:${FARMLINK_NUMBER_E164}`;
   return `sms:${FARMLINK_NUMBER_E164}?&body=${encodeURIComponent(body)}`;
 }
-
-export const DEPOT_ADDRESS = '10301 N Rodney Parham Rd, STE C1, Little Rock, AR 72227';

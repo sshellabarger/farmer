@@ -105,7 +105,7 @@ export function RemindersCard() {
         <div>
           <h2 className="text-base font-bold text-earth-900 m-0">Reminders</h2>
           <p className="text-sm text-earth-500 mt-1 mb-0">
-            Recurring reminders sent to you by text or push (Central time). You can also manage these by texting FarmLink.
+            Recurring reminders sent to you by text or push (Central time).
           </p>
         </div>
         {!showForm && (
@@ -151,7 +151,7 @@ export function RemindersCard() {
           <div>
             <label className="block text-xs font-semibold text-earth-600 uppercase tracking-wide mb-1.5">Remind me to...</label>
             <input className={inputCls} value={title} onChange={e => setTitle(e.target.value)}
-              placeholder="e.g., Update inventory for the weekend market" maxLength={255} />
+              placeholder="e.g., Send the weekly market report" maxLength={255} />
           </div>
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="flex-1">

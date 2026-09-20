@@ -14,37 +14,28 @@ interface NavItem {
 }
 
 export function Header() {
-  const { user, farm, market, isAuthenticated, logout } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
 
-  const dashPath = user?.role === 'market' && !farm ? '/market' : '/farmer';
-
   const navItems: NavItem[] = isAuthenticated
     ? [
-        { label: farm?.name || market?.name || 'Dashboard', href: dashPath, active: pathname.startsWith(dashPath) },
-        ...(user?.role === 'both' && farm && market
-          ? [{ label: market.name, href: '/market', active: pathname === '/market' }]
-          : []),
+        { label: 'Admin', href: '/admin', active: pathname === '/admin' },
         { label: 'Feedback', href: '/feedback', active: pathname === '/feedback' },
         { label: 'Settings', href: '/settings', active: pathname === '/settings' },
-        ...(user?.role === 'admin' ? [{ label: 'Admin', href: '/admin', active: pathname === '/admin' }] : []),
       ]
-    : [
-        { label: 'How It Works', href: '/#how-it-works' },
-        { label: 'For Farms & Markets', href: '/#for-you' },
-        { label: 'Revenue Network', href: '/about', active: pathname === '/about' },
-      ];
+    : [];
 
   const go = (href: string) => {
     setMenuOpen(false);
-    if (href.startsWith('/#')) {
-      // Anchor on the landing page — use a plain navigation so the hash works.
-      window.location.href = href;
-    } else {
-      router.push(href);
-    }
+    router.push(href);
+  };
+
+  const signOut = () => {
+    logout();
+    setMenuOpen(false);
+    router.push('/');
   };
 
   return (
@@ -55,7 +46,7 @@ export function Header() {
       <div className="max-w-[1180px] mx-auto px-4 sm:px-6 h-[60px] flex items-center justify-between gap-3">
         {/* Wordmark */}
         <Link
-          href={isAuthenticated ? dashPath : '/'}
+          href={isAuthenticated ? '/admin' : '/'}
           className="flex items-center gap-2.5 no-underline shrink-0"
           aria-label="FarmLink home"
         >
@@ -94,27 +85,18 @@ export function Header() {
           </a>
           {isAuthenticated ? (
             <button
-              onClick={() => { logout(); router.push('/'); }}
+              onClick={signOut}
               className="px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border border-border bg-transparent text-text-soft hover:text-text transition-colors"
             >
               Log out
             </button>
           ) : (
-            <>
-              <button
-                onClick={() => go('/login')}
-                className="px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border border-border bg-transparent text-text-soft hover:text-text transition-colors"
-              >
-                Sign in
-              </button>
-              <button
-                onClick={() => go('/signup')}
-                className="px-5 py-2 rounded-full font-sans font-bold text-[13.5px] text-white cursor-pointer border-none transition-opacity hover:opacity-90"
-                style={{ background: 'linear-gradient(135deg, #21512C 0%, #3D7A47 100%)', boxShadow: '0 2px 10px rgba(42,94,51,0.28)' }}
-              >
-                Get Started
-              </button>
-            </>
+            <button
+              onClick={() => go('/login')}
+              className="px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border border-border bg-transparent text-text-soft hover:text-text transition-colors"
+            >
+              Log in
+            </button>
           )}
         </div>
 
@@ -145,27 +127,18 @@ export function Header() {
           ))}
           {isAuthenticated ? (
             <button
-              onClick={() => { logout(); setMenuOpen(false); router.push('/'); }}
+              onClick={signOut}
               className="text-left font-sans font-semibold text-[15px] rounded-xl border-none w-full cursor-pointer px-4 py-3 bg-transparent text-text-soft"
             >
               Log out
             </button>
           ) : (
-            <>
-              <button
-                onClick={() => go('/login')}
-                className="text-left font-sans font-semibold text-[15px] rounded-xl border-none w-full cursor-pointer px-4 py-3 bg-transparent text-text-soft"
-              >
-                Sign in
-              </button>
-              <button
-                onClick={() => go('/signup')}
-                className="font-sans font-bold text-[15px] text-white rounded-xl border-none w-full cursor-pointer px-4 py-3 mt-1"
-                style={{ background: 'linear-gradient(135deg, #21512C 0%, #3D7A47 100%)' }}
-              >
-                Get Started Free
-              </button>
-            </>
+            <button
+              onClick={() => go('/login')}
+              className="text-left font-sans font-semibold text-[15px] rounded-xl border-none w-full cursor-pointer px-4 py-3 bg-transparent text-text-soft"
+            >
+              Log in
+            </button>
           )}
           <a
             href={smsHref('Hi FarmLink!')}
