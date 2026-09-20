@@ -57,6 +57,8 @@ export async function processDueReminders(db: Firestore, env: Env): Promise<{ ch
     const userDoc = await db.collection('users').doc(r.user_id).get();
     const phone = userDoc.data()?.phone;
     if (!phone) continue;
+    // Honour STOP: an opted-out user gets no automated texts.
+    if (userDoc.data()?.sms_opt_out_at) continue;
 
     const body = `⏰ Reminder: ${r.title}`;
 

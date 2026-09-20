@@ -8,5 +8,6 @@ service-account.json
 uploads/
 web/.next/
 web/node_modules/
+web/tsconfig.tsbuildinfo
 .claude/
 .firebase/

@@ -1,54 +1,19 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { verifyJwt } from '../utils/jwt.js';
-import { MARKET_TYPES } from '../types/schema.js';
-
-const addressSchema = z.object({
-  street: z.string(),
-  city: z.string(),
-  state: z.string(),
-  zip: z.string(),
-  country: z.string().optional(),
-}).nullable().optional();
-
-const contactSchema = z.object({
-  name: z.string(),
-  role: z.string(),
-  phone: z.string().optional(),
-  email: z.string().email().optional(),
-});
-
-function getUserId(request: any, env: any): string | null {
-  const authHeader = request.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) return null;
-  const payload = verifyJwt(authHeader.slice(7), env.JWT_SECRET);
-  return payload?.sub ?? null;
-}
+import { authenticate } from '../middleware/rbac.js';
 
 export async function profileRoutes(app: FastifyInstance) {
-  // GET /api/profile
+  app.addHook('preHandler', authenticate(app));
+
+  // GET /api/profile — the caller's own user record
   app.get('/', async (request, reply) => {
-    const userId = getUserId(request, app.env);
-    if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-    const userDoc = await app.db.collection('users').doc(userId).get();
+    const userDoc = await app.db.collection('users').doc(request.authUser!.id).get();
     if (!userDoc.exists) return reply.status(404).send({ error: 'User not found' });
-
-    const farmSnap = await app.db.collection('farms').where('user_id', '==', userId).limit(1).get();
-    const marketSnap = await app.db.collection('markets').where('user_id', '==', userId).limit(1).get();
-
-    const user = { id: userDoc.id, ...userDoc.data() };
-    const farm = farmSnap.empty ? null : { id: farmSnap.docs[0].id, ...farmSnap.docs[0].data() };
-    const market = marketSnap.empty ? null : { id: marketSnap.docs[0].id, ...marketSnap.docs[0].data() };
-
-    return { user, farm, market };
+    return { user: { id: userDoc.id, ...userDoc.data() } };
   });
 
   // PUT /api/profile/user
   app.put('/user', async (request, reply) => {
-    const userId = getUserId(request, app.env);
-    if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
     const schema = z.object({
       name: z.string().min(1).optional(),
       email: z.string().email().nullable().optional(),
@@ -63,87 +28,9 @@ export async function profileRoutes(app: FastifyInstance) {
 
     if (Object.keys(updates).length <= 1) return reply.badRequest('No fields to update');
 
-    await app.db.collection('users').doc(userId).update(updates);
-    const updated = await app.db.collection('users').doc(userId).get();
-    return { id: updated.id, ...updated.data() };
-  });
-
-  // PUT /api/profile/farm
-  app.put('/farm', async (request, reply) => {
-    const userId = getUserId(request, app.env);
-    if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-    const schema = z.object({
-      name: z.string().min(1).optional(),
-      location: z.string().optional(),
-      specialty: z.string().nullable().optional(),
-      phone: z.string().nullable().optional(),
-      email: z.string().email().nullable().optional(),
-      logo_url: z.string().nullable().optional(),
-      description: z.string().nullable().optional(),
-      physical_address: addressSchema,
-      billing_address: addressSchema,
-      contacts: z.array(contactSchema).optional(),
-      delivery_schedule: z.array(z.object({
-        day: z.string(),
-        time_window: z.string(),
-        areas: z.array(z.string()).optional(),
-      })).optional(),
-    });
-
-    const data = schema.parse(request.body);
-    const updates: Record<string, unknown> = { updated_at: new Date() };
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) updates[key] = value;
-    }
-
-    if (Object.keys(updates).length <= 1) return reply.badRequest('No fields to update');
-
-    const farmSnap = await app.db.collection('farms').where('user_id', '==', userId).limit(1).get();
-    if (farmSnap.empty) return reply.notFound('Farm not found');
-
-    const farmRef = farmSnap.docs[0].ref;
-    await farmRef.update(updates);
-    const updated = await farmRef.get();
-    return { id: updated.id, ...updated.data() };
-  });
-
-  // PUT /api/profile/market
-  app.put('/market', async (request, reply) => {
-    const userId = getUserId(request, app.env);
-    if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-    const schema = z.object({
-      name: z.string().min(1).optional(),
-      location: z.string().optional(),
-      // Accept legacy 'co-op' from older clients/docs, normalize to 'co_op'.
-      type: z.enum([...MARKET_TYPES, 'co-op'] as const)
-        .transform((t) => (t === 'co-op' ? 'co_op' : t))
-        .optional(),
-      delivery_pref: z.enum(['pickup', 'delivery', 'either']).optional(),
-      phone: z.string().nullable().optional(),
-      email: z.string().email().nullable().optional(),
-      logo_url: z.string().nullable().optional(),
-      description: z.string().nullable().optional(),
-      physical_address: addressSchema,
-      billing_address: addressSchema,
-      contacts: z.array(contactSchema).optional(),
-    });
-
-    const data = schema.parse(request.body);
-    const updates: Record<string, unknown> = { updated_at: new Date() };
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) updates[key] = value;
-    }
-
-    if (Object.keys(updates).length <= 1) return reply.badRequest('No fields to update');
-
-    const marketSnap = await app.db.collection('markets').where('user_id', '==', userId).limit(1).get();
-    if (marketSnap.empty) return reply.notFound('Market not found');
-
-    const marketRef = marketSnap.docs[0].ref;
-    await marketRef.update(updates);
-    const updated = await marketRef.get();
+    const ref = app.db.collection('users').doc(request.authUser!.id);
+    await ref.update(updates);
+    const updated = await ref.get();
     return { id: updated.id, ...updated.data() };
   });
 }

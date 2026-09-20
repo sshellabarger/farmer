@@ -1,34 +1,26 @@
-# Error Monitoring & Alerts
+# FarmLink — Error Monitoring & Alerts
 
 This doc covers (1) the automatic error alerts the app sends, and (2) how to
 review and monitor errors yourself in the Google Cloud Console.
-
-The pre-rework snapshot of this document is `archive/ops-log/MONITORING-2026-06.md`.
 
 ---
 
 ## 1. Automatic alerts (text + email)
 
-When an unhandled error occurs, the app automatically:
+When an unhandled error occurs, FarmLink automatically:
 
 1. **Logs** it to Google Cloud Logging (always).
 2. **Researches a fix** — for non-Anthropic errors, it asks Claude Haiku to
-   explain the likely cause and first fix step (`src/services/error-notify.ts`;
-   this is the only remaining use of `ANTHROPIC_API_KEY`).
+   explain the likely cause and first fix step.
 3. **Emails** a detailed report to `ALERT_EMAIL` (error, context, AI analysis,
    stack trace, and a category-specific fix hint).
 4. **Texts** a concise summary + suggested fix to `ALERT_PHONE`.
 
 ### Where alerts fire from
-- **API routes** (`api-route`) — the global Fastify error handler in
-  `src/app.ts` catches any unhandled route error (5xx only; Zod validation
-  failures return 400 without alerting).
-- **SMS inbound** (`sms-inbound`) — failures while processing a voip.ms
-  inbound text. The webhook still answers 200 so voip.ms does not retry.
-- **Scheduler** (`scheduler:reminders`) — the `processReminders` job (every
-  15 minutes).
-- **Web client** (`web-client`) — the browser posts uncaught errors to
-  `POST /api/errors` (rate-limited, unauthenticated by design).
+- **API routes** — a global Fastify error handler catches any unhandled route error.
+- **SMS inbound** (`sms-inbound`) — failures while processing an inbound text.
+- **Scheduler** (`scheduler:recurring-orders`) — the nightly recurring-order job.
+- **Task** (`task:sendNotification`) — delayed notification sends.
 
 ### Throttling (important)
 Alerts are **de-duplicated per error signature** (category + first line of the
@@ -41,8 +33,8 @@ collection.
 ### Configuring recipients
 In `.env`:
 ```
-ALERT_EMAIL=you@example.com    # blank = disable email alerts
-ALERT_PHONE=+15555550100       # blank = disable SMS alerts
+ALERT_EMAIL=you@example.com   # blank = disable email alerts
+ALERT_PHONE=+15555550100                   # blank = disable SMS alerts
 ```
 After changing, redeploy: `npm run deploy:functions`.
 
@@ -50,17 +42,8 @@ After changing, redeploy: `npm run deploy:functions`.
 
 ## 2. Reviewing errors in the Google Cloud Console
 
-The project is **arkansaslocalfoodnetwork**. Both functions run in **us-central1**:
-
-| Function | Trigger | What it does |
-|---|---|---|
-| `api` | HTTPS (`/api/**` via Hosting rewrite) | The Fastify app |
-| `processReminders` | Cloud Scheduler, every 15 min | Sends due reminders by SMS (skips opted-out users) |
-
-`processRecurringOrders`, `freshnessAlerts` and `sendNotification` were retired in
-Phase 1 of the SJCA rework; the next `npm run deploy:functions` prompts to delete
-them and their Cloud Scheduler jobs. If they still appear in the console, that deploy
-has not happened yet.
+The project is **arkansaslocalfoodnetwork**. All three functions (`api`,
+`processRecurringOrders`, `sendNotification`) run in **us-central1**.
 
 ### A. Logs Explorer (the main tool)
 1. Go to <https://console.cloud.google.com/logs/query?project=arkansaslocalfoodnetwork>
@@ -73,9 +56,9 @@ has not happened yet.
    severity>=ERROR
    ```
 
-   **The reminders job:**
+   **A specific function:**
    ```
-   resource.labels.service_name="processreminders"
+   resource.labels.service_name="processRecurringOrders"
    severity>=ERROR
    ```
 
@@ -88,7 +71,7 @@ has not happened yet.
 4. Click any entry to expand the full JSON, including `jsonPayload.err.stack`.
 
 > Note: Cloud Functions v2 run on Cloud Run, so the resource type is
-> `cloud_run_revision` and `service_name` is the lower-cased function name.
+> `cloud_run_revision` and `service_name` is the function name.
 
 ### B. Error Reporting (auto-grouped errors)
 1. Go to <https://console.cloud.google.com/errors?project=arkansaslocalfoodnetwork>
@@ -111,12 +94,6 @@ gcloud logging read \
   'resource.labels.service_name="api" AND severity>=ERROR' \
   --project=arkansaslocalfoodnetwork --limit=20 --freshness=1d
 ```
-
-### E. Message log
-From Phase 1 every inbound text and every outbound reply/broadcast is written to
-the Firestore `messages` collection (`direction`, `to`, `from`, `body`, `kind`,
-`status`, `provider_message_id`, `error`). A `status: failed` row is the first
-place to look when someone says they did not get a text.
 
 ---
 
@@ -143,5 +120,4 @@ This is belt-and-suspenders on top of the app-level text/email alerts above.
 | "What's been failing repeatedly?" | Error Reporting (Section 2B) |
 | Function health / error rate | Functions → Metrics (Section 2C) |
 | Tail logs in terminal | `firebase functions:log --only <fn>` |
-| Did a text go out? | `messages` collection (Section 2E) |
 | Change who gets alerts | `ALERT_EMAIL` / `ALERT_PHONE` in `.env` + redeploy |

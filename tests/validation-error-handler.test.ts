@@ -6,37 +6,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 import { authRoutes } from '../src/routes/auth.js';
 import { createErrorHandler } from '../src/utils/http-error-handler.js';
+import { fakeDb } from './helpers/fake-db.js';
 
 vi.mock('../src/services/otp.js', () => ({
   sendOtp: vi.fn(async () => {}),
   verifyOtp: vi.fn(async () => true),
+}));
+vi.mock('../src/services/sms.js', () => ({
+  sendSms: vi.fn(async () => 'msg-id'),
 }));
 
 const notifyError = vi.fn(async () => {});
 vi.mock('../src/services/error-notify.js', () => ({
   notifyError: (...args: unknown[]) => notifyError(...args),
 }));
-
-function fakeDb() {
-  return {
-    collection() {
-      return {
-        where() {
-          return this;
-        },
-        limit() {
-          return this;
-        },
-        async get() {
-          return { empty: true, docs: [] };
-        },
-        doc() {
-          return { set: async () => {} };
-        },
-      };
-    },
-  };
-}
 
 async function buildApp() {
   const app = Fastify();
@@ -57,12 +40,12 @@ describe('global error handler', () => {
     notifyError.mockClear();
   });
 
-  it('returns 400 (not 500) for an invalid signup body and does not alert', async () => {
+  it('returns 400 (not 500) for an invalid OTP request body and does not alert', async () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/signup',
-      payload: { name: 'No Contact Info', role: 'farmer' },
+      url: '/otp/request',
+      payload: { nothing: 'here' },
     });
 
     expect(res.statusCode).toBe(400);
@@ -74,12 +57,12 @@ describe('global error handler', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/signup',
-      payload: { name: 'Bad Role', phone: '+15015550100', role: 'astronaut' },
+      url: '/otp/request',
+      payload: { phone: '123' },
     });
 
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toContain('role');
+    expect(res.json().error).toContain('phone');
   });
 
   it('still returns 500 and alerts for real server errors', async () => {
