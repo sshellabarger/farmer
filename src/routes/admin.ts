@@ -1,88 +1,35 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { v4 as uuid } from 'uuid';
 import { authenticate, requireRole } from '../middleware/rbac.js';
-import { sendSms } from '../services/sms.js';
+import { sendAndLogSms } from '../services/inbound.js';
 
 export async function adminRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
   const adminOnly = requireRole('admin');
 
   // ─── GET /api/admin/utilization ───
-  // Returns per-user activity: messages, orders, inventory, last active
+  // Per-user activity. The v1 order/inventory/conversation counters are gone;
+  // what remains is the user list with opt-out state, sorted newest first.
   app.get('/utilization', {
     preHandler: [auth, adminOnly],
   }, async () => {
     const usersSnap = await app.db.collection('users').get();
-    const users: any[] = [];
-
-    for (const doc of usersSnap.docs) {
+    const users = usersSnap.docs.map((doc) => {
       const u = doc.data();
-
-      // Find associated farm / market
-      const farmSnap = await app.db.collection('farms').where('user_id', '==', doc.id).limit(1).get();
-      const marketSnap = await app.db.collection('markets').where('user_id', '==', doc.id).limit(1).get();
-      const farm = farmSnap.empty ? null : { id: farmSnap.docs[0].id, ...farmSnap.docs[0].data() };
-      const market = marketSnap.empty ? null : { id: marketSnap.docs[0].id, ...marketSnap.docs[0].data() };
-
-      // Count conversations + messages for this user's phone
-      let messageCount = 0;
-      let lastMessageAt: any = null;
-      const convSnap = await app.db.collection('conversations')
-        .where('user_id', '==', doc.id).get();
-      for (const convDoc of convSnap.docs) {
-        const conv = convDoc.data();
-        const msgSnap = await convDoc.ref.collection('messages').get();
-        messageCount += msgSnap.size;
-        if (conv.last_message_at) {
-          const ts = conv.last_message_at?.toDate?.() || new Date(conv.last_message_at);
-          if (!lastMessageAt || ts > lastMessageAt) lastMessageAt = ts;
-        }
-      }
-
-      // Count orders (as farm or market)
-      let orderCount = 0;
-      if (farm) {
-        const farmOrders = await app.db.collection('orders').where('farm_id', '==', farm.id).get();
-        orderCount += farmOrders.size;
-      }
-      if (market) {
-        const marketOrders = await app.db.collection('orders').where('market_id', '==', market.id).get();
-        orderCount += marketOrders.size;
-      }
-
-      // Count inventory items (for farmers)
-      let inventoryCount = 0;
-      if (farm) {
-        const invSnap = await app.db.collection('inventory').where('farm_id', '==', farm.id).get();
-        inventoryCount = invSnap.size;
-      }
-
-      users.push({
+      return {
         id: doc.id,
         name: u.name,
         email: u.email || null,
         phone: u.phone,
         role: u.role,
-        farm_name: farm ? (farm as any).name : null,
-        farm_id: farm ? farm.id : null,
-        market_name: market ? (market as any).name : null,
-        market_id: market ? market.id : null,
-        message_count: messageCount,
-        order_count: orderCount,
-        inventory_count: inventoryCount,
-        last_message_at: lastMessageAt?.toISOString?.() || lastMessageAt || null,
+        sms_opt_out_at: u.sms_opt_out_at || null,
         created_at: u.created_at,
         updated_at: u.updated_at,
-      });
-    }
-
-    // Sort: most recently active first, then by created_at
-    users.sort((a, b) => {
-      const aTime = a.last_message_at || a.created_at || '';
-      const bTime = b.last_message_at || b.created_at || '';
-      return String(bTime).localeCompare(String(aTime));
+      };
     });
 
+    users.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     return { users, total: users.length };
   });
 
@@ -99,26 +46,29 @@ export async function adminRoutes(app: FastifyInstance) {
         name: u.name,
         phone: u.phone,
         role: u.role,
+        sms_opt_out_at: u.sms_opt_out_at || null,
       };
     });
     return { users };
   });
 
   // ─── POST /api/admin/broadcast ───
-  // Send SMS to all farmers, all markets, or all users
+  // Text every non-admin user in the audience. Opted-out users are skipped
+  // and every send is logged to `messages` (kind: 'broadcast').
   app.post('/broadcast', {
     preHandler: [auth, adminOnly],
-  }, async (request, reply) => {
+  }, async (request) => {
     const schema = z.object({
       audience: z.enum(['farmers', 'markets', 'all']),
       message: z.string().min(1).max(1600),
     });
 
     const { audience, message } = schema.parse(request.body);
+    const broadcastId = uuid();
 
     // Gather target users
     const usersSnap = await app.db.collection('users').get();
-    const targets = usersSnap.docs
+    const candidates = usersSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
       .filter((u: any) => {
         if (u.role === 'admin') return false; // don't message admins
@@ -129,27 +79,39 @@ export async function adminRoutes(app: FastifyInstance) {
       })
       .filter((u: any) => !!u.phone); // must have phone number
 
+    const targets = candidates.filter((u: any) => !u.sms_opt_out_at);
+    const skipped = candidates.length - targets.length;
+
     const results: { phone: string; name: string; status: 'sent' | 'failed'; error?: string }[] = [];
 
     for (const user of targets as any[]) {
-      try {
-        await sendSms({ env: app.env, to: user.phone, body: message });
+      const result = await sendAndLogSms({
+        db: app.db,
+        env: app.env,
+        to: user.phone,
+        body: message,
+        kind: 'broadcast',
+        extra: { broadcast_id: broadcastId, user_id: user.id, sent_by: request.authUser!.id },
+      });
+      if (result.ok) {
         results.push({ phone: user.phone, name: user.name, status: 'sent' });
-      } catch (err: any) {
-        app.log.error({ err, phone: user.phone }, 'Broadcast SMS failed');
-        results.push({ phone: user.phone, name: user.name, status: 'failed', error: err.message });
+      } else {
+        app.log.error({ phone: user.phone, error: result.error }, 'Broadcast SMS failed');
+        results.push({ phone: user.phone, name: user.name, status: 'failed', error: result.error });
       }
     }
 
     // Log broadcast for audit
-    const { v4: uuid } = await import('uuid');
-    await app.db.collection('admin_broadcasts').doc(uuid()).set({
+    const sent = results.filter(r => r.status === 'sent').length;
+    const failed = results.filter(r => r.status === 'failed').length;
+    await app.db.collection('admin_broadcasts').doc(broadcastId).set({
       admin_user_id: request.authUser!.id,
       audience,
       message,
       recipient_count: targets.length,
-      sent_count: results.filter(r => r.status === 'sent').length,
-      failed_count: results.filter(r => r.status === 'failed').length,
+      skipped_opted_out: skipped,
+      sent_count: sent,
+      failed_count: failed,
       created_at: new Date(),
     });
 
@@ -157,8 +119,9 @@ export async function adminRoutes(app: FastifyInstance) {
       success: true,
       audience,
       total: targets.length,
-      sent: results.filter(r => r.status === 'sent').length,
-      failed: results.filter(r => r.status === 'failed').length,
+      skipped_opted_out: skipped,
+      sent,
+      failed,
       results,
     };
   });
