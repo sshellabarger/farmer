@@ -1,504 +1,157 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { useAuth } from '@/lib/auth-context';
+import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { api } from '@/lib/api';
-import { Header } from '@/components/header';
-import { useRouter } from 'next/navigation';
+import type { DashboardCard, Providers } from '@/lib/types';
+import { useStaffGuard } from '@/components/staff-guard';
+import { StatusChip } from '@/components/status-chip';
+import { Notice, SecondaryButton } from '@/components/form';
+import { AdminShell, LoadingScreen, formatDateLabel, formatTime12h, weekdayLabel } from '@/components/admin-shell';
 
-/* ─── Types ─── */
-interface UserRow {
-  id: string;
-  name: string;
-  email: string | null;
-  phone: string;
-  role: string;
-  created_at: string;
-}
+/** Staff dashboard (contract §8.3): one card per market the user can see. */
+export default function DashboardPage() {
+  const { ready, isAdmin } = useStaffGuard();
+  const [cards, setCards] = useState<DashboardCard[]>([]);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [providers, setProviders] = useState<Providers | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-interface Broadcast {
-  id: string;
-  audience: string;
-  message: string;
-  recipient_count: number;
-  sent_count: number;
-  failed_count: number;
-  created_at: string;
-}
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await api.getDashboard();
+      setCards(data.markets || []);
+      setGeneratedAt(data.generated_at || null);
+    } catch (err: any) {
+      setError(err?.message || 'Could not load the dashboard');
+    } finally {
+      setLoading(false);
+    }
+    if (isAdmin) {
+      // Managers get 403 here; anyone may see a transient error. Either way
+      // the banner is just a hint, so failures are swallowed.
+      api.getProviders().then(setProviders).catch(() => setProviders(null));
+    }
+  }, [isAdmin]);
 
-type Tab = 'utilization' | 'broadcast' | 'history';
+  useEffect(() => {
+    if (ready) load();
+  }, [ready, load]);
 
-/* ─── Helpers ─── */
-function roleBadge(role: string) {
-  const colors: Record<string, { bg: string; text: string }> = {
-    farmer: { bg: '#EBF4E6', text: '#2A5E33' },
-    market: { bg: '#DBEAFE', text: '#1E40AF' },
-    both: { bg: '#FDE68A', text: '#92400E' },
-    admin: { bg: '#FCE7F3', text: '#9D174D' },
-  };
-  const c = colors[role] || { bg: '#F3F4F6', text: '#6B7280' };
+  if (!ready) return <LoadingScreen />;
+
   return (
-    <span
-      className="inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold capitalize whitespace-nowrap"
-      style={{ background: c.bg, color: c.text }}
+    <AdminShell
+      title="Dashboard"
+      subtitle={generatedAt ? `Updated ${new Date(generatedAt).toLocaleTimeString()}` : 'Markets, next dates and check-in progress'}
+      actions={<SecondaryButton small onClick={load} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</SecondaryButton>}
     >
-      {role}
-    </span>
+      {providers && providers.real_sends_possible === false && (
+        <div className="mb-5">
+          <Notice kind="warning">
+            <strong>Test mode</strong> — texts and emails are simulated (SMS provider: {providers.sms_provider}, email: {providers.email_provider}).
+          </Notice>
+        </div>
+      )}
+
+      {error && (
+        <div className="mb-5">
+          <Notice kind="error">{error}</Notice>
+        </div>
+      )}
+
+      {loading && cards.length === 0 ? (
+        <div className="text-center py-12 text-text-muted text-sm">Loading markets…</div>
+      ) : cards.length === 0 ? (
+        <div className="text-center py-12 rounded-2xl border bg-white" style={{ borderColor: '#E4DFD3' }}>
+          <p className="text-lg mb-2 mt-0" style={{ color: '#3d3428' }}>No markets yet</p>
+          <p className="text-sm m-0" style={{ color: '#8a7e72' }}>
+            {isAdmin ? (
+              <>Create one under <Link href="/admin/markets" className="text-green-700 font-semibold">Markets</Link>.</>
+            ) : (
+              <>You have not been assigned to a market yet. Ask an SJCA administrator.</>
+            )}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {cards.map((card) => (
+            <MarketCard key={card.market.id} card={card} />
+          ))}
+        </div>
+      )}
+    </AdminShell>
   );
 }
 
-/* ─── Component ─── */
-export default function AdminPage() {
-  const { user, isAuthenticated, isLoading } = useAuth();
-  const router = useRouter();
-  const [tab, setTab] = useState<Tab>('utilization');
-
-  // Utilization state
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [loadingUsers, setLoadingUsers] = useState(true);
-  const [sortField, setSortField] = useState<keyof UserRow>('created_at');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [filterRole, setFilterRole] = useState<string>('');
-
-  // Broadcast state
-  const [audience, setAudience] = useState<'farmers' | 'markets' | 'all'>('all');
-  const [message, setMessage] = useState('');
-  const [sending, setSending] = useState(false);
-  const [sendResult, setSendResult] = useState<any>(null);
-  const [confirmSend, setConfirmSend] = useState(false);
-
-  // History state
-  const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(false);
-
-  // Auth guard: redirect non-admin
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      router.push('/login');
-    } else if (!isLoading && isAuthenticated && user?.role !== 'admin') {
-      // /login shows the "market staff only" notice to signed-in non-admins.
-      router.push('/login');
-    }
-  }, [isLoading, isAuthenticated, user, router]);
-
-  // Load utilization data
-  const loadUtilization = useCallback(async () => {
-    setLoadingUsers(true);
-    try {
-      const data = await api.getUtilization();
-      setUsers(data.users || []);
-    } catch (err) {
-      console.error('Failed to load utilization:', err);
-    } finally {
-      setLoadingUsers(false);
-    }
-  }, []);
-
-  // Load broadcast history
-  const loadHistory = useCallback(async () => {
-    setLoadingHistory(true);
-    try {
-      const data = await api.getBroadcasts();
-      setBroadcasts(data.broadcasts || []);
-    } catch (err) {
-      console.error('Failed to load broadcast history:', err);
-    } finally {
-      setLoadingHistory(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (user?.role === 'admin') {
-      if (tab === 'utilization') loadUtilization();
-      if (tab === 'history') loadHistory();
-    }
-  }, [user, tab, loadUtilization, loadHistory]);
-
-  // Sorting
-  const handleSort = (field: keyof UserRow) => {
-    if (sortField === field) {
-      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortField(field);
-      setSortDir('desc');
-    }
-  };
-
-  const sortedUsers = [...users]
-    .filter(u => !filterRole || u.role === filterRole)
-    .sort((a, b) => {
-      const aVal = a[sortField] ?? '';
-      const bVal = b[sortField] ?? '';
-      const cmp = String(aVal).localeCompare(String(bVal), undefined, { numeric: true });
-      return sortDir === 'asc' ? cmp : -cmp;
-    });
-
-  // Broadcast send
-  const handleSend = async () => {
-    if (!message.trim() || sending) return;
-    setSending(true);
-    setSendResult(null);
-    try {
-      const result = await api.sendBroadcast({ audience, message: message.trim() });
-      setSendResult(result);
-      setMessage('');
-      setConfirmSend(false);
-    } catch (err: any) {
-      setSendResult({ error: err.message || 'Failed to send' });
-    } finally {
-      setSending(false);
-    }
-  };
-
-  // Guard rendering
-  if (isLoading || !isAuthenticated || user?.role !== 'admin') {
-    return (
-      <div className="min-h-screen" style={{ background: '#faf8f5' }}>
-        <Header />
-        <div className="flex items-center justify-center h-64">
-          <div className="animate-pulse text-[#8a7e72]">
-            {isLoading ? 'Loading...' : 'Access denied'}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Summary stats
-  const totalUsers = users.filter(u => u.role !== 'admin').length;
-  const farmerCount = users.filter(u => u.role === 'farmer' || u.role === 'both').length;
-  const marketCount = users.filter(u => u.role === 'market' || u.role === 'both').length;
+function MarketCard({ card }: { card: DashboardCard }) {
+  const { market, next_date, collecting_date, progress, upcoming_count } = card;
+  const percent = progress ? Math.max(0, Math.min(100, Math.round(progress.percent))) : 0;
 
   return (
-    <div className="min-h-screen" style={{ background: '#faf8f5' }}>
-      <Header />
-
-      <div className="max-w-[1200px] mx-auto px-4 sm:px-6 py-6">
-        {/* Page header */}
-        <div className="mb-6">
-          <h1 className="font-display text-2xl sm:text-3xl font-extrabold" style={{ color: '#1B3F24' }}>
-            Admin Dashboard
-          </h1>
-          <p className="text-sm mt-1" style={{ color: '#8a7e72' }}>
-            Users and broadcast messaging
-          </p>
-        </div>
-
-        {/* Tab bar */}
-        <div className="flex gap-2 mb-6">
-          {([
-            { id: 'utilization' as Tab, label: 'Users' },
-            { id: 'broadcast' as Tab, label: 'Broadcast Message' },
-            { id: 'history' as Tab, label: 'Broadcast History' },
-          ]).map(t => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className="px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-none transition-colors"
-              style={{
-                background: tab === t.id ? '#2A5E33' : '#F2EEE5',
-                color: tab === t.id ? '#fff' : '#5C5C5C',
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        {/* ══════ UTILIZATION TAB ══════ */}
-        {tab === 'utilization' && (
-          <>
-            {/* Summary cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
-              {[
-                { label: 'Total Users', val: totalUsers, color: '#2A5E33' },
-                { label: 'Farmers', val: farmerCount, color: '#2A5E33' },
-                { label: 'Markets', val: marketCount, color: '#3B7DD8' },
-              ].map(s => (
-                <div key={s.label} className="bg-white rounded-xl p-4 border border-border-light" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{s.label}</div>
-                  <div className="font-mono text-2xl font-bold mt-1" style={{ color: s.color }}>{s.val}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Filters */}
-            <div className="flex items-center gap-3 mb-4">
-              <select
-                value={filterRole}
-                onChange={e => setFilterRole(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer"
-                style={{ borderColor: '#E4DFD3', color: '#3d3428', background: '#fff' }}
-              >
-                <option value="">All Roles</option>
-                <option value="farmer">Farmers</option>
-                <option value="market">Markets</option>
-                <option value="both">Both</option>
-                <option value="admin">Admin</option>
-              </select>
-              <button
-                onClick={loadUtilization}
-                disabled={loadingUsers}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border-none"
-                style={{ background: '#EBF4E6', color: '#2A5E33' }}
-              >
-                {loadingUsers ? 'Loading...' : 'Refresh'}
-              </button>
-              <span className="text-xs text-text-muted ml-auto">
-                {sortedUsers.length} user{sortedUsers.length !== 1 ? 's' : ''}
-              </span>
-            </div>
-
-            {/* Users table */}
-            {loadingUsers ? (
-              <div className="text-center py-12 text-text-muted text-sm">Loading users...</div>
-            ) : (
-              <div className="bg-white rounded-xl border border-border-light overflow-hidden" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left" style={{ minWidth: 720 }}>
-                    <thead>
-                      <tr className="border-b border-border-light">
-                        {[
-                          { key: 'name' as keyof UserRow, label: 'User' },
-                          { key: 'role' as keyof UserRow, label: 'Role' },
-                          { key: 'created_at' as keyof UserRow, label: 'Joined' },
-                        ].map(col => (
-                          <th
-                            key={col.key}
-                            onClick={() => handleSort(col.key)}
-                            className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted cursor-pointer hover:text-text whitespace-nowrap"
-                            style={{ background: '#FAFAF8' }}
-                          >
-                            {col.label}
-                            {sortField === col.key && (
-                              <span className="ml-1">{sortDir === 'asc' ? '↑' : '↓'}</span>
-                            )}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortedUsers.map((u, i) => (
-                        <tr
-                          key={u.id}
-                          className="border-b border-border-light last:border-none hover:bg-bg-alt transition-colors"
-                          style={{ animation: `fadeUp 0.2s ease ${i * 0.02}s both` }}
-                        >
-                          <td className="px-4 py-3">
-                            <div className="font-sans text-[14px] font-semibold text-text">{u.name}</div>
-                            <div className="font-sans text-[11px] text-text-muted">{u.phone}</div>
-                          </td>
-                          <td className="px-4 py-3">{roleBadge(u.role)}</td>
-                          <td className="px-4 py-3">
-                            <span className="font-sans text-[12px] text-text-muted">
-                              {u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* ══════ BROADCAST TAB ══════ */}
-        {tab === 'broadcast' && (
-          <div className="max-w-[640px]">
-            <div className="bg-white rounded-xl p-6 border border-border-light" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
-              <h2 className="font-display font-bold text-lg mb-1" style={{ color: '#1B3F24' }}>
-                Send Broadcast SMS
-              </h2>
-              <p className="text-sm mb-5" style={{ color: '#8a7e72' }}>
-                This will send an SMS to every user in the selected audience. Messages are sent individually.
-              </p>
-
-              {/* Audience selector */}
-              <div className="mb-4">
-                <label className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide block mb-2">
-                  Audience
-                </label>
-                <div className="flex gap-2">
-                  {([
-                    { id: 'all' as const, label: 'All Users', count: totalUsers },
-                    { id: 'farmers' as const, label: 'Farmers', count: farmerCount },
-                    { id: 'markets' as const, label: 'Markets', count: marketCount },
-                  ]).map(a => (
-                    <button
-                      key={a.id}
-                      onClick={() => setAudience(a.id)}
-                      className="flex-1 rounded-lg py-3 border-2 cursor-pointer font-sans text-[14px] font-semibold transition-all"
-                      style={{
-                        background: audience === a.id ? '#EBF4E6' : '#fff',
-                        borderColor: audience === a.id ? '#2A5E33' : '#E4DFD3',
-                        color: audience === a.id ? '#2A5E33' : '#5C5C5C',
-                      }}
-                    >
-                      {a.label}
-                      <span className="block font-mono text-[12px] mt-0.5 font-normal" style={{ color: '#8a7e72' }}>
-                        {a.count} user{a.count !== 1 ? 's' : ''}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Message input */}
-              <div className="mb-4">
-                <label className="font-sans text-[12px] font-semibold text-text-muted uppercase tracking-wide block mb-2">
-                  Message
-                </label>
-                <textarea
-                  value={message}
-                  onChange={e => setMessage(e.target.value)}
-                  placeholder="Type your broadcast message..."
-                  rows={4}
-                  maxLength={1600}
-                  className="w-full px-4 py-3 rounded-xl border text-[15px] outline-none resize-y font-sans leading-relaxed"
-                  style={{ borderColor: '#E4DFD3', color: '#3d3428' }}
-                />
-                <div className="text-right text-[11px] mt-1" style={{ color: message.length > 1500 ? '#BC4639' : '#8a7e72' }}>
-                  {message.length} / 1,600
-                </div>
-              </div>
-
-              {/* Send / confirm */}
-              {!confirmSend ? (
-                <button
-                  onClick={() => setConfirmSend(true)}
-                  disabled={!message.trim()}
-                  className="w-full h-12 rounded-xl font-sans text-[15px] font-semibold border-none cursor-pointer text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                  style={{ background: 'linear-gradient(135deg, #2A5E33 0%, #3D7A47 100%)' }}
-                >
-                  Preview &amp; Send
-                </button>
-              ) : (
-                <div className="rounded-xl border-2 p-4" style={{ borderColor: '#C9622F', background: '#FFF8F3' }}>
-                  <div className="font-sans text-[14px] font-semibold mb-2" style={{ color: '#C9622F' }}>
-                    Confirm broadcast
-                  </div>
-                  <p className="text-[13px] mb-3 leading-relaxed" style={{ color: '#3d3428' }}>
-                    This will send the following message to <strong>{audience === 'all' ? totalUsers : audience === 'farmers' ? farmerCount : marketCount}</strong> {audience === 'all' ? 'users' : audience}:
-                  </p>
-                  <div className="bg-white rounded-lg p-3 mb-3 border text-[13px] leading-relaxed" style={{ borderColor: '#E4DFD3', color: '#3d3428' }}>
-                    {message}
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setConfirmSend(false)}
-                      className="flex-1 h-11 rounded-lg font-sans text-[14px] font-semibold border cursor-pointer"
-                      style={{ borderColor: '#E4DFD3', color: '#5C5C5C', background: '#fff' }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleSend}
-                      disabled={sending}
-                      className="flex-1 h-11 rounded-lg font-sans text-[14px] font-semibold border-none cursor-pointer text-white disabled:opacity-50"
-                      style={{ background: '#C9622F' }}
-                    >
-                      {sending ? 'Sending...' : 'Send Now'}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Result */}
-              {sendResult && (
-                <div
-                  className="mt-4 rounded-xl p-4 text-sm"
-                  style={{
-                    background: sendResult.error ? '#FEF2F2' : '#D1FAE5',
-                    color: sendResult.error ? '#DC2626' : '#065F46',
-                  }}
-                >
-                  {sendResult.error ? (
-                    <p><strong>Error:</strong> {sendResult.error}</p>
-                  ) : (
-                    <>
-                      <p className="font-semibold mb-1">Broadcast sent successfully</p>
-                      <p>
-                        {sendResult.sent} of {sendResult.total} messages delivered
-                        {sendResult.failed > 0 && <span className="text-red-600"> ({sendResult.failed} failed)</span>}
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
+    <div className="bg-white rounded-2xl border border-border-light p-5 flex flex-col gap-4" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="font-display text-lg font-bold m-0" style={{ color: '#1B3F24' }}>{market.name}</h2>
+          <div className="text-[12px] text-text-muted mt-0.5">
+            {market.timezone} · {upcoming_count} upcoming date{upcoming_count === 1 ? '' : 's'}
           </div>
-        )}
+        </div>
+        {!market.active && <StatusChip status="inactive" />}
+      </div>
 
-        {/* ══════ HISTORY TAB ══════ */}
-        {tab === 'history' && (
-          <>
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm text-text-muted">{broadcasts.length} broadcast{broadcasts.length !== 1 ? 's' : ''} sent</span>
-              <button
-                onClick={loadHistory}
-                disabled={loadingHistory}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border-none"
-                style={{ background: '#EBF4E6', color: '#2A5E33' }}
-              >
-                {loadingHistory ? 'Loading...' : 'Refresh'}
-              </button>
-            </div>
-
-            {loadingHistory ? (
-              <div className="text-center py-12 text-text-muted text-sm">Loading...</div>
-            ) : broadcasts.length === 0 ? (
-              <div className="text-center py-12 text-text-muted text-sm bg-white rounded-xl border border-border-light">
-                No broadcasts sent yet
-              </div>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {broadcasts.map((b, i) => {
-                  const audienceLabel = b.audience === 'all' ? 'All Users' : b.audience === 'farmers' ? 'Farmers' : 'Markets';
-                  return (
-                    <div
-                      key={b.id}
-                      className="bg-white rounded-xl p-4 border border-border-light"
-                      style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)', animation: `fadeUp 0.2s ease ${i * 0.03}s both` }}
-                    >
-                      <div className="flex items-start justify-between gap-3 mb-2">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
-                            style={{ background: '#EBF4E6', color: '#2A5E33' }}
-                          >
-                            {audienceLabel}
-                          </span>
-                          <span className="text-[12px] text-text-muted">
-                            {b.sent_count}/{b.recipient_count} sent
-                            {b.failed_count > 0 && (
-                              <span className="text-red-500 ml-1">({b.failed_count} failed)</span>
-                            )}
-                          </span>
-                        </div>
-                        <span className="text-[12px] text-text-muted whitespace-nowrap">
-                          {b.created_at ? new Date(b.created_at).toLocaleString() : '—'}
-                        </span>
-                      </div>
-                      <p className="text-[14px] leading-relaxed" style={{ color: '#3d3428' }}>
-                        {b.message}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
+      {/* Next date */}
+      <div className="rounded-xl p-3 bg-earth-15 border border-earth-100">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1">Next market day</div>
+        {next_date ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-[15px] text-text">
+              {weekdayLabel(next_date.date)}, {formatDateLabel(next_date.date)}
+            </span>
+            <span className="text-[13px] text-text-soft">
+              {formatTime12h(next_date.start_time)}–{formatTime12h(next_date.end_time)}
+            </span>
+            <StatusChip status={next_date.status} />
+            {next_date.special && <StatusChip status="special" />}
+          </div>
+        ) : (
+          <div className="text-sm text-text-muted">No upcoming date scheduled</div>
         )}
       </div>
 
-      <style>{`
-        @keyframes fadeUp {
-          from { opacity: 0; transform: translateY(6px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
+      {/* Collecting */}
+      <div>
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1">Check-ins</div>
+        {collecting_date ? (
+          <>
+            <div className="flex items-center justify-between text-[13px] mb-1.5">
+              <span className="text-text">Collecting: <strong>{formatDateLabel(collecting_date.date)}</strong></span>
+              {progress && (
+                <span className="font-mono text-text-soft">
+                  {progress.checkins}/{progress.active_memberships} ({percent}%)
+                </span>
+              )}
+            </div>
+            <div className="h-2 rounded-full bg-earth-100 overflow-hidden" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+              <div className="h-full rounded-full" style={{ width: `${percent}%`, background: 'linear-gradient(90deg, #2A5E33, #559B61)', animation: 'growBar 0.6s ease' }} />
+            </div>
+          </>
+        ) : (
+          <div className="text-sm text-text-muted">Nothing being collected right now</div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2 pt-1 border-t border-border-light">
+        <Link href={`/admin/markets/detail?id=${encodeURIComponent(market.id)}`} className="px-3 py-1.5 rounded-lg text-xs font-semibold no-underline border" style={{ borderColor: '#E4DFD3', color: '#21512C', background: '#fff' }}>
+          Market details
+        </Link>
+        <Link href={`/admin/producers?market_id=${encodeURIComponent(market.id)}`} className="px-3 py-1.5 rounded-lg text-xs font-semibold no-underline border" style={{ borderColor: '#E4DFD3', color: '#21512C', background: '#fff' }}>
+          Producers
+        </Link>
+      </div>
     </div>
   );
 }
