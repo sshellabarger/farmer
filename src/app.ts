@@ -22,15 +22,9 @@ import { marketRoutes } from './routes/markets.js';
 import { adminUserRoutes } from './routes/admin-users.js';
 import { auditLogRoutes } from './routes/audit-log.js';
 import { dashboardRoutes } from './routes/dashboard.js';
-// Created by executor A2 on a parallel branch. The ts-ignore lines make this
-// branch typecheck before those files exist; the integrator deletes them.
-// @ts-ignore
 import { producerRoutes } from './routes/producers.js';
-// @ts-ignore
 import { membershipRoutes } from './routes/memberships.js';
-// @ts-ignore
 import { applicationRoutes } from './routes/applications.js';
-// @ts-ignore
 import { checkinRoutes } from './routes/checkins.js';
 
 export interface BuildAppOptions {
