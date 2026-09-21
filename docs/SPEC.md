@@ -2,7 +2,9 @@
 
 **Version:** Step 1 draft, 2026-09-20. Supersedes the FarmLink v1 design (`README.md`,
 `farmlink_architecture.md`) which will move to `archive/`.
-**Status:** audit complete; Phase 1 not started; decisions in §9 need the owner.
+**Status:** Phase 1 in progress — freeze, export and PITR done on `main`; code retirement
+complete on branch `rework/phase-1-retire` (**not merged or deployed until the D14 window
+ends, 2026-10-21**); data deletion (§4.5) and the legal-page rewrite (D18) pending.
 Items marked **⚠ OPEN** are proposals with a default, not settled facts.
 
 ---
@@ -56,8 +58,8 @@ migrations, `src/db/seed.ts` and three BullMQ worker files. The initial commit `
 - **CI:** `.github/workflows/firebase-hosting-pull-request.yml` is dead — pull_request-only
   (no PR has ever existed), project id misspelled `arkansaslocaldfoodnetwork`, runs the
   root `tsc` instead of the web build. All deploys are manual from the owner's machine.
-- **Deploy status of local tooling:** `gcloud` authenticated (2026-09-20); Firebase CLI
-  credentials expired — `firebase login --reauth` required before any deploy.
+- **Deploy status of local tooling:** `gcloud` and the Firebase CLI both authenticated as
+  of 2026-09-20.
 
 ### 1.3 Live pilot — the stop-and-tell-me rule fires
 
@@ -291,8 +293,12 @@ archive/
   v1-web/                         # retired dashboards, for design reference
     dashboard.tsx, chat-widget.tsx, page.tsx (landing), about/page.tsx, phone-sms.tsx
   v1-ai-harness/
-    conversation.ts, tools/index.ts   # the tool-calling loop, kept as a pattern reference
+    conversation.ts, tools-index.ts    # the tool-calling loop, kept as a pattern reference
     NOTES.md                          # what is generic (loop, hallucination guard, date injection) vs domain
+  v1-channels/
+    telnyx.ts, whatsapp.ts + their tests   # decision D5: voip.ms only
+  v1-web-links/
+    view-link.ts                    # the texted /api/view/<token> pattern; reborn as link_tokens (§7.5)
   reviews/
     interface-review-2026-06-12.md
   ops-log/
@@ -351,7 +357,7 @@ Firestore has no schema migrations. "Drop old tables through a proper migration"
 7. **Check-in #1:** show the owner the counts table (real vs seed per collection) and the
    export manifest before anything is removed.
 
-### 4.3 Stop the live automation — **HELD until the D14 30-day notice elapses**
+### 4.3 Stop the live automation — hold lifted 2026-09-21 (all users are test accounts; D14 withdrawn)
 8. Remove the `processRecurringOrders`, `freshnessAlerts` and `sendNotification` exports
    from `src/functions.ts` (and `processReminders` if D6 = retire). `rm -rf dist &&
    npm run deploy:functions` — the CLI prompts to delete each missing function **and
@@ -361,7 +367,7 @@ Firestore has no schema migrations. "Drop old tables through a proper migration"
 10. **Legal timing (⚠ D14):** the published terms promise 30 days' notice of material
     changes. Decide whether a transition text to pilot users precedes this step.
 
-### 4.4 Retire code (each step a labeled commit, tsc + tests green)
+### 4.4 Retire code (each step a labeled commit, tsc + tests green) — **DONE on `rework/phase-1-retire` (2026-09-20)**; merge/deploy held for D14
 11. Routes → services → tools → web pages/components → tests → `schema.ts`/`env.ts`
     cleanup → `firebase.json` ignore list → `README.md` rewrite. Message format:
     `Retire <what>, replaced by <what>. See tag farmlink-v1-final.`
@@ -625,7 +631,15 @@ real `farms` → `producers` migration happens after the new tool is tested, so 
 leaves `farms` and `users` untouched · D5 voip.ms only · D6 keep reminders, repurposed to
 remind producers to report · D8 no AI · D9 export + delete v1 transcripts · D14 send one
 transition text, start the 30-day clock, retire automation after. Remaining: D2, D4, D7,
-D10–D13, D15–D19 (defaults apply unless the owner objects).
+D10–D13, D15–D19 (defaults apply unless the owner objects). **Deviation recorded:** D11's
+default (move functions to `functions/`, drop `frameworksBackend`) was deferred to Phase 2;
+Phase 1 applied the `functions.ignore` hardening instead.
+
+**2026-09-21:** D14 **withdrawn** — the owner confirms all five v1 users are test accounts,
+so no transition notice is sent and there is no 30-day hold; the retirement deploy and the
+§4.5 data deletion proceed after check-in #2. D18 **answered** — the operator is St. Joseph
+Center of Arkansas and the domain stays `farmlink.us` (SJCA-owned); the legal pages are
+rewritten accordingly and ship in the same hosting deploy.
 
 | # | Decision | Default / recommendation |
 |---|---|---|

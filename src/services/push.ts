@@ -70,43 +70,14 @@ export async function sendPushToUser(db: Firestore, userId: string, payload: { t
 }
 
 /**
- * Notify a person by phone, preferring free push over paid SMS.
- * Looks up the user by phone; if they have push tokens, sends push (no SMS).
- * Otherwise falls back to SMS. Returns the channel used.
- */
-export async function notifyByPhone(
-  db: Firestore,
-  env: Env,
-  phone: string,
-  payload: { title: string; body: string; url?: string; sms?: string },
-): Promise<'push' | 'sms' | 'none'> {
-  const snap = await db.collection('users').where('phone', '==', phone).limit(1).get();
-  if (!snap.empty) {
-    const userId = snap.docs[0].id;
-    const tokens: string[] = snap.docs[0].data()?.fcm_tokens || [];
-    if (tokens.length > 0) {
-      const ok = await sendPushToTokens(db, userId, tokens, payload);
-      if (ok) return 'push';
-    }
-  }
-  try {
-    await sendSms({ env, to: phone, body: payload.sms || payload.body });
-    return 'sms';
-  } catch {
-    return 'none';
-  }
-}
-
-/**
  * Notify a person by phone with SMS as the AUTHORITATIVE channel.
  *
- * Unlike notifyByPhone (which prefers push and skips SMS when FCM accepts the
- * message), this always sends the SMS and treats it as the source of truth.
- * Push is sent best-effort in parallel — fire-and-forget, never counts as
- * delivery, because FCM "success" only means Google accepted the message, not
- * that the user saw it. Use this for time/action-critical messages (orders,
- * reminders) where a silent push failure is unacceptable. Returns 'sms' only if
- * the SMS actually goes out, otherwise 'none'.
+ * Always sends the SMS and treats it as the source of truth. Push is sent
+ * best-effort in parallel — fire-and-forget, never counts as delivery, because
+ * FCM "success" only means Google accepted the message, not that the user saw
+ * it. (v1's push-first `notifyByPhone` silently dropped reminders when a stale
+ * token was accepted — the Jun 7 2026 bug — and is deleted.) Returns 'sms'
+ * only if the SMS actually goes out, otherwise 'none'.
  */
 export async function notifyByPhoneSmsFirst(
   db: Firestore,

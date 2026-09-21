@@ -1,0 +1,54 @@
+# Typecheck + test gate. This workflow never deploys anything; all deploys are
+# manual from an owner machine (`npm run deploy:*`) after `firebase login`.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Dummy values so src/config/env.ts validates. No real credentials exist in
+  # CI and nothing here can send a text or email.
+  ANTHROPIC_API_KEY: test
+  JWT_SECRET: test-secret
+  SMS_PROVIDER: voipms
+  NODE_ENV: test
+  VOIPMS_USERNAME: ""
+  VOIPMS_PASSWORD: ""
+  VOIPMS_DID: "15555550100"
+  RESEND_API_KEY: ""
+  ALERT_EMAIL: ""
+  ALERT_PHONE: ""
+
+jobs:
+  backend:
+    name: Backend typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  web:
+    name: Web typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit

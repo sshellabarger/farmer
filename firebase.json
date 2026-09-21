@@ -8,7 +8,25 @@
         "node_modules",
         "web",
         ".git",
-        "uploads"
+        "uploads",
+        ".env",
+        ".env.*",
+        "service-account.json",
+        "*service-account*.json",
+        ".claude",
+        ".firebase",
+        ".github",
+        "docs",
+        "tests",
+        "archive",
+        "src",
+        "*.md",
+        "*.svg",
+        "*.jsx",
+        "*.mp4",
+        ".DS_Store",
+        "tsconfig.json",
+        "vitest.config.ts"
       ]
     }
   ],
@@ -18,6 +36,12 @@
       "region": "us-central1",
       "memory": "512MiB"
     },
+    "redirects": [
+      { "source": "/farmer", "destination": "/changed", "type": 301 },
+      { "source": "/market", "destination": "/changed", "type": 301 },
+      { "source": "/upload-photo", "destination": "/changed", "type": 301 },
+      { "source": "/signup", "destination": "/changed", "type": 301 }
+    ],
     "rewrites": [
       {
         "source": "/api/**",

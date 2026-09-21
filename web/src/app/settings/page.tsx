@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import { Header } from '@/components/header';
-import { ChatWidget } from '@/components/chat-widget';
 import { useRouter } from 'next/navigation';
 import { enablePush, pushConfigured } from '@/lib/firebase-push';
 import { RemindersCard } from '@/components/reminders-card';
@@ -24,18 +23,9 @@ interface Contact {
   email?: string;
 }
 
-interface DeliverySlot {
-  day: string;
-  time_window: string;
-  areas?: string[];
-}
-
-const emptyAddress: Address = { street: '', city: '', state: '', zip: '' };
-
 export default function SettingsPage() {
-  const { user, farm, market, isAuthenticated, isLoading } = useAuth();
+  const { user, isAuthenticated, isLoading } = useAuth();
   const router = useRouter();
-  const [tab, setTab] = useState<'profile' | 'farm' | 'market'>('profile');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState('');
   const [loading, setLoading] = useState(true);
@@ -43,35 +33,6 @@ export default function SettingsPage() {
   // User fields
   const [userName, setUserName] = useState('');
   const [userEmail, setUserEmail] = useState('');
-  const [userLogo, setUserLogo] = useState('');
-
-  // Farm fields
-  const [farmName, setFarmName] = useState('');
-  const [farmLocation, setFarmLocation] = useState('');
-  const [farmSpecialty, setFarmSpecialty] = useState('');
-  const [farmPhone, setFarmPhone] = useState('');
-  const [farmEmail, setFarmEmail] = useState('');
-  const [farmDescription, setFarmDescription] = useState('');
-  const [farmLogo, setFarmLogo] = useState('');
-  const [farmPhysical, setFarmPhysical] = useState<Address>(emptyAddress);
-  const [farmBilling, setFarmBilling] = useState<Address>(emptyAddress);
-  const [farmContacts, setFarmContacts] = useState<Contact[]>([]);
-  const [farmDeliverySchedule, setFarmDeliverySchedule] = useState<DeliverySlot[]>([]);
-  const [farmBillingSame, setFarmBillingSame] = useState(true);
-
-  // Market fields
-  const [marketName, setMarketName] = useState('');
-  const [marketLocation, setMarketLocation] = useState('');
-  const [marketType, setMarketType] = useState('grocery');
-  const [marketDeliveryPref, setMarketDeliveryPref] = useState('either');
-  const [marketPhone, setMarketPhone] = useState('');
-  const [marketEmail, setMarketEmail] = useState('');
-  const [marketDescription, setMarketDescription] = useState('');
-  const [marketLogo, setMarketLogo] = useState('');
-  const [marketPhysical, setMarketPhysical] = useState<Address>(emptyAddress);
-  const [marketBilling, setMarketBilling] = useState<Address>(emptyAddress);
-  const [marketContacts, setMarketContacts] = useState<Contact[]>([]);
-  const [marketBillingSame, setMarketBillingSame] = useState(true);
 
   const loadProfile = useCallback(async () => {
     try {
@@ -79,46 +40,6 @@ export default function SettingsPage() {
       if (data.user) {
         setUserName(data.user.name || '');
         setUserEmail(data.user.email || '');
-        setUserLogo(data.user.logo_url || '');
-      }
-      if (data.farm) {
-        setFarmName(data.farm.name || '');
-        setFarmLocation(data.farm.location || '');
-        setFarmSpecialty(data.farm.specialty || '');
-        setFarmPhone(data.farm.phone || '');
-        setFarmEmail(data.farm.email || '');
-        setFarmDescription(data.farm.description || '');
-        setFarmLogo(data.farm.logo_url || '');
-        const pa = data.farm.physical_address;
-        if (pa && typeof pa === 'object') setFarmPhysical(pa);
-        const ba = data.farm.billing_address;
-        if (ba && typeof ba === 'object') {
-          setFarmBilling(ba);
-          setFarmBillingSame(false);
-        }
-        const contacts = data.farm.contacts;
-        if (Array.isArray(contacts) && contacts.length > 0) setFarmContacts(contacts);
-        const ds = data.farm.delivery_schedule;
-        if (Array.isArray(ds) && ds.length > 0) setFarmDeliverySchedule(ds);
-      }
-      if (data.market) {
-        setMarketName(data.market.name || '');
-        setMarketLocation(data.market.location || '');
-        setMarketType(data.market.type === 'co-op' ? 'co_op' : data.market.type || 'grocery');
-        setMarketDeliveryPref(data.market.delivery_pref || 'either');
-        setMarketPhone(data.market.phone || '');
-        setMarketEmail(data.market.email || '');
-        setMarketDescription(data.market.description || '');
-        setMarketLogo(data.market.logo_url || '');
-        const pa = data.market.physical_address;
-        if (pa && typeof pa === 'object') setMarketPhysical(pa);
-        const ba = data.market.billing_address;
-        if (ba && typeof ba === 'object') {
-          setMarketBilling(ba);
-          setMarketBillingSame(false);
-        }
-        const contacts = data.market.contacts;
-        if (Array.isArray(contacts) && contacts.length > 0) setMarketContacts(contacts);
       }
     } catch {
       // ignore
@@ -134,27 +55,9 @@ export default function SettingsPage() {
     if (isAuthenticated) loadProfile();
   }, [isAuthenticated, isLoading, router, loadProfile]);
 
-  // Auto-select the right tab
-  useEffect(() => {
-    if (farm && !market) setTab('farm');
-    else if (market && !farm) setTab('market');
-  }, [farm, market]);
-
   const flash = (msg: string) => {
     setSaved(msg);
     setTimeout(() => setSaved(''), 2500);
-  };
-
-  const handleLogoUpload = async (
-    file: File,
-    setter: (url: string) => void,
-  ) => {
-    try {
-      const data = await api.uploadImage(file);
-      setter(data.url);
-    } catch {
-      alert('Failed to upload logo');
-    }
   };
 
   const saveUser = async () => {
@@ -163,55 +66,8 @@ export default function SettingsPage() {
       await api.updateUser({
         name: userName,
         email: userEmail || null,
-        logo_url: userLogo || null,
       });
       flash('Profile saved!');
-    } catch (e: any) {
-      alert(e.message);
-    }
-    setSaving(false);
-  };
-
-  const saveFarm = async () => {
-    setSaving(true);
-    try {
-      await api.updateFarm({
-        name: farmName,
-        location: farmLocation,
-        specialty: farmSpecialty || null,
-        phone: farmPhone || null,
-        email: farmEmail || null,
-        description: farmDescription || null,
-        logo_url: farmLogo || null,
-        physical_address: farmPhysical.street ? farmPhysical : null,
-        billing_address: farmBillingSame ? null : (farmBilling.street ? farmBilling : null),
-        contacts: farmContacts,
-        delivery_schedule: farmDeliverySchedule,
-      });
-      flash('Farm profile saved!');
-    } catch (e: any) {
-      alert(e.message);
-    }
-    setSaving(false);
-  };
-
-  const saveMarket = async () => {
-    setSaving(true);
-    try {
-      await api.updateMarket({
-        name: marketName,
-        location: marketLocation,
-        type: marketType,
-        delivery_pref: marketDeliveryPref,
-        phone: marketPhone || null,
-        email: marketEmail || null,
-        description: marketDescription || null,
-        logo_url: marketLogo || null,
-        physical_address: marketPhysical.street ? marketPhysical : null,
-        billing_address: marketBillingSame ? null : (marketBilling.street ? marketBilling : null),
-        contacts: marketContacts,
-      });
-      flash('Market profile saved!');
     } catch (e: any) {
       alert(e.message);
     }
@@ -229,19 +85,12 @@ export default function SettingsPage() {
     );
   }
 
-  const tabs = [
-    { key: 'profile' as const, label: 'Account' },
-    ...(farm ? [{ key: 'farm' as const, label: 'Farm' }] : []),
-    ...(market ? [{ key: 'market' as const, label: 'Market' }] : []),
-  ];
-
   return (
     <>
       <Header />
-      <ChatWidget />
       <div className="max-w-[800px] mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <h1 className="text-xl sm:text-2xl font-extrabold text-earth-900 mb-1">Settings</h1>
-        <p className="text-sm text-earth-500 mb-6">Manage your profile, addresses, and contacts</p>
+        <p className="text-sm text-earth-500 mb-6">Manage your account, notifications and reminders</p>
 
         {/* Saved flash */}
         {saved && (
@@ -250,181 +99,30 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* Tabs */}
-        <div className="flex gap-1 mb-6 bg-earth-100 rounded-xl p-1">
-          {tabs.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              className={`flex-1 py-2 px-3 rounded-lg text-sm font-semibold border-none cursor-pointer transition-all ${
-                tab === t.key
-                  ? 'bg-white text-earth-900 shadow-sm'
-                  : 'bg-transparent text-earth-500 hover:text-earth-700'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-
         {/* ── Notifications ── */}
         <NotificationsCard />
 
         {/* ── Reminders ── */}
         <RemindersCard />
 
-        {/* ── Account Tab ── */}
-        {tab === 'profile' && (
-          <div className="space-y-6">
-            <SectionCard title="Account Details">
-              <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 items-start">
-                <LogoUpload url={userLogo} onUpload={(f) => handleLogoUpload(f, setUserLogo)} onRemove={() => setUserLogo('')} label="Avatar" />
-                <div className="flex-1 w-full space-y-3">
-                  <Field label="Name" value={userName} onChange={setUserName} />
-                  <Field label="Email" type="email" value={userEmail} onChange={setUserEmail} />
-                  <Field label="Phone" value={user?.phone || ''} disabled />
-                </div>
-              </div>
-            </SectionCard>
-            <SaveBar saving={saving} onSave={saveUser} />
-          </div>
-        )}
-
-        {/* ── Farm Tab ── */}
-        {tab === 'farm' && farm && (
-          <div className="space-y-6">
-            <SectionCard title="Farm Details">
-              <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 items-start">
-                <LogoUpload url={farmLogo} onUpload={(f) => handleLogoUpload(f, setFarmLogo)} onRemove={() => setFarmLogo('')} label="Logo" />
-                <div className="flex-1 w-full space-y-3">
-                  <Field label="Farm Name" value={farmName} onChange={setFarmName} />
-                  <Field label="Location" value={farmLocation} onChange={setFarmLocation} />
-                  <Field label="Specialty" value={farmSpecialty} onChange={setFarmSpecialty} placeholder="e.g., Organic Vegetables" />
-                  <TextArea label="Description" value={farmDescription} onChange={setFarmDescription} placeholder="Tell buyers about your farm..." />
-                </div>
-              </div>
-            </SectionCard>
-
-            <SectionCard title="Contact Information">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field label="Phone" type="tel" value={farmPhone} onChange={setFarmPhone} />
-                <Field label="Email" type="email" value={farmEmail} onChange={setFarmEmail} />
-              </div>
-            </SectionCard>
-
-            <SectionCard title="Physical Address">
-              <AddressForm address={farmPhysical} onChange={setFarmPhysical} />
-            </SectionCard>
-
-            <SectionCard title="Billing Address">
-              <label className="flex items-center gap-2 mb-3 text-sm text-earth-600 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={farmBillingSame}
-                  onChange={(e) => setFarmBillingSame(e.target.checked)}
-                  className="rounded"
-                />
-                Same as physical address
-              </label>
-              {!farmBillingSame && (
-                <AddressForm address={farmBilling} onChange={setFarmBilling} />
-              )}
-            </SectionCard>
-
-            <SectionCard title="Delivery Schedule">
-              <p className="text-sm text-earth-500 mb-3">Set the days and times you deliver or are available for pickup.</p>
-              <DeliveryScheduleEditor schedule={farmDeliverySchedule} onChange={setFarmDeliverySchedule} />
-            </SectionCard>
-
-            <SectionCard title="Additional Contacts">
-              <ContactList contacts={farmContacts} onChange={setFarmContacts} />
-            </SectionCard>
-
-            <SaveBar saving={saving} onSave={saveFarm} />
-          </div>
-        )}
-
-        {/* ── Market Tab ── */}
-        {tab === 'market' && market && (
-          <div className="space-y-6">
-            <SectionCard title="Market Details">
-              <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 items-start">
-                <LogoUpload url={marketLogo} onUpload={(f) => handleLogoUpload(f, setMarketLogo)} onRemove={() => setMarketLogo('')} label="Logo" />
-                <div className="flex-1 w-full space-y-3">
-                  <Field label="Market Name" value={marketName} onChange={setMarketName} />
-                  <Field label="Location" value={marketLocation} onChange={setMarketLocation} />
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <SelectField
-                      label="Type"
-                      value={marketType}
-                      onChange={setMarketType}
-                      options={[
-                        { value: 'farmers_market', label: 'Farmers Market' },
-                        { value: 'restaurant', label: 'Restaurant' },
-                        { value: 'grocery', label: 'Grocery' },
-                        { value: 'co_op', label: 'Co-op' },
-                        { value: 'food_hub', label: 'Food Hub' },
-                        { value: 'food_bank', label: 'Food Bank' },
-                        { value: 'food_pantry', label: 'Food Pantry' },
-                        { value: 'school', label: 'School / Institution' },
-                        { value: 'other', label: 'Other' },
-                      ]}
-                    />
-                    <SelectField
-                      label="Delivery Preference"
-                      value={marketDeliveryPref}
-                      onChange={setMarketDeliveryPref}
-                      options={[
-                        { value: 'pickup', label: 'Pickup' },
-                        { value: 'delivery', label: 'Delivery' },
-                        { value: 'either', label: 'Either' },
-                      ]}
-                    />
-                  </div>
-                  <TextArea label="Description" value={marketDescription} onChange={setMarketDescription} placeholder="Tell farms about your market..." />
-                </div>
-              </div>
-            </SectionCard>
-
-            <SectionCard title="Contact Information">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field label="Phone" type="tel" value={marketPhone} onChange={setMarketPhone} />
-                <Field label="Email" type="email" value={marketEmail} onChange={setMarketEmail} />
-              </div>
-            </SectionCard>
-
-            <SectionCard title="Physical Address">
-              <AddressForm address={marketPhysical} onChange={setMarketPhysical} />
-            </SectionCard>
-
-            <SectionCard title="Billing Address">
-              <label className="flex items-center gap-2 mb-3 text-sm text-earth-600 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={marketBillingSame}
-                  onChange={(e) => setMarketBillingSame(e.target.checked)}
-                  className="rounded"
-                />
-                Same as physical address
-              </label>
-              {!marketBillingSame && (
-                <AddressForm address={marketBilling} onChange={setMarketBilling} />
-              )}
-            </SectionCard>
-
-            <SectionCard title="Additional Contacts">
-              <ContactList contacts={marketContacts} onChange={setMarketContacts} />
-            </SectionCard>
-
-            <SaveBar saving={saving} onSave={saveMarket} />
-          </div>
-        )}
+        {/* ── Account ── */}
+        <div className="space-y-6">
+          <SectionCard title="Account Details">
+            <div className="space-y-3">
+              <Field label="Name" value={userName} onChange={setUserName} />
+              <Field label="Email" type="email" value={userEmail} onChange={setUserEmail} />
+              <Field label="Phone" value={user?.phone || ''} disabled />
+            </div>
+          </SectionCard>
+          <SaveBar saving={saving} onSave={saveUser} />
+        </div>
       </div>
     </>
   );
 }
 
 // ── Subcomponents ──────────────────────────────────────────────
+// Generic form kit, kept for the market/producer/sponsor screens to come.
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -517,53 +215,6 @@ function SelectField({
   );
 }
 
-function LogoUpload({
-  url,
-  onUpload,
-  onRemove,
-  label,
-}: {
-  url: string;
-  onUpload: (file: File) => void;
-  onRemove: () => void;
-  label: string;
-}) {
-  return (
-    <div className="flex flex-col items-center gap-2 shrink-0">
-      <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl border-2 border-dashed border-earth-200 bg-earth-50 flex items-center justify-center overflow-hidden">
-        {url ? (
-          <img src={url} alt={label} className="w-full h-full object-cover" />
-        ) : (
-          <span className="text-earth-300 text-3xl">+</span>
-        )}
-      </div>
-      <div className="flex gap-1">
-        <label className="text-xs font-semibold text-farm-600 cursor-pointer hover:text-farm-700">
-          {url ? 'Change' : `Add ${label}`}
-          <input
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) onUpload(file);
-              e.target.value = '';
-            }}
-          />
-        </label>
-        {url && (
-          <button
-            onClick={onRemove}
-            className="text-xs text-red-500 hover:text-red-600 bg-transparent border-none cursor-pointer"
-          >
-            Remove
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function AddressForm({
   address,
   onChange,
@@ -577,7 +228,7 @@ function AddressForm({
 
   return (
     <div className="space-y-3">
-      <Field label="Street" value={address.street} onChange={(v) => update('street', v)} placeholder="123 Farm Road" />
+      <Field label="Street" value={address.street} onChange={(v) => update('street', v)} placeholder="123 Main Street" />
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <Field label="City" value={address.city} onChange={(v) => update('city', v)} />
         <Field label="State" value={address.state} onChange={(v) => update('state', v)} />
@@ -623,8 +274,8 @@ function ContactList({
             x
           </button>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pr-8">
-            <Field label="Name" value={c.name} onChange={(v) => updateContact(i, 'name', v)} placeholder="John Doe" />
-            <Field label="Role" value={c.role} onChange={(v) => updateContact(i, 'role', v)} placeholder="e.g., Manager, Driver" />
+            <Field label="Name" value={c.name} onChange={(v) => updateContact(i, 'name', v)} placeholder="Full name" />
+            <Field label="Role" value={c.role} onChange={(v) => updateContact(i, 'role', v)} placeholder="e.g., Market manager" />
             <Field label="Phone" type="tel" value={c.phone || ''} onChange={(v) => updateContact(i, 'phone', v)} />
             <Field label="Email" type="email" value={c.email || ''} onChange={(v) => updateContact(i, 'email', v)} />
           </div>
@@ -635,106 +286,6 @@ function ContactList({
         className="w-full py-2.5 border-2 border-dashed border-earth-200 rounded-xl text-sm font-semibold text-earth-500 hover:text-farm-600 hover:border-farm-300 bg-transparent cursor-pointer transition-colors"
       >
         + Add Contact
-      </button>
-    </div>
-  );
-}
-
-const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-const DAY_LABELS: Record<string, string> = {
-  monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu',
-  friday: 'Fri', saturday: 'Sat', sunday: 'Sun',
-};
-
-function DeliveryScheduleEditor({
-  schedule,
-  onChange,
-}: {
-  schedule: DeliverySlot[];
-  onChange: (s: DeliverySlot[]) => void;
-}) {
-  const addSlot = () => {
-    // Find first day not yet in schedule
-    const usedDays = schedule.map((s) => s.day);
-    const nextDay = DAYS.find((d) => !usedDays.includes(d)) || 'monday';
-    onChange([...schedule, { day: nextDay, time_window: '6am-10am', areas: [] }]);
-  };
-
-  const updateSlot = (index: number, field: keyof DeliverySlot, value: unknown) => {
-    const updated = [...schedule];
-    updated[index] = { ...updated[index], [field]: value };
-    onChange(updated);
-  };
-
-  const removeSlot = (index: number) => {
-    onChange(schedule.filter((_, i) => i !== index));
-  };
-
-  return (
-    <div className="space-y-3">
-      {schedule.length === 0 && (
-        <div className="text-sm text-earth-400 py-2">
-          No delivery days configured. Add your delivery schedule so markets know when to expect orders.
-        </div>
-      )}
-      {schedule.map((slot, i) => (
-        <div key={i} className="flex flex-wrap items-end gap-2 p-3 bg-earth-50 rounded-xl border border-earth-100 relative">
-          <button
-            onClick={() => removeSlot(i)}
-            className="absolute top-2 right-2 w-6 h-6 rounded-full bg-red-50 text-red-400 hover:text-red-600 hover:bg-red-100 border-none cursor-pointer text-xs font-bold flex items-center justify-center"
-          >
-            x
-          </button>
-          <div className="w-full sm:w-auto">
-            <label className="block text-xs font-semibold text-earth-500 mb-1">Day</label>
-            <div className="flex flex-wrap gap-1">
-              {DAYS.map((day) => (
-                <button
-                  key={day}
-                  onClick={() => updateSlot(i, 'day', day)}
-                  className={`px-2 py-1 rounded-lg text-xs font-semibold border cursor-pointer transition-all ${
-                    slot.day === day
-                      ? 'bg-farm-600 text-white border-farm-600'
-                      : 'bg-white text-earth-500 border-earth-200 hover:border-farm-300'
-                  }`}
-                >
-                  {DAY_LABELS[day]}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex-1 min-w-[120px]">
-            <label className="block text-xs font-semibold text-earth-500 mb-1">Time Window</label>
-            <select
-              value={slot.time_window}
-              onChange={(e) => updateSlot(i, 'time_window', e.target.value)}
-              className="w-full px-3 py-2 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500 bg-white"
-            >
-              <option value="5am-8am">5am - 8am (Early Morning)</option>
-              <option value="6am-10am">6am - 10am (Morning)</option>
-              <option value="8am-12pm">8am - 12pm (Late Morning)</option>
-              <option value="10am-2pm">10am - 2pm (Midday)</option>
-              <option value="12pm-4pm">12pm - 4pm (Afternoon)</option>
-              <option value="2pm-6pm">2pm - 6pm (Late Afternoon)</option>
-            </select>
-          </div>
-          <div className="flex-1 min-w-[150px]">
-            <label className="block text-xs font-semibold text-earth-500 mb-1">Delivery Areas (optional)</label>
-            <input
-              type="text"
-              value={(slot.areas || []).join(', ')}
-              onChange={(e) => updateSlot(i, 'areas', e.target.value.split(',').map((a) => a.trim()).filter(Boolean))}
-              placeholder="e.g., Little Rock, Scott"
-              className="w-full px-3 py-2 border border-earth-200 rounded-xl text-sm focus:outline-none focus:border-farm-500"
-            />
-          </div>
-        </div>
-      ))}
-      <button
-        onClick={addSlot}
-        className="w-full py-2.5 border-2 border-dashed border-earth-200 rounded-xl text-sm font-semibold text-earth-500 hover:text-farm-600 hover:border-farm-300 bg-transparent cursor-pointer transition-colors"
-      >
-        + Add Delivery Day
       </button>
     </div>
   );
@@ -786,7 +337,7 @@ function NotificationsCard() {
     try {
       await api.registerPush(res.token);
       setStatus('enabled');
-      setMsg('Push notifications are on for this device — order and inventory alerts will arrive here instead of by text.');
+      setMsg('Push notifications are on for this device — reminders and alerts will arrive here as well as by text.');
     } catch (e: any) {
       setStatus('error');
       setMsg(e?.message || 'Could not save your device for notifications.');
@@ -797,21 +348,21 @@ function NotificationsCard() {
     <div className="mb-6 bg-white border border-earth-100 rounded-2xl p-5">
       <h2 className="text-base font-bold text-earth-900 m-0">Push Notifications</h2>
       <p className="text-sm text-earth-500 mt-1">
-        Get order and inventory alerts as free push notifications on this device instead of by text.
+        Get reminders and alerts as free push notifications on this device. Text messages stay on either way.
       </p>
 
       {!configured ? (
         <div className="mt-3 text-[13px] text-earth-500">Push isn’t fully set up yet — coming soon.</div>
       ) : needsInstall ? (
         <div className="mt-4 p-4 rounded-xl bg-farm-50 border border-farm-100">
-          <div className="text-[14px] font-semibold text-farm-700 mb-2">📲 Install FarmLink first</div>
+          <div className="text-[14px] font-semibold text-farm-700 mb-2">📲 Install the app first</div>
           <p className="text-[13px] text-earth-600 m-0 mb-2">
             On iPhone, notifications only work from the installed app. It takes 10 seconds:
           </p>
           <ol className="text-[13px] text-earth-600 m-0 pl-5 leading-relaxed">
             <li>Tap the <strong>Share</strong> icon at the bottom of Safari (the box with an ↑ arrow)</li>
             <li>Scroll down and tap <strong>“Add to Home Screen”</strong></li>
-            <li>Open <strong>FarmLink</strong> from your Home Screen</li>
+            <li>Open <strong>SJCA Markets</strong> from your Home Screen</li>
             <li>Go to <strong>Settings → Push Notifications</strong> and tap <strong>Enable</strong></li>
           </ol>
           <p className="text-[12px] text-earth-400 m-0 mt-2">Requires iOS 16.4 or later.</p>
