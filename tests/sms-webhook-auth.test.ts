@@ -48,6 +48,34 @@ function inbound(message: string, from = '5015550100') {
   return `from=${from}&message=${encodeURIComponent(message)}&id=sms-${Math.random().toString(36).slice(2)}`;
 }
 
+/**
+ * Make the first `failures` writes of an outbound row to `messages` throw,
+ * simulating a Firestore blip between the provider send and the log write.
+ */
+function withFlakyOutboundLog(db: ReturnType<typeof fakeDb>, failures: number) {
+  const collection = db.collection.bind(db);
+  let remaining = failures;
+  db.collection = (name: string) => {
+    const col = collection(name);
+    if (name !== 'messages') return col;
+    const doc = col.doc.bind(col);
+    col.doc = (id?: string) => {
+      const ref = doc(id);
+      const set = ref.set.bind(ref);
+      ref.set = async (data, opts) => {
+        if (data.direction === 'outbound' && remaining > 0) {
+          remaining -= 1;
+          throw new Error('UNAVAILABLE: simulated Firestore write failure');
+        }
+        return set(data, opts);
+      };
+      return ref;
+    };
+    return col;
+  };
+  return db;
+}
+
 beforeEach(() => {
   sendSms.mockClear();
   sendSms.mockImplementation(async () => 'msg-id');
@@ -193,6 +221,38 @@ describe('stopgap inbound handler', () => {
     const outbound = Object.values(db.dump('messages')).filter((m) => m.direction === 'outbound');
     expect(outbound).toHaveLength(1);
     expect(outbound[0]).toMatchObject({ status: 'failed' });
+  });
+
+  it('a text that sent but whose first log write failed is recorded as sent and not re-sent within 24 h', async () => {
+    const db = withFlakyOutboundLog(seededDb(), 1);
+    const { app } = await buildApp({}, db);
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('first')}` });
+
+    expect(res.statusCode).toBe(200);
+    const outbound = Object.values(db.dump('messages')).filter((m) => m.direction === 'outbound');
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0]).toMatchObject({ status: 'sent', provider_message_id: 'msg-id', kind: 'auto_reply' });
+
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('second')}` });
+    expect(sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('a text that sent but could not be logged after a retry is never recorded as failed and still returns 200', async () => {
+    const db = withFlakyOutboundLog(seededDb(), 2);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { app } = await buildApp({}, db);
+      const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hello')}` });
+
+      expect(res.statusCode).toBe(200);
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      const outbound = Object.values(db.dump('messages')).filter((m) => m.direction === 'outbound');
+      expect(outbound).toHaveLength(0);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0][0])).toContain('provider_message_id=msg-id');
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('ignores a callback with no from/message', async () => {

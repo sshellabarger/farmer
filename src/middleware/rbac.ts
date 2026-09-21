@@ -4,6 +4,7 @@ import type { UserRole } from '../types/schema.js';
 
 export interface AuthUser {
   id: string;
+  name: string | null;
   role: UserRole;
   phone: string | null;
 }
@@ -33,6 +34,7 @@ export function authenticate(app: FastifyInstance) {
 
     request.authUser = {
       id: userDoc.id,
+      name: (user.name as string) ?? null,
       role: user.role as UserRole,
       phone: (user.phone as string) ?? null,
     };

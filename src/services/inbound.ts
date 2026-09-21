@@ -46,6 +46,12 @@ function toDate(value: unknown): Date | null {
 /**
  * Send a text and log it to `messages`. Resolves to the log outcome instead
  * of throwing, so callers inside a webhook or a broadcast loop can carry on.
+ *
+ * The provider send and the log write are deliberately separate: only a
+ * failed `sendSms` yields a `failed` row. Once the text is out, the `sent`
+ * row is what `repliedRecently()` reads to enforce one courtesy reply per
+ * 24 h, so a failed write is retried once and then reported — never recorded
+ * as `failed`, which would let a second auto-reply through.
  */
 export async function sendAndLogSms({
   db,
@@ -63,6 +69,7 @@ export async function sendAndLogSms({
   extra?: Record<string, unknown>;
 }): Promise<{ ok: true; provider_message_id: string } | { ok: false; error: string }> {
   const id = uuid();
+  const row = db.collection('messages').doc(id);
   const base = {
     direction: 'outbound',
     to,
@@ -73,15 +80,32 @@ export async function sendAndLogSms({
     created_at: new Date(),
     ...extra,
   };
+
+  let providerMessageId: string;
   try {
-    const providerMessageId = await sendSms({ env, to, body });
-    await db.collection('messages').doc(id).set({ ...base, provider_message_id: providerMessageId, status: 'sent' });
-    return { ok: true, provider_message_id: providerMessageId };
+    providerMessageId = await sendSms({ env, to, body });
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    await db.collection('messages').doc(id).set({ ...base, provider_message_id: null, status: 'failed', error }).catch(() => {});
+    await row.set({ ...base, provider_message_id: null, status: 'failed', error }).catch(() => {});
     return { ok: false, error };
   }
+
+  const sent = { ...base, provider_message_id: providerMessageId, status: 'sent' };
+  try {
+    await row.set(sent);
+  } catch {
+    try {
+      await row.set(sent);
+    } catch (err) {
+      // Swallow: the text went out and a webhook caller must still return
+      // 200. The provider id is the only handle left to reconcile by.
+      console.error(
+        `Sent SMS not logged: messages/${id} write failed twice (provider_message_id=${providerMessageId}, kind=${kind})`,
+        err,
+      );
+    }
+  }
+  return { ok: true, provider_message_id: providerMessageId };
 }
 
 /** True if an outbound text was successfully sent to this phone within the window. */
@@ -98,7 +122,7 @@ async function repliedRecently(db: Firestore, phone: string, now: Date): Promise
   });
 }
 
-export async function processInboundMessage({
+export async function handleInboundText({
   db,
   env,
   log,

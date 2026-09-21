@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { signJwt, verifyJwt } from '../utils/jwt.js';
+import { signJwt } from '../utils/jwt.js';
 import { sendOtp, verifyOtp } from '../services/otp.js';
+import { authenticate } from '../middleware/rbac.js';
 
 /**
  * Phone-OTP login. There is no self-service signup any more: v1's /signup
@@ -73,26 +74,12 @@ export async function authRoutes(app: FastifyInstance) {
     });
   });
 
-  // Get current user
-  app.get('/me', async (request, reply) => {
-    const authHeader = request.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return reply.status(401).send({ error: 'Missing or invalid authorization header' });
-    }
-
-    const payload = verifyJwt(authHeader.slice(7), app.env.JWT_SECRET);
-    if (!payload) {
-      return reply.status(401).send({ error: 'Invalid or expired token' });
-    }
-
-    const userDoc = await app.db.collection('users').doc(payload.sub).get();
-    if (!userDoc.exists) {
-      return reply.status(404).send({ error: 'User not found' });
-    }
-    const user = userDoc.data()!;
-
+  // Get current user. The shared preHandler does the Bearer → JWT → users
+  // lookup and rejects with 401 before this handler runs.
+  app.get('/me', { preHandler: authenticate(app) }, async (request, reply) => {
+    const user = request.authUser!;
     reply.send({
-      user: { id: userDoc.id, name: user.name, role: user.role, phone: user.phone },
+      user: { id: user.id, name: user.name, role: user.role, phone: user.phone },
     });
   });
 }

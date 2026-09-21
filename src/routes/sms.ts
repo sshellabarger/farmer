@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { processInboundMessage } from '../services/inbound.js';
+import { handleInboundText } from '../services/inbound.js';
 import { notifyError } from '../services/error-notify.js';
 
 // Buffer the request body before parsing so webhook signatures can be checked
@@ -66,7 +66,7 @@ export async function smsRoutes(app: FastifyInstance) {
     // Never let a failure 500 the webhook: voip.ms retries non-200 responses,
     // which would reprocess (and re-log) the same text.
     try {
-      await processInboundMessage({ db: app.db, env: app.env, log: app.log, from: normalizedFrom, body: message, providerMessageId: id });
+      await handleInboundText({ db: app.db, env: app.env, log: app.log, from: normalizedFrom, body: message, providerMessageId: id });
     } catch (err) {
       app.log.error(err, 'Failed to process voip.ms inbound SMS');
       notifyError({ env: app.env, err, source: 'sms-inbound', userPhone: normalizedFrom, userMessage: message }).catch(() => null);
