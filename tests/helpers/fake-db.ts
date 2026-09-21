@@ -78,5 +78,9 @@ export function fakeDb(seed: Record<string, Record<string, Doc>> = {}) {
     dump(name: string): Record<string, Doc> {
       return Object.fromEntries(col(name));
     },
+    /** Test-only (contract §1.6, D's importer tests): document count of a collection. */
+    count(name: string): number {
+      return col(name).size;
+    },
   };
 }
