@@ -2,10 +2,11 @@
 
 **Version:** Step 1 draft, 2026-09-20. Supersedes the FarmLink v1 design (`README.md`,
 `farmlink_architecture.md`) which will move to `archive/`.
-**Status (2026-09-21):** Phase 1 merged to `main` (`b2678d9`). D14 withdrawn — all v1
-users were test accounts — so the retirement deploys immediately: functions (with the three
-deletions) → hosting (with the rewritten legal pages, D18) → data deletion (§4.5, check-in #2
-given) → indexes → verification. Until that completes, production still runs v1 (`8c4cfea`).
+**Status (2026-09-21): Phase 1 complete and deployed** from `main` `f966cc8`. FarmLink v1
+is retired in production: functions `processRecurringOrders`, `freshnessAlerts` and
+`sendNotification` deleted; `api` and `processReminders` redeployed from the retired code
+base; hosting released with the transition pages and the SJCA legal pages; all ten v1
+composite indexes deleted; the eleven retired collections deleted (§4.6). Phase 2 next.
 Items marked **⚠ OPEN** are proposals with a default, not settled facts.
 
 ---
@@ -19,6 +20,9 @@ owner must make. Nothing in §3–§5 is executed until §9 is answered and Phas
 ---
 
 ## 1. Current state — corrected
+
+> §1 is the audit snapshot of **2026-09-20**, kept as the record of what v1 was. v1 was
+> retired in production on 2026-09-21 — see §4.6 for what is deployed now.
 
 ### 1.1 What the repo actually is
 
@@ -389,10 +393,23 @@ Firestore has no schema migrations. "Drop old tables through a proper migration"
     `producers` migration (D3). Deletion also waits for check-in #2 and the D14 window.
 18. Prune `firestore.indexes.json`; `npm run deploy:firestore` (accept index deletions).
 
-### 4.6 Verify
-19. Prod smoke: OTP login, voip.ms inbound → new handler, `/api/health` (fix the route
-    so it is reachable through Hosting), no retired scheduler jobs, `error_alerts` quiet.
-20. `CHANGELOG.md` entry; `docs/SPEC.md` §1 updated to "v1 retired on <date>".
+### 4.6 Verify — results, 2026-09-21 (~12:25 UTC)
+19. **Functions:** `firebase deploy --only functions --force` from `main` `f966cc8`: `api`
+    and `processReminders` updated; `sendNotification`, `processRecurringOrders`,
+    `freshnessAlerts` deleted (CLI-confirmed). Bundle 152 KB (was 17 MB): `.env`,
+    the service-account key and `.claude/` are no longer packaged. Smoke: function
+    `/health` 200; Hosting `/api/health` 200; `/api/view/<token>` 410; `/api/farms` 404.
+    **Hosting + Firestore:** released; `firestore: Deleting 10 indexes` succeeded; rules
+    unchanged. **Data (§4.5):** all eleven retired collections and their subcollections
+    at 0; kept collections unchanged (users 5, farms 2, reminders 6, feedback 10, invites 4,
+    error_alerts 2, otps 0, admin_broadcasts 0, messages 0). Storage untouched (17 objects).
+    **Not yet confirmed via gcloud** (token expired mid-run): scheduler jobs removed with
+    their functions; whether the empty `sendNotification` Cloud Tasks queue survived —
+    delete it if so. **Known follow-up:** `processReminders` still writes its audit row to
+    `notifications`, so that collection reappears on the next reminder send; Phase 2 moves
+    the write to `messages`. OTP login and the voip.ms inbound stopgap are exercised by the
+    owner's Phase 1 demo checklist rather than by an automated check.
+20. `CHANGELOG.md` "Deployed" entry written; this §1 marked as the 2026-09-20 snapshot.
 
 ---
 

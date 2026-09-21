@@ -86,8 +86,20 @@ retirement deploy began.
   sales estimates stated as admin-only and aggregate-only. `firestore.indexes.json` emptied
   (all ten v1 composite indexes retired; no surviving query needs one).
 
+### Deployed — 2026-09-21 (~12:25 UTC, from `main` `f966cc8`)
+- Functions: `api` and `processReminders` updated; `sendNotification`,
+  `processRecurringOrders` and `freshnessAlerts` deleted. Bundle 152 KB (was 17 MB).
+- Hosting: transition landing, `/changed`, 301s for `/farmer` `/market` `/signup`
+  `/upload-photo`, rewritten privacy and terms, rebranded manifest and service worker.
+- Firestore: all 10 composite indexes deleted; rules unchanged. Data: the eleven retired
+  collections and their subcollections deleted (178 documents + 6 order items + 270
+  messages); kept collections unchanged; Storage untouched.
+- Smoke tests green: `/health` (function), `/api/health` (Hosting), `/api/view/<token>` → 410,
+  retired routes → 404. Pending a gcloud check: scheduler jobs removed, Cloud Tasks queue gone.
+
 ### Deferred
 - D11 (move functions to `functions/`, drop the inert `frameworksBackend`) → Phase 2; the
   ignore-list hardening was applied instead.
+- `processReminders` still logs to `notifications`; Phase 2 moves that write to `messages`.
 - Retired-collection deletion (SPEC §4.5; check-in #2 given 2026-09-21) and the index
   deploy run as part of the retirement deploy sequence, after the functions deploy.

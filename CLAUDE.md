@@ -9,16 +9,17 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
 
 ## Status — read this first
 
-- **Phase 1 is merged to `main` (`b2678d9`, 2026-09-21).** The owner confirmed all v1
-  users were test accounts, so the D14 transition notice was withdrawn and the retirement
-  deploys without a waiting period.
-- **Deploy sequence** (owner-approved; check-in #2 given): `npm run build && firebase deploy
-  --only functions --force` (deletes `processRecurringOrders`, `freshnessAlerts` and
-  `sendNotification` and their scheduler jobs) → `deploy:hosting` (ships the rewritten
-  legal pages) → delete the retired collections (SPEC §4.5) → `deploy:firestore` → verify.
-  **Until this completes, production still runs v1 at `8c4cfea`.**
-- Legal pages are rewritten for SJCA on farmlink.us (D18); `firestore.indexes.json` is
-  already pruned on `main`.
+- **Phase 1 is complete and deployed (2026-09-21).** Production runs `main` (`f966cc8`
+  or later): functions `api` + `processReminders` only; the eleven v1 collections and all
+  ten v1 indexes are deleted; hosting serves the transition pages and the SJCA legal pages.
+  `main` is what production runs again — deploy from `main` only.
+- **Phase 2 is next** (SPEC §8): markets with configurable schedules, producers,
+  applications, admin roles, the `messages` log everywhere, and the console-provider
+  send guard. Nothing from v1 is left to retire.
+- Data left in Firestore on purpose: `users` (the admin login), `farms` (D3 — migrated to
+  `producers` after Phase 2 testing), `reminders`, `feedback`, `invites`, `error_alerts`,
+  and the 17 Storage photos. The pre-Phase-1 export is at
+  `gs://arkansaslocalfoodnetwork-exports/pre-sjca-2026-09-20/`; PITR is enabled.
 - Real production data exists (users, farms, orders, conversations, photos). Never delete a
   collection or Storage object without a verified export and the owner's explicit approval
   for that step. The pre-Phase-1 export is at
