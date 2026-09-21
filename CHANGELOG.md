@@ -28,9 +28,11 @@ America/Chicago.
 
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
-Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8, D9 and
-D14 (see `docs/SPEC.md` §9). Code work is on branch `rework/phase-1-retire` and is **not
-merged or deployed until the D14 transition-notice window ends (2026-10-21)**.
+Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8 and D9
+(see `docs/SPEC.md` §9). On 2026-09-21 the owner confirmed all v1 users were test accounts,
+withdrawing D14 (no transition text, no 30-day hold) and answering D18 (SJCA operates on
+farmlink.us). Branch `rework/phase-1-retire` was merged to `main` as `b2678d9` and the
+retirement deploy began.
 
 ### Frozen and backed up (on `main`)
 - Tag `farmlink-v1-final` = `8c4cfea`, the exact deployed v1 bundle; branch `archive/farmlink-v1`.
@@ -78,9 +80,14 @@ merged or deployed until the D14 transition-notice window ends (2026-10-21)**.
   defeated; `@fastify/auth` (unused) removed; admin users table trimmed to fields the API
   still returns; `GET /api/auth/me` uses the shared `authenticate` middleware (a deleted
   user's token now gets 401, not 404).
+- `web/public/privacy.html` and `terms.html` rewritten for St. Joseph Center of Arkansas
+  on farmlink.us (D18): the farmers-market service, the real processors, STOP/START/HELP,
+  retention-while-active plus deletion on request, the public market lineup disclosed,
+  sales estimates stated as admin-only and aggregate-only. `firestore.indexes.json` emptied
+  (all ten v1 composite indexes retired; no surviving query needs one).
 
 ### Deferred
 - D11 (move functions to `functions/`, drop the inert `frameworksBackend`) → Phase 2; the
   ignore-list hardening was applied instead.
-- Legal pages rewrite (D18), retired-collection deletion (SPEC §4.5, check-in #2) and
-  `firestore.indexes.json` pruning — done with or before the deploy.
+- Retired-collection deletion (SPEC §4.5; check-in #2 given 2026-09-21) and the index
+  deploy run as part of the retirement deploy sequence, after the functions deploy.

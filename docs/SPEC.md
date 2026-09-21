@@ -2,9 +2,10 @@
 
 **Version:** Step 1 draft, 2026-09-20. Supersedes the FarmLink v1 design (`README.md`,
 `farmlink_architecture.md`) which will move to `archive/`.
-**Status:** Phase 1 in progress — freeze, export and PITR done on `main`; code retirement
-complete on branch `rework/phase-1-retire` (**not merged or deployed until the D14 window
-ends, 2026-10-21**); data deletion (§4.5) and the legal-page rewrite (D18) pending.
+**Status (2026-09-21):** Phase 1 merged to `main` (`b2678d9`). D14 withdrawn — all v1
+users were test accounts — so the retirement deploys immediately: functions (with the three
+deletions) → hosting (with the rewritten legal pages, D18) → data deletion (§4.5, check-in #2
+given) → indexes → verification. Until that completes, production still runs v1 (`8c4cfea`).
 Items marked **⚠ OPEN** are proposals with a default, not settled facts.
 
 ---

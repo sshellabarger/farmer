@@ -9,15 +9,16 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
 
 ## Status — read this first
 
-- **Phase 1 code retirement is complete on branch `rework/phase-1-retire`.** `main` still
-  carries v1 and is what production runs.
-- **Do not merge this branch to `main` and do not deploy it** until the D14 transition
-  notice window ends (**2026-10-21**) and the owner says go. Deploying deletes the live
-  `processRecurringOrders`, `freshnessAlerts` and `sendNotification` functions and their
-  scheduler jobs, which is intended — but only after the notice.
-- Still pending before that deploy: rewrite `web/public/privacy.html` and `terms.html`
-  (decision D18); Phase 1 data deletion (SPEC §4.5, check-in #2); `firestore.indexes.json`
-  pruning (SPEC §4.5 step 18).
+- **Phase 1 is merged to `main` (`b2678d9`, 2026-09-21).** The owner confirmed all v1
+  users were test accounts, so the D14 transition notice was withdrawn and the retirement
+  deploys without a waiting period.
+- **Deploy sequence** (owner-approved; check-in #2 given): `npm run build && firebase deploy
+  --only functions --force` (deletes `processRecurringOrders`, `freshnessAlerts` and
+  `sendNotification` and their scheduler jobs) → `deploy:hosting` (ships the rewritten
+  legal pages) → delete the retired collections (SPEC §4.5) → `deploy:firestore` → verify.
+  **Until this completes, production still runs v1 at `8c4cfea`.**
+- Legal pages are rewritten for SJCA on farmlink.us (D18); `firestore.indexes.json` is
+  already pruned on `main`.
 - Real production data exists (users, farms, orders, conversations, photos). Never delete a
   collection or Storage object without a verified export and the owner's explicit approval
   for that step. The pre-Phase-1 export is at
@@ -47,8 +48,8 @@ npm run dev:web        # Next dev server on :3001 (proxies /api to :3000)
 npm run typecheck      # tsc --noEmit (tests/ are not type-checked by this)
 npm test               # vitest run — tests/** only (vitest.config.ts excludes archive/)
 npm run build          # rm -rf dist && tsc   (dist/ is what deploys; the clean step matters)
-npm run deploy:functions   # HELD — see Status. Prompts to DELETE functions whose exports are gone; that is how scheduler jobs are removed.
-npm run deploy:hosting     # HELD — must ship together with the rewritten legal pages (D18)
+npm run deploy:functions   # prompts to DELETE functions whose exports are gone (add --force non-interactively); that is how scheduler jobs are removed
+npm run deploy:hosting     # builds web/ via the frameworks integration and ships it, legal pages included
 npm run deploy:firestore   # rules + indexes
 ```
 
