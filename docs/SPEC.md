@@ -464,11 +464,11 @@ market-local times stored as ISO strings *and* resolved UTC instants.
 | Collection | Purpose | Key fields |
 |---|---|---|
 | `farmers_markets` | a market SJCA runs (WLRFM, Argenta) | `name`, `slug`, `location{name,address}`, `timezone` (default `America/Chicago`), `schedule` (6.4), `workflow` (6.5), `quiet_hours{start,end}`, `booth_layout` (6.7), `website{duda_site_id, thisweek_page_id, vendor_collection_id}`, `mailchimp{audience_id, template_id}`, `active` |
-| `market_dates` | one record per market per occurrence, **materialized** from the schedule | `market_id`, `date` (YYYY-MM-DD local), `start_at`, `end_at` (UTC), `status: collecting\|lineup_final\|published\|cancelled`, `sponsor_id?`, `schedule_version`, `actions{checkin_sent_at?, reminders_sent:[…], deadline_at, deadline_processed_at?, drafts_generated_at?, approved_at?, booth_texts_sent_at?}`, `cancellation_reason?` |
-| `producers` | a vendor business | `business_name`, `contact_name`, `phone` (E.164, unique), `email`, `products[]`, `category`, `documents[]`, `sms_consent{status, at, source}`, `sms_opt_out_at?`, `user_id?`, `legacy_farm_id?`, `notes` |
+| `market_dates` | one record per market per occurrence, **materialized** from the schedule | `market_id`, `date` (YYYY-MM-DD local), `start_at`, `end_at` (UTC), `status: collecting\|lineup_final\|published\|cancelled`, `sponsor_id?`, `schedule_version`, `actions{checkin_sent_at?, reminders_sent:[…], deadline_at, deadline_processed_at?, drafts_generated_at?, approved_at?, booth_texts_sent_at?}`, `cancellation_reason?`, `extra_questions[]` (`{key, prompt, type: text\|choice\|yes_no, options?}` — the rotating weekly question and one-off polls such as winter-season interest) |
+| `producers` | a vendor business | `business_name`, `contact_name`, `phone?` (E.164, unique when present — imported producers have none until they apply), `email` (primary), `emails[]` (every address seen; the identity key for imports), `aliases[]` (name variants seen on forms), `products[]`, `category`, `documents[]`, `sms_consent{status, at, source}`, `sms_opt_out_at?`, `user_id?`, `legacy_farm_id?`, `notes` |
 | `producer_memberships` | one per producer per market | `producer_id`, `market_id`, `status: applied\|under_review\|approved\|active\|inactive`, `usual_booth_id?`, `fee_plan: weekly\|season\|both`, `approved_at?`, `approved_by?`, `history[]` |
 | `applications` | public intake (replaces the Google Form) | page-1: `email`, `business_name`, `contact_person`, `phone`; `markets_applied[]`; page-2 fields from the owner's CSV (⚠ D15); `status: new\|under_review\|approved\|declined`, `reviewed_by?`, `producer_id?` |
-| `checkins` | weekly status per producer per market date | `producer_id`, `market_id`, `market_date_id`, `estimated_sales` (**admin-only field**), `sold_out_items[]`, `unsold_items[]`, `attending_next: bool`, `bringing_next[]`, `feedback`, `submitted_at`, `token_id` |
+| `checkins` | weekly status per producer per market date | `producer_id`, `market_id`, `market_date_id`, `estimated_sales` (**admin-only field**; parsed number + raw text), `transactions_estimate` (parsed int + raw), `sold_out_items[]`, `unsold_items[]`, `attending_next: bool`, `bringing_next[]`, `feedback`, `extra_answers{key: value}` (answers to that date's `extra_questions`), `source: form\|import`, `submitted_at`, `token_id?` |
 | `booths` | booth map per market | `market_id`, `label`, `position{x,y,w,h}`, `attributes{power, corner, size}`, `active` |
 | `booth_assignments` | per market date | `market_date_id`, `booth_id`, `producer_id`, `source: usual\|suggested\|manual`, `assigned_by`, `assigned_at`, `superseded_by?` (history is append-only) |
 | `sponsors` | | `name`, `contact{name,email,phone}`, `logo_url`, `website`, `tier_id`, `active` |
@@ -614,6 +614,17 @@ New collections avoid every v1 name that meant "buyer": `farmers_markets` (not `
 `src/server.ts` stays as the dev runner (or the Firebase emulator — ⚠ D17). A shared
 `buildApp()` removes the duplicated route list.
 
+### 7.9 Importing form history: identity by email, never by name
+The 2026 weekly-survey export shows why: one producer appears under a business name, a
+person's name and three or four spellings, and under several addresses (a business
+domain, a personal address, typos). The importer resolves identity with a union of
+(normalized email, non-generic email domain, first significant word of the name), records
+every variant in `producers.aliases[]` / `emails[]`, maps each response to the latest
+market Saturday on or before its timestamp, keeps the raw text beside every parsed number,
+and writes `source: import`. The rotating "fun" question and one-off polls become
+`extra_questions` on the market date. Sales figures stay admin-only. The export itself
+lives in the private bucket (`imports/`), never in the repository.
+
 ---
 
 ## 8. Build phases
@@ -625,7 +636,10 @@ and a short demo checklist for the owner.
    export manifest; retired functions gone from `gcloud`; prod smoke green.
 2. **Markets, producers, applications, admin roles** — schedule model + `market_dates`
    generator, producer/membership CRUD, public application form + review queue, roles and
-   `audit_log`, test mode (§7.3), `messages` log (§7.2), secrets to Secret Manager.
+   `audit_log`, test mode (§7.3), `messages` log (§7.2), secrets to Secret Manager, and the
+   form-history importer (§7.9) run once against the 2026 WLRFM weekly survey to seed
+   `producers`, `producer_memberships`, `market_dates` and `checkins` as realistic test
+   data (⚠ D20). Imported producers have no phone, so nothing can text them.
    Demo: create both markets with real schedules; generate dates; skip a date; submit an
    application; approve at one market only; console-provider sends visible in the log.
 3. **Check-ins and text reminders** — `link_tokens`, check-in form, `processMarketDates`,
@@ -680,6 +694,8 @@ rewritten accordingly and ship in the same hosting deploy.
 | **D17** | Local dev: `src/server.ts` runner or Firebase emulator? | **Keep `server.ts`** for now. |
 | **D18** | Operator identity for the rewritten legal pages (SJCA vs "FarmLink") and the domain (`farmlink.us` is parked; `stjosephcenter.org`?). | Needed before the Phase 1 hosting deploy. |
 | **D19** | Who receives `privacy@` / `support@farmlink.us` today? | Unknown; likely nobody. |
+| **D20** | Seed Phase 2 with the 2026 WLRFM weekly-survey history (≈335 responses, Apr 18–Sep 20) as test data? | **Yes** — real names, real dates, no phones. The export sits in the private bucket, never in git; Phase 7 re-runs the same importer against the authoritative Google export. |
+| **D15 (still open)** | Page-2 application-form fields. | The weekly survey is not it; the application form ships with page-1 fields until the CSV arrives. |
 
 ---
 
