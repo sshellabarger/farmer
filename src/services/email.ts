@@ -1,5 +1,25 @@
 import { Resend } from 'resend';
 import type { Env } from '../config/env.js';
+import { SendsDisabledError } from './sms.js';
+
+/**
+ * Outbound email. Mirrors the SMS guard (SPEC §7.3): Resend is reachable
+ * only when NODE_ENV=production AND ALLOW_REAL_SENDS=true; the console
+ * provider prints the message and resolves. The `resend` package is imported
+ * here and nowhere else (test-enforced). No `messages` row for email in
+ * Phase 2.
+ */
+
+export type EmailProvider = 'resend' | 'console';
+
+/** Structural guard. Throws SendsDisabledError before any I/O. */
+export function selectEmailProvider(env: Env): EmailProvider {
+  if (env.EMAIL_PROVIDER === 'console') return 'console';
+  if (env.NODE_ENV === 'production' && env.ALLOW_REAL_SENDS === 'true') return 'resend';
+  throw new SendsDisabledError(
+    `EMAIL_PROVIDER=${env.EMAIL_PROVIDER} needs NODE_ENV=production and ALLOW_REAL_SENDS=true (got NODE_ENV=${env.NODE_ENV}, ALLOW_REAL_SENDS=${env.ALLOW_REAL_SENDS})`,
+  );
+}
 
 function getResend(env: Env) {
   return new Resend(env.RESEND_API_KEY);
@@ -24,8 +44,17 @@ export function baseLayout(title: string, body: string): string {
   </style></head><body><div class="wrapper"><div class="header"><h1>FarmLink</h1><p>${title}</p></div><div class="body">${body}</div><div class="footer">FarmLink</div></div></body></html>`;
 }
 
-/** Send a simple HTML email through Resend. `message` may contain HTML; newlines become <br>. */
+/**
+ * Send a simple HTML email. `message` may contain HTML; newlines become <br>.
+ * Throws SendsDisabledError when the real provider is configured outside
+ * production + ALLOW_REAL_SENDS; the console provider logs and resolves.
+ */
 export async function sendEmail({ env, to, subject, message }: { env: Env; to: string; subject: string; message: string }) {
+  const provider = selectEmailProvider(env);
+  if (provider === 'console') {
+    console.log('[email:console] to=%s subject=%s\n%s', to, subject, message);
+    return;
+  }
   const body = `<p style="font-size:15px;line-height:1.6">${message.replace(/\n/g, '<br>')}</p>`;
   await resendSend(getResend(env), { from: env.FROM_EMAIL, to, subject, html: baseLayout(subject, body) });
 }

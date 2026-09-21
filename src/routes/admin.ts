@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { authenticate, requireRole } from '../middleware/rbac.js';
-import { sendAndLogSms } from '../services/inbound.js';
+import { selectSmsProvider, trySendSms } from '../services/sms.js';
 
 export async function adminRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
@@ -33,28 +33,31 @@ export async function adminRoutes(app: FastifyInstance) {
     return { users, total: users.length };
   });
 
-  // ─── GET /api/admin/users ───
-  // Lightweight user list for broadcast targeting
-  app.get('/users', {
+  // ─── GET /api/admin/providers ───
+  // Which send providers this deployment is wired to (SPEC §7.3). The web
+  // dashboard shows a "Test mode" banner when real_sends_possible is false;
+  // after a production deploy this is the first smoke check.
+  app.get('/providers', {
     preHandler: [auth, adminOnly],
   }, async () => {
-    const usersSnap = await app.db.collection('users').get();
-    const users = usersSnap.docs.map(doc => {
-      const u = doc.data();
-      return {
-        id: doc.id,
-        name: u.name,
-        phone: u.phone,
-        role: u.role,
-        sms_opt_out_at: u.sms_opt_out_at || null,
-      };
-    });
-    return { users };
+    let real_sends_possible = false;
+    try {
+      real_sends_possible = selectSmsProvider(app.env) === 'voipms';
+    } catch {
+      real_sends_possible = false;
+    }
+    return {
+      sms_provider: app.env.SMS_PROVIDER,
+      email_provider: app.env.EMAIL_PROVIDER,
+      allow_real_sends: app.env.ALLOW_REAL_SENDS === 'true',
+      node_env: app.env.NODE_ENV,
+      real_sends_possible,
+    };
   });
 
   // ─── POST /api/admin/broadcast ───
   // Text every non-admin user in the audience. Opted-out users are skipped
-  // and every send is logged to `messages` (kind: 'broadcast').
+  // and every send is logged to `messages` (kind: 'broadcast') by sendSms.
   app.post('/broadcast', {
     preHandler: [auth, adminOnly],
   }, async (request) => {
@@ -82,27 +85,30 @@ export async function adminRoutes(app: FastifyInstance) {
     const targets = candidates.filter((u: any) => !u.sms_opt_out_at);
     const skipped = candidates.length - targets.length;
 
-    const results: { phone: string; name: string; status: 'sent' | 'failed'; error?: string }[] = [];
+    const results: { phone: string; name: string; status: 'sent' | 'simulated' | 'failed'; error?: string }[] = [];
 
     for (const user of targets as any[]) {
-      const result = await sendAndLogSms({
+      const result = await trySendSms({
         db: app.db,
         env: app.env,
         to: user.phone,
         body: message,
         kind: 'broadcast',
-        extra: { broadcast_id: broadcastId, user_id: user.id, sent_by: request.authUser!.id },
+        user_id: user.id,
+        sent_by: request.authUser!.id,
+        extra: { broadcast_id: broadcastId },
       });
       if (result.ok) {
-        results.push({ phone: user.phone, name: user.name, status: 'sent' });
+        results.push({ phone: user.phone, name: user.name, status: result.status });
       } else {
         app.log.error({ phone: user.phone, error: result.error }, 'Broadcast SMS failed');
         results.push({ phone: user.phone, name: user.name, status: 'failed', error: result.error });
       }
     }
 
-    // Log broadcast for audit
-    const sent = results.filter(r => r.status === 'sent').length;
+    // Log broadcast for audit. A simulated send (console provider) counts as
+    // sent here: the summary is about the loop, the per-row truth is in `messages`.
+    const sent = results.filter(r => r.status !== 'failed').length;
     const failed = results.filter(r => r.status === 'failed').length;
     await app.db.collection('admin_broadcasts').doc(broadcastId).set({
       admin_user_id: request.authUser!.id,

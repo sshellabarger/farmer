@@ -160,7 +160,7 @@ export async function notifyError({
       const shortMsg = classified.message.split('\n')[0].slice(0, 100);
       const fix = (aiAnalysis?.split('\n')[0] || getFixHintText(classified.category)).slice(0, 220);
       const body = `⚠️ FarmLink ${classified.category}\n${shortMsg}\n\nFix: ${fix}`;
-      await sendSms({ env, to: env.ALERT_PHONE, body });
+      await sendSms({ env, db: getDb(), to: env.ALERT_PHONE, body, kind: 'alert' });
     } catch (e) {
       console.error('[error-notify] sms failed:', e instanceof Error ? e.message : e);
     }

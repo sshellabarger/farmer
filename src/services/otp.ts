@@ -20,7 +20,7 @@ export async function sendOtp(db: Firestore, env: Env, phone: string): Promise<v
   });
 
   const body = `Your FarmLink verification code is ${code}. It expires in 5 minutes.`;
-  await sendSms({ env, to: phone, body });
+  await sendSms({ env, db, to: phone, body, kind: 'otp' });
 }
 
 /**
