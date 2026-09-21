@@ -357,7 +357,7 @@ Firestore has no schema migrations. "Drop old tables through a proper migration"
 7. **Check-in #1:** show the owner the counts table (real vs seed per collection) and the
    export manifest before anything is removed.
 
-### 4.3 Stop the live automation — **HELD until the D14 30-day notice elapses**
+### 4.3 Stop the live automation — hold lifted 2026-09-21 (all users are test accounts; D14 withdrawn)
 8. Remove the `processRecurringOrders`, `freshnessAlerts` and `sendNotification` exports
    from `src/functions.ts` (and `processReminders` if D6 = retire). `rm -rf dist &&
    npm run deploy:functions` — the CLI prompts to delete each missing function **and
@@ -634,6 +634,12 @@ transition text, start the 30-day clock, retire automation after. Remaining: D2,
 D10–D13, D15–D19 (defaults apply unless the owner objects). **Deviation recorded:** D11's
 default (move functions to `functions/`, drop `frameworksBackend`) was deferred to Phase 2;
 Phase 1 applied the `functions.ignore` hardening instead.
+
+**2026-09-21:** D14 **withdrawn** — the owner confirms all five v1 users are test accounts,
+so no transition notice is sent and there is no 30-day hold; the retirement deploy and the
+§4.5 data deletion proceed after check-in #2. D18 **answered** — the operator is St. Joseph
+Center of Arkansas and the domain stays `farmlink.us` (SJCA-owned); the legal pages are
+rewritten accordingly and ship in the same hosting deploy.
 
 | # | Decision | Default / recommendation |
 |---|---|---|
