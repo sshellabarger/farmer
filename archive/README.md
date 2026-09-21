@@ -19,4 +19,4 @@ functions.ignore`).
 | `v1-web-links/` | `view-link.ts` — the texted `/api/view/<token>` pattern; reborn as `link_tokens` (SPEC §7.5) |
 | `reviews/` | `interface-review-2026-06-12.md` |
 | `ops-log/` | `triage-log-2026-06-07_to_2026-07-28.md` (redacted, with correction note), `MONITORING-2026-06.md` (snapshot before rewrite) |
-| `firestore-schema-2026-09.md` | Generated during the Phase 1 data step (not yet present) |
+| `firestore-schema-2026-09.md` | Every Firestore collection and subcollection as of 2026-09-20, before Phase 1 deletion: document counts, field names and types (no values), seed-signature counts (zero), users breakdown |

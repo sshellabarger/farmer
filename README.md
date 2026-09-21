@@ -24,7 +24,7 @@ The final v1 code is tagged **`farmlink-v1-final`** (branch `archive/farmlink-v1
 | SMS | voip.ms only, through `src/services/sms.ts`; inbound webhook at `/api/sms/voipms/inbound` with a keyword handler (STOP/START/HELP) in `src/services/inbound.ts`; every text is logged to the `messages` collection |
 | Email | Resend (`src/services/email.ts`) |
 | AI | None in the product. `@anthropic-ai/sdk` is used only by `src/services/error-notify.ts` to draft fix suggestions in alert emails |
-| Web | Next.js 15 / React 19 / Tailwind 4 in `web/`, served **static** by Firebase Hosting; `/api/**` rewrites to the `api` function |
+| Web | Next.js 15 / React 19 / Tailwind 4 in `web/`, deployed through Firebase Hosting's web-frameworks integration (`frameworksBackend`; the current output is fully static, so no SSR function exists); `/api/**` rewrites to the `api` function; retired v1 URLs 301 to `/changed` |
 | Auth | Phone OTP (`otps` collection) → HS256 JWT (`src/utils/jwt.ts`), 7-day expiry |
 | Project | Firebase/GCP `arkansaslocalfoodnetwork`, `us-central1` (Firestore `nam5`). **Live project with real user data.** |
 
