@@ -33,6 +33,9 @@ export async function authRoutes(app: FastifyInstance) {
     if (snap.empty) {
       return reply.status(404).send({ error: 'No account found for this number.' });
     }
+    if (snap.docs[0].data().active === false) {
+      return reply.status(403).send({ error: 'This account has been deactivated.' });
+    }
 
     try {
       await sendOtp(app.db, app.env, phone);
@@ -70,7 +73,14 @@ export async function authRoutes(app: FastifyInstance) {
     reply.send({
       success: true,
       token,
-      user: { id: userId, name: user.name, role: user.role, phone: user.phone },
+      user: {
+        id: userId,
+        name: user.name,
+        role: user.role,
+        phone: user.phone,
+        email: user.email ?? null,
+        assigned_market_ids: Array.isArray(user.assigned_market_ids) ? user.assigned_market_ids : [],
+      },
     });
   });
 
@@ -79,7 +89,14 @@ export async function authRoutes(app: FastifyInstance) {
   app.get('/me', { preHandler: authenticate(app) }, async (request, reply) => {
     const user = request.authUser!;
     reply.send({
-      user: { id: user.id, name: user.name, role: user.role, phone: user.phone },
+      user: {
+        id: user.id,
+        name: user.name,
+        role: user.role,
+        phone: user.phone,
+        email: user.email,
+        assigned_market_ids: user.assigned_market_ids,
+      },
     });
   });
 }

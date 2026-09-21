@@ -4,9 +4,14 @@
 // connections, buyer market types) were retired with v1; see tag
 // farmlink-v1-final. New SJCA collections are specified in docs/SPEC.md §6.
 
-// 'market' and 'both' are v1 buyer roles that still exist on stored users
-// until the D3 producers migration; no new user gets them.
-export type UserRole = 'farmer' | 'market' | 'both' | 'admin';
+// 'farmer', 'market' and 'both' are v1 roles that still exist on stored users
+// until the D3 producers migration; they may still log in but every Phase 2
+// route answers 403 for them (SPEC §6.7/§2.7). 'market_manager' is new in
+// Phase 2 and is scoped to `assigned_market_ids` (src/middleware/market-scope.ts).
+export type UserRole = 'admin' | 'market_manager' | 'farmer' | 'market' | 'both';
+
+/** SPEC §2.2 market_dates.status. */
+export type MarketDateStatus = 'collecting' | 'lineup_final' | 'published' | 'cancelled';
 
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageSource = 'sms' | 'web' | 'system';
