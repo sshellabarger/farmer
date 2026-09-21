@@ -13,10 +13,6 @@ interface UserRow {
   email: string | null;
   phone: string;
   role: string;
-  farm_name: string | null;
-  market_name: string | null;
-  message_count: number;
-  last_message_at: string | null;
   created_at: string;
 }
 
@@ -33,21 +29,6 @@ interface Broadcast {
 type Tab = 'utilization' | 'broadcast' | 'history';
 
 /* ─── Helpers ─── */
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Never';
-  const d = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return 'Just now';
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDays = Math.floor(diffHr / 24);
-  if (diffDays < 30) return `${diffDays}d ago`;
-  return d.toLocaleDateString();
-}
-
 function roleBadge(role: string) {
   const colors: Record<string, { bg: string; text: string }> = {
     farmer: { bg: '#EBF4E6', text: '#2A5E33' },
@@ -75,7 +56,7 @@ export default function AdminPage() {
   // Utilization state
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
-  const [sortField, setSortField] = useState<keyof UserRow>('last_message_at');
+  const [sortField, setSortField] = useState<keyof UserRow>('created_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [filterRole, setFilterRole] = useState<string>('');
 
@@ -187,14 +168,6 @@ export default function AdminPage() {
   const totalUsers = users.filter(u => u.role !== 'admin').length;
   const farmerCount = users.filter(u => u.role === 'farmer' || u.role === 'both').length;
   const marketCount = users.filter(u => u.role === 'market' || u.role === 'both').length;
-  const totalMessages = users.reduce((s, u) => s + (u.message_count ?? 0), 0);
-  const activeThisWeek = users.filter(u => {
-    if (!u.last_message_at) return false;
-    const d = new Date(u.last_message_at);
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    return d >= weekAgo;
-  }).length;
 
   return (
     <div className="min-h-screen" style={{ background: '#faf8f5' }}>
@@ -236,13 +209,11 @@ export default function AdminPage() {
         {tab === 'utilization' && (
           <>
             {/* Summary cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-6">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
               {[
                 { label: 'Total Users', val: totalUsers, color: '#2A5E33' },
                 { label: 'Farmers', val: farmerCount, color: '#2A5E33' },
                 { label: 'Markets', val: marketCount, color: '#3B7DD8' },
-                { label: 'Messages', val: totalMessages, color: '#C9622F' },
-                { label: 'Active (7d)', val: activeThisWeek, color: '#059669' },
               ].map(s => (
                 <div key={s.label} className="bg-white rounded-xl p-4 border border-border-light" style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{s.label}</div>
@@ -290,9 +261,6 @@ export default function AdminPage() {
                         {[
                           { key: 'name' as keyof UserRow, label: 'User' },
                           { key: 'role' as keyof UserRow, label: 'Role' },
-                          { key: 'farm_name' as keyof UserRow, label: 'Business' },
-                          { key: 'message_count' as keyof UserRow, label: 'Messages' },
-                          { key: 'last_message_at' as keyof UserRow, label: 'Last Active' },
                           { key: 'created_at' as keyof UserRow, label: 'Joined' },
                         ].map(col => (
                           <th
@@ -321,24 +289,6 @@ export default function AdminPage() {
                             <div className="font-sans text-[11px] text-text-muted">{u.phone}</div>
                           </td>
                           <td className="px-4 py-3">{roleBadge(u.role)}</td>
-                          <td className="px-4 py-3">
-                            <div className="font-sans text-[13px] text-text">
-                              {u.farm_name || u.market_name || '—'}
-                            </div>
-                            {u.farm_name && u.market_name && (
-                              <div className="font-sans text-[11px] text-text-muted">{u.market_name}</div>
-                            )}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className="font-mono text-[14px] font-semibold" style={{ color: (u.message_count ?? 0) > 0 ? '#C9622F' : '#ccc' }}>
-                              {u.message_count ?? 0}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className="font-sans text-[13px]" style={{ color: u.last_message_at ? '#3d3428' : '#ccc' }}>
-                              {timeAgo(u.last_message_at)}
-                            </span>
-                          </td>
                           <td className="px-4 py-3">
                             <span className="font-sans text-[12px] text-text-muted">
                               {u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}
