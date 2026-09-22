@@ -129,14 +129,29 @@ export interface ExtraQuestion {
   options?: string[];
 }
 
+/** Phase 3 contract §2.2: one reminder offset's send outcome. */
+export interface ReminderSent {
+  offset_min: number;
+  sent_at: string;
+  recipients: number;
+  failed: number;
+  skipped: 'superseded' | null;
+}
+
 export interface MarketDateActions {
   checkin_sent_at: string | null;
-  reminders_sent: string[];
+  reminders_sent: ReminderSent[];
   deadline_at: string;
   deadline_processed_at: string | null;
   drafts_generated_at: string | null;
   approved_at: string | null;
   booth_texts_sent_at: string | null;
+  // Phase 3 — absent on dates written before the workflow shipped.
+  checkin_recipients?: number;
+  checkin_failed?: number;
+  summary_sent_at?: string | null;
+  summary_skipped?: 'no_recipients' | 'notify_false' | null;
+  claims?: Record<string, string>;
 }
 
 export interface MarketDate {
@@ -161,6 +176,11 @@ export interface MarketDate {
   source: 'generator' | 'import';
   created_at: string;
   updated_at: string;
+  // Phase 3 — set once the deadline has been processed.
+  non_responders?: string[];
+  spot_not_held?: string[];
+  deadline_recipient_count?: number;
+  deadline_responded_count?: number;
 }
 
 export interface UpdateMarketDateInput {
@@ -316,13 +336,15 @@ export interface ApplicationInput {
 
 /* ── Check-ins ── */
 
+export type CheckinSource = 'form' | 'import' | 'sms';
+
 export interface Checkin {
   id: string;
   producer_id: string;
   market_id: string;
   market_date_id: string;
   submitted_at: string;
-  source: 'form' | 'import';
+  source: CheckinSource;
   token_id: string | null;
   /** Admin-only; absent for market managers. */
   estimated_sales?: { value: number | null; raw: string; kind: 'exact' | 'range' | 'none' };
@@ -340,6 +362,9 @@ export interface Checkin {
   flags: string[];
   /** Admin-only; absent for market managers. */
   raw_import?: { row_hash: string; source: string; cells: string[]; timestamp_raw: string; duplicates: number } | null;
+  /** Phase 3 — present on checkins written by the form or by text. */
+  submissions?: number;
+  partial?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -392,4 +417,98 @@ export interface Providers {
   allow_real_sends: boolean;
   node_env: string;
   real_sends_possible: boolean;
+}
+
+/* ── Phase 3: check-in workflow (contract §6.3) ── */
+
+/** Contract §4.1 `CheckinFormValues`: the producer-facing form's field values. */
+export interface CheckinFormValues {
+  attending_next: boolean | null;
+  bringing_next: string;
+  sold_out: string;
+  unsold: string;
+  estimated_sales: string;
+  transactions_estimate: string;
+  feedback: string;
+  extra_answers: Record<string, string | boolean>;
+}
+
+/** Contract §4.1 `checkinSubmitSchema`: the POST /api/checkin/:token body. */
+export interface CheckinSubmitInput {
+  attending_next: boolean;
+  bringing_next: string;
+  sold_out: string;
+  unsold: string;
+  estimated_sales: string;
+  transactions_estimate: string;
+  feedback: string;
+  extra_answers: Record<string, string | boolean>;
+}
+
+/** Contract §4.1: the GET /api/checkin/:token 200 response. */
+export interface CheckinTokenView {
+  producer_name: string;
+  contact_name: string;
+  market_id: string;
+  market_name: string;
+  market_date_id: string;
+  date: string;
+  date_label: string;
+  start_time: string;
+  end_time: string;
+  deadline_at: string;
+  deadline_label: string;
+  past_deadline: boolean;
+  expires_at: string;
+  questions: { extra_questions: ExtraQuestion[] };
+  existing: (CheckinFormValues & { submitted_at: string; source: CheckinSource; partial: boolean }) | null;
+}
+
+/** Contract §4.2 `DateSchedule`, with instants serialised as ISO strings. */
+export interface DateScheduleView {
+  checkin_at: string;
+  checkin_effective_at: string;
+  reminders: { offset_min: number; at: string; effective_at: string; reachable: boolean }[];
+  deadline_at: string;
+  summary_effective_at: string;
+}
+
+/**
+ * Contract §4.2 `MarketDateStatus` (the GET /api/market-dates/:id/status
+ * response). Renamed to `MarketDateStatusView` here: the Phase 2 contract
+ * already exports `MarketDateStatus` as the date-lifecycle string union
+ * (`'collecting' | 'lineup_final' | ...`), so the contract's own name would
+ * collide with it in this module (deviation — see docs/phase3/notes-C.md).
+ */
+export interface MarketDateStatusView {
+  date: MarketDate;
+  market: { id: string; name: string; timezone: string; workflow: Workflow; quiet_hours: QuietHours };
+  schedule: DateScheduleView;
+  next_due: { action: 'checkin' | 'reminder' | 'deadline' | 'summary' | 'none'; at: string | null; offset_min?: number };
+  in_window: boolean;
+  recipients: {
+    producer_id: string;
+    business_name: string;
+    contact_name: string;
+    phone: string;
+    responded: boolean;
+    late: boolean;
+    checkin: { submitted_at: string; source: CheckinSource; partial: boolean; attending_next: boolean | null } | null;
+    link_sent_at: string | null;
+    link_sends: number;
+    reminders_sent: number;
+    last_status: 'sent' | 'simulated' | 'failed' | 'queued' | null;
+    token_expires_at: string | null;
+  }[];
+  excluded: { producer_id: string; business_name: string; reason: 'no_phone' | 'invalid_phone' | 'opted_out' | 'inactive_producer' }[];
+  counts: { recipients: number; responded: number; non_responders: number; excluded: number };
+  messages: { id: string; kind: string; to: string; producer_id: string | null; user_id: string | null; status: string; segments: number; created_at: string }[];
+}
+
+/** Contract §4.2 `POST /:id/close` result shape. */
+export interface CloseResult {
+  recipients: number;
+  responded: number;
+  non_responders: string[];
+  summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed';
 }

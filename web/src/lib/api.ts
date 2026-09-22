@@ -3,6 +3,10 @@ import type {
   ApplicationInput,
   AuditEntry,
   Checkin,
+  CheckinFormValues,
+  CheckinSubmitInput,
+  CheckinTokenView,
+  CloseResult,
   CreateMarketInput,
   CreateProducerInput,
   DashboardCard,
@@ -10,6 +14,7 @@ import type {
   GenerateResult,
   Market,
   MarketDate,
+  MarketDateStatusView,
   Membership,
   MembershipStatus,
   MembershipWithProducer,
@@ -44,6 +49,16 @@ function getToken(): string | null {
   return localStorage.getItem('farmlink_token');
 }
 
+/** Contract §6.2: `request<T>` throws `ApiError` so callers can branch on `.status` (404 / 410 / …). */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {};
@@ -59,7 +74,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || body.message || `API error ${res.status}`);
+    throw new ApiError(body.error || body.message || `API error ${res.status}`, res.status);
   }
   // Handle empty bodies (e.g. 204 No Content from DELETE) — res.json() would
   // throw on an empty body, which previously made successful deletes look failed.
@@ -197,4 +212,23 @@ export const api = {
     request<{ entries: AuditEntry[] }>(`/audit-log${qs(params)}`),
   getDashboard: () => request<{ generated_at: string; markets: DashboardCard[] }>('/dashboard'),
   getProviders: () => request<Providers>('/admin/providers'),
+
+  // ── Phase 3 (contract §6.2) ──
+  getCheckinByToken: (t: string) => request<CheckinTokenView>(`/checkin/${encodeURIComponent(t)}`),
+  submitCheckin: (t: string, data: CheckinSubmitInput) =>
+    request<{ ok: true; checkin: CheckinFormValues & { submitted_at: string; submissions: number } }>(
+      `/checkin/${encodeURIComponent(t)}`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  getMarketDateStatus: (id: string) => request<MarketDateStatusView>(`/market-dates/${encodeURIComponent(id)}/status`),
+  resendCheckin: (id: string, producer_id: string) =>
+    request<{ sms: SmsOutcome; token_expires_at: string; message_id: string | null }>(
+      `/market-dates/${encodeURIComponent(id)}/resend-checkin${qs({ producer_id })}`,
+      { method: 'POST' },
+    ),
+  closeMarketDate: (id: string, data: { notify: boolean }) =>
+    request<{ result: CloseResult; date: MarketDate }>(`/market-dates/${encodeURIComponent(id)}/close`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 };
