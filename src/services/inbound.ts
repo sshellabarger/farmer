@@ -238,8 +238,10 @@ export async function handleInboundText({
         user_id: s.user_id,
         producer_id: producerId,
         extra: { inbound_message_id: inboundMessageId },
+        // At most one forward per inbound row per staff member (Phase 3 fix).
+        dedupe_key: `forwarded_inbound:${inboundMessageId}:${s.user_id}`,
       });
-      if (!result.ok) log.warn({ to: s.phone, kind: 'forwarded_inbound', error: result.error }, 'Inbound forward failed to send');
+      if (!result.ok && !result.duplicate) log.warn({ to: s.phone, kind: 'forwarded_inbound', error: result.error }, 'Inbound forward failed to send');
     }
 
     if (producerData.sms_opt_out_at) return;

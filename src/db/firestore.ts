@@ -56,4 +56,6 @@ export const collections = {
   checkins: 'checkins',
   // Phase 3 (contract §2.1). Doc id = the token itself.
   link_tokens: 'link_tokens',
+  // Phase 3 fix. Doc id = `${market_date_id}__${step}` (checkin | reminder_<offset> | deadline | summary); created atomically by the engine's claim(), never cleared.
+  workflow_locks: 'workflow_locks',
 } as const;

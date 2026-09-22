@@ -1,7 +1,9 @@
 import type { Firestore } from 'firebase-admin/firestore';
+import { v4 as uuid } from 'uuid';
 import type { Env } from '../config/env.js';
 import { nextAllowedInstant } from '../utils/quiet-hours.js';
 import { wallClock, parseDate, weekdayOf, DAYS_OF_WEEK } from '../utils/tz.js';
+import { toDate } from '../utils/dates.js';
 import { marketDateFromData } from './market-dates.js';
 import type { MarketDateDoc, MarketDateActions, ReminderSent } from './market-dates.js';
 import { DEFAULT_WORKFLOW, DEFAULT_QUIET_HOURS } from './markets.js';
@@ -9,17 +11,40 @@ import type { FarmersMarket } from './markets.js';
 import { mintCheckinToken, tokensForDate } from './link-tokens.js';
 import type { LinkTokenDoc } from './link-tokens.js';
 import { checkinUrl, staffForMarket } from './open-checkin.js';
-import { trySendSms, SendsDisabledError } from './sms.js';
+import { trySendSms, isAlreadyExists, SendsDisabledError } from './sms.js';
 import { sendEmail } from './email.js';
 
 /**
  * The Phase 3 workflow engine (contract §3): check-in texts, reminders,
  * deadline flagging and the staff summary, all quiet-hours aware and
  * idempotent across overlapping 5-minute scheduler ticks.
+ *
+ * Concurrency (Phase 3 fix). Two things make overlapping runs safe, and
+ * neither is a read-then-write:
+ *   1. every step takes an atomic lock — `workflow_locks/<date_id>__<key>`
+ *      written with `DocumentReference.create()`, which fails with
+ *      ALREADY_EXISTS when the doc is there (`claim()` below);
+ *   2. every engine send carries a deterministic `dedupe_key`, so `sendSms`
+ *      creates its `messages` row atomically and a second attempt is refused
+ *      before the provider is called (`DuplicateSendError`).
+ * The `actions.claims[key]` map on the market_date is still written for the
+ * status page, but it is informational only — it is no longer the guard.
  */
 
 export const SCAN_WINDOW_MS = 7 * 24 * 60 * 60_000;
+/**
+ * A lock older than this is presumed to belong to a run that died (the
+ * function's own timeout is 300 s, so no live run can hold one this long)
+ * and is taken over by the next tick.
+ */
 export const CLAIM_TTL_MS = 10 * 60_000;
+
+/** Deterministic at-most-once keys for every engine send (contract §2.4's per-recipient dedupe, made atomic). */
+export const DEDUPE_KEYS = {
+  checkin_link: (marketDateId: string, producerId: string) => `checkin_link:${marketDateId}:${producerId}`,
+  checkin_reminder: (marketDateId: string, producerId: string, offsetMin: number) => `checkin_reminder:${marketDateId}:${producerId}:${offsetMin}`,
+  deadline_summary: (marketDateId: string, userId: string) => `deadline_summary:${marketDateId}:${userId}`,
+} as const;
 
 export interface EngineResult {
   scanned: number;
@@ -206,6 +231,13 @@ export async function listRecipients(db: Firestore, marketId: string): Promise<{
  * `checkin_link` always mints a fresh token; `checkin_reminder` reuses the
  * producer's newest unexpired token for the date, minting only if none is
  * valid. Never throws — provider failures come back as `status: 'failed'`.
+ *
+ * `dedupe_key` (Phase 3 fix): the engine passes one of `DEDUPE_KEYS` so the
+ * send is at-most-once across overlapping runs; a collision comes back as
+ * `status: 'duplicate'` with the existing row's id and the freshly minted
+ * token is left unsent (`sent_message_id: null`, harmless — it is as valid
+ * as the one that went out). The staff resend route passes none: a resend
+ * is an intentional second text.
  */
 export async function sendCheckinLink(
   db: Firestore,
@@ -213,8 +245,15 @@ export async function sendCheckinLink(
   market: FarmersMarket,
   date: MarketDateDoc,
   recipient: Recipient,
-  opts: { now: Date; kind: 'checkin_link' | 'checkin_reminder'; offset_min?: number; created_by: string; sent_by?: string | null },
-): Promise<{ token: string; message_id: string | null; status: 'sent' | 'simulated' | 'failed'; error?: string }> {
+  opts: {
+    now: Date;
+    kind: 'checkin_link' | 'checkin_reminder';
+    offset_min?: number;
+    created_by: string;
+    sent_by?: string | null;
+    dedupe_key?: string;
+  },
+): Promise<{ token: string; message_id: string | null; status: 'sent' | 'simulated' | 'failed' | 'duplicate'; error?: string }> {
   const schedule = computeSchedule(market, date);
 
   let tokenDoc: LinkTokenDoc;
@@ -262,9 +301,15 @@ export async function sendCheckinLink(
     market_date_id: date.id,
     sent_by: opts.sent_by ?? null,
     extra,
+    ...(opts.dedupe_key !== undefined ? { dedupe_key: opts.dedupe_key } : {}),
   });
 
-  const message_id = result.ok ? result.message_id : result.message_id;
+  if (!result.ok && result.duplicate) {
+    // Another run already sent this exact text; this token was never sent.
+    return { token: tokenDoc.token, message_id: result.message_id, status: 'duplicate', error: result.error };
+  }
+
+  const message_id = result.message_id;
   await db.collection('link_tokens').doc(tokenDoc.token).update({ sent_message_id: message_id });
 
   return {
@@ -346,6 +391,13 @@ async function buildDeadlineSummaryEmail(
  * and, when `env.ALERT_EMAIL` is set, one email. Never throws for a
  * disabled email provider (SendsDisabledError is swallowed); any other
  * error propagates so the caller's claim is not mistaken for success.
+ *
+ * Every text carries `DEDUPE_KEYS.deadline_summary(date, user)`, so a staff
+ * member gets at most one summary per date however many runs (or an admin
+ * "close" racing the engine) attempt it; collisions are counted in
+ * `duplicates`, not `sms`. The email has no log row and therefore no atomic
+ * guard: `opts.email` lets the engine send it only from the run that created
+ * the summary lock (see the summary step) — a stale-lock takeover skips it.
  */
 export async function sendDeadlineSummary(
   db: Firestore,
@@ -353,8 +405,8 @@ export async function sendDeadlineSummary(
   market: FarmersMarket,
   date: MarketDateDoc,
   stats: { recipients: number; responded: number; non_responders: string[] },
-  opts: { now: Date },
-): Promise<{ sms: number; email: boolean }> {
+  opts: { now: Date; email?: boolean },
+): Promise<{ sms: number; email: boolean; duplicates: number }> {
   const schedule = computeSchedule(market, date);
   const staff = await staffForMarket(db, market.id);
   const names = await businessNamesFor(db, stats.non_responders);
@@ -370,13 +422,24 @@ export async function sendDeadlineSummary(
   });
 
   let smsCount = 0;
+  let duplicates = 0;
   for (const s of staff) {
-    const result = await trySendSms({ env, db, to: s.phone, body, kind: 'deadline_summary', user_id: s.user_id, market_date_id: date.id });
+    const result = await trySendSms({
+      env,
+      db,
+      to: s.phone,
+      body,
+      kind: 'deadline_summary',
+      user_id: s.user_id,
+      market_date_id: date.id,
+      dedupe_key: DEDUPE_KEYS.deadline_summary(date.id, s.user_id),
+    });
     if (result.ok) smsCount++;
+    else if (result.duplicate) duplicates++;
   }
 
   let emailSent = false;
-  if (env.ALERT_EMAIL) {
+  if (env.ALERT_EMAIL && opts.email !== false) {
     try {
       const subject = `[SJCA Markets] ${market.name} check-in deadline: ${stats.responded}/${stats.recipients} responded (${dateShortStr})`;
       const deadlineLabel = formatLocalStamp(schedule.deadline_at, market.timezone);
@@ -388,7 +451,7 @@ export async function sendDeadlineSummary(
     }
   }
 
-  return { sms: smsCount, email: emailSent };
+  return { sms: smsCount, email: emailSent, duplicates };
 }
 
 async function computeDeadlineStats(
@@ -468,14 +531,42 @@ export async function processDeadline(
 
 // ─── The engine ──────────────────────────────────────────────────────────
 
-type ClaimResult = { status: 'done' } | { status: 'claimed' } | { status: 'proceed'; fresh: MarketDateDoc };
+type ClaimResult =
+  | { status: 'done' }
+  | { status: 'claimed' }
+  | {
+      status: 'proceed';
+      fresh: MarketDateDoc;
+      /** True when this run created the lock; false when it took over a stale one. */
+      created: boolean;
+    };
+
+/** `workflow_locks` doc id: one lock per market date per step. */
+export function workflowLockId(dateId: string, key: string): string {
+  return `${dateId}__${key}`;
+}
 
 /**
- * Idempotency across overlapping runs (contract §3.4). Always a fresh read;
- * never the scan snapshot. A run that dies mid-loop leaves a claim younger
- * than CLAIM_TTL_MS, so the next couple of ticks skip the date — the
- * per-recipient `messages` dedupe (checked by each step) is what actually
- * guarantees nobody is texted twice.
+ * Idempotency across overlapping runs (contract §3.4, made atomic).
+ *
+ * 1. Fresh read of the market_date (never the scan snapshot); `isDone` on its
+ *    flags short-circuits a step another run has already finished.
+ * 2. Atomic step lock: `workflow_locks/<date_id>__<key>` via `create()`. The
+ *    admin SDK rejects a create on an existing doc with ALREADY_EXISTS, so of
+ *    any number of concurrent runs exactly one gets `created: true`. A loser
+ *    reads the lock: younger than CLAIM_TTL_MS → `claimed` (skip the step);
+ *    older → the owner died (the function times out at 300 s) and this run
+ *    takes the lock over with `set()`.
+ * 3. The informational `actions.claims[key]` on the market_date is written
+ *    as before for the status page. It is no longer the guard.
+ *
+ * Residual race, documented: the takeover in (2) is itself read-then-write,
+ * so two runs arriving together at a lock that is already stale can both
+ * proceed. That is harmless — every send under the lock is atomic on its
+ * own `dedupe_key` (a duplicate never reaches the provider) and every flag
+ * write is idempotent — except for the summary *email*, which has no log
+ * row; the summary step therefore emails only from the run that created the
+ * lock (`created: true`), never from a takeover. Locks are never cleared.
  */
 async function claim(
   db: Firestore,
@@ -489,13 +580,35 @@ async function claim(
   if (!snap.exists) return { status: 'done' };
   const fresh = marketDateFromData(snap.id, snap.data() as Record<string, unknown>);
   if (isDone(fresh.actions)) return { status: 'done' };
-  const claimedAt = fresh.actions.claims?.[key];
-  if (claimedAt && now.getTime() - claimedAt.getTime() < CLAIM_TTL_MS) return { status: 'claimed' };
+
+  const lockRef = db.collection('workflow_locks').doc(workflowLockId(dateId, key));
+  const run_id = uuid();
+  let created = true;
+  try {
+    await lockRef.create({ market_date_id: dateId, key, claimed_at: now, run_id, created_at: now });
+  } catch (err) {
+    if (!isAlreadyExists(err)) throw err;
+    created = false;
+    const lockSnap = await lockRef.get();
+    const lock = (lockSnap.data() ?? {}) as Record<string, unknown>;
+    const claimedAt = toDate(lock.claimed_at);
+    if (claimedAt && now.getTime() - claimedAt.getTime() < CLAIM_TTL_MS) return { status: 'claimed' };
+    // Stale: the owner died mid-step. Take it over (see the residual race above).
+    await lockRef.set({
+      market_date_id: dateId,
+      key,
+      claimed_at: now,
+      run_id,
+      taken_over_from: typeof lock.run_id === 'string' ? lock.run_id : null,
+      created_at: toDate(lock.created_at) ?? now,
+    });
+  }
+
   await ref.update({
     actions: { ...fresh.actions, claims: { ...(fresh.actions.claims ?? {}), [key]: now } },
     updated_at: now,
   });
-  return { status: 'proceed', fresh };
+  return { status: 'proceed', fresh, created };
 }
 
 /** Sends (or marks superseded) a single reminder offset, under its own claim. */
@@ -534,8 +647,15 @@ async function processReminderOffset(
     let failed = 0;
     for (const r of targets) {
       if (alreadyTexted.has(r.producer_id)) continue;
-      const result = await sendCheckinLink(db, env, market, date, r, { now, kind: 'checkin_reminder', offset_min: offsetMin, created_by: 'engine' });
+      const result = await sendCheckinLink(db, env, market, date, r, {
+        now,
+        kind: 'checkin_reminder',
+        offset_min: offsetMin,
+        created_by: 'engine',
+        dedupe_key: DEDUPE_KEYS.checkin_reminder(date.id, r.producer_id, offsetMin),
+      });
       if (result.status === 'failed') failed++;
+      else if (result.status === 'duplicate') continue; // another run already sent it: skipped, not failed
       else sent++;
     }
     entry = { offset_min: offsetMin, sent_at: now, recipients: sent, failed, skipped: null };
@@ -654,8 +774,14 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
           let failedCount = 0;
           for (const r of recipients) {
             if (alreadySent.has(r.producer_id)) continue;
-            const send = await sendCheckinLink(db, env, market, date, r, { now, kind: 'checkin_link', created_by: 'engine' });
+            const send = await sendCheckinLink(db, env, market, date, r, {
+              now,
+              kind: 'checkin_link',
+              created_by: 'engine',
+              dedupe_key: DEDUPE_KEYS.checkin_link(date.id, r.producer_id),
+            });
             if (send.status === 'failed') failedCount++;
+            else if (send.status === 'duplicate') continue; // another run already sent it: skipped, not failed
             else sentCount++;
           }
           const claims = { ...(c.fresh.actions.claims ?? {}), checkin: now };
@@ -720,13 +846,22 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
             const recipientsCount = fresh.deadline_recipient_count ?? 0;
             const respondedCount = fresh.deadline_responded_count ?? 0;
             const nonResponders = fresh.non_responders ?? [];
+            // The texts are atomic per staff user (dedupe_key). The email is
+            // not logged, so only the run that CREATED the summary lock sends
+            // it; a stale-lock takeover (the creator died after claiming)
+            // re-sends the texts (all refused as duplicates if they went out)
+            // but never the email — a possibly missing email beats a double
+            // one. Residual window: a creator that died after emailing but
+            // before writing summary_sent_at leaves the email sent once and
+            // the flag written by the takeover; a creator that died before
+            // emailing leaves no email at all (the texts still go out).
             await sendDeadlineSummary(
               db,
               env,
               market,
               fresh,
               { recipients: recipientsCount, responded: respondedCount, non_responders: nonResponders },
-              { now },
+              { now, email: c.created },
             );
             const claims = { ...(c.fresh.actions.claims ?? {}), summary: now };
             await db.collection('market_dates').doc(date.id).update({

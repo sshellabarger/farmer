@@ -419,22 +419,27 @@ describe('listRecipients — exclusions', () => {
 });
 
 describe('processMarketDates — idempotency across overlapping runs', () => {
-  it('a fresh, unexpired checkin claim blocks a concurrent run; an expired claim resumes and honours the messages dedupe', async () => {
+  // Phase 3 fix: the guard is the atomic `workflow_locks/<date>__<key>` doc,
+  // not `actions.claims` (which is still written, for the status page only).
+  function lock(key: string, claimedAt: Date) {
+    return { market_date_id: 'wlrfm_2026-09-19', key, claimed_at: claimedAt, run_id: 'previous-run', created_at: claimedAt };
+  }
+
+  it('a fresh, unexpired checkin lock blocks a concurrent run; a stale lock is taken over and the messages dedupe holds', async () => {
     const db = seed({
       wlrfmDateOverrides: {
         actions: { ...baseWlrfmActions(), claims: { checkin: new Date('2026-09-19T17:57:00Z') } },
       },
     });
+    await db.collection('workflow_locks').doc('wlrfm_2026-09-19__checkin').set(lock('checkin', new Date('2026-09-19T17:57:00Z')));
     const result = await processMarketDates(db as never, env, { now: new Date('2026-09-19T18:00:00Z') });
     expect(result.skipped_claimed).toBe(1);
     expect(db.count('messages')).toBe(0);
 
-    // Advance the claim past its TTL and seed a queued row for p1, simulating a
-    // previous run that claimed, sent to p1, then died before writing checkin_sent_at.
-    await db.collection('market_dates').doc('wlrfm_2026-09-19').update({
-      actions: { ...baseWlrfmActions(), claims: { checkin: new Date('2026-09-19T17:49:00Z') } },
-    });
-    await db.collection('messages').doc('m1').set({
+    // Age the lock past its TTL and seed a queued row for p1, simulating a
+    // previous run that locked, sent to p1, then died before writing checkin_sent_at.
+    await db.collection('workflow_locks').doc('wlrfm_2026-09-19__checkin').set(lock('checkin', new Date('2026-09-19T17:49:00Z')));
+    await db.collection('messages').doc('checkin_link:wlrfm_2026-09-19:p1').set({
       direction: 'outbound', to: '+15015550101', from: 'console', body: 'x', provider: 'console', provider_message_id: 'console-m1',
       status: 'queued', status_at: new Date(), error: null, kind: 'checkin_link', segments: 1,
       producer_id: 'p1', market_date_id: 'wlrfm_2026-09-19', user_id: null, sent_by: null, created_at: new Date('2026-09-19T17:59:00Z'),
@@ -448,9 +453,26 @@ describe('processMarketDates — idempotency across overlapping runs', () => {
     expect(p2Msgs).toHaveLength(1); // newly sent this run
     const dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
     expect((dateDoc.actions as Record<string, unknown>).checkin_sent_at).toEqual(new Date('2026-09-19T18:00:00Z'));
+    const takenOver = db.dump('workflow_locks')['wlrfm_2026-09-19__checkin']! as Record<string, unknown>;
+    expect(takenOver.taken_over_from).toBe('previous-run');
+    expect(takenOver.claimed_at).toEqual(new Date('2026-09-19T18:00:00Z'));
   });
 
-  it('a fresh deadline claim blocks a concurrent run; an expired one resumes without a second summary', async () => {
+  it('a stale informational claim on the market_date alone never blocks (the lock doc is the guard)', async () => {
+    const db = seed({
+      wlrfmDateOverrides: {
+        actions: { ...baseWlrfmActions(), claims: { checkin: new Date('2026-09-19T17:57:00Z') } },
+      },
+    });
+    const result = await processMarketDates(db as never, env, { now: new Date('2026-09-19T18:00:00Z') });
+    expect(result.skipped_claimed).toBe(0);
+    expect(kindMessages(db, 'checkin_link')).toHaveLength(2);
+    const created = db.dump('workflow_locks')['wlrfm_2026-09-19__checkin']! as Record<string, unknown>;
+    expect(created).toMatchObject({ key: 'checkin', market_date_id: 'wlrfm_2026-09-19' });
+    expect(created).not.toHaveProperty('taken_over_from'); // created fresh, not taken over
+  });
+
+  it('a fresh deadline lock blocks a concurrent run; a stale one is taken over without a second summary', async () => {
     const db = seed({
       wlrfmDateOverrides: {
         actions: {
@@ -460,18 +482,13 @@ describe('processMarketDates — idempotency across overlapping runs', () => {
         },
       },
     });
-    let result = await processMarketDates(db as never, env, { now: new Date('2026-09-22T17:00:00Z') });
+    await db.collection('workflow_locks').doc('wlrfm_2026-09-19__deadline').set(lock('deadline', new Date('2026-09-22T16:58:00Z')));
+    const result = await processMarketDates(db as never, env, { now: new Date('2026-09-22T17:00:00Z') });
     expect(result.skipped_claimed).toBeGreaterThanOrEqual(1);
     let dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
     expect((dateDoc.actions as Record<string, unknown>).deadline_processed_at).toBeNull();
 
-    await db.collection('market_dates').doc('wlrfm_2026-09-19').update({
-      actions: {
-        ...baseWlrfmActions(),
-        checkin_sent_at: new Date('2026-09-19T18:00:00Z'),
-        claims: { deadline: new Date('2026-09-22T16:48:00Z') },
-      },
-    });
+    await db.collection('workflow_locks').doc('wlrfm_2026-09-19__deadline').set(lock('deadline', new Date('2026-09-22T16:48:00Z')));
     await processMarketDates(db as never, env, { now: new Date('2026-09-22T17:00:00Z') });
     dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
     expect((dateDoc.actions as Record<string, unknown>).deadline_processed_at).toEqual(new Date('2026-09-22T17:00:00Z'));
@@ -480,6 +497,43 @@ describe('processMarketDates — idempotency across overlapping runs', () => {
     // Running again must not double the summary.
     await processMarketDates(db as never, env, { now: new Date('2026-09-22T17:05:00Z') });
     expect(kindMessages(db, 'deadline_summary')).toHaveLength(2);
+  });
+
+  it('a stale summary lock is taken over: texts are re-attempted (refused as duplicates) but the email is not re-sent', async () => {
+    // A previous run created the summary lock, texted admin1 + mgr_w, emailed,
+    // then died before writing summary_sent_at.
+    const db = seed({
+      wlrfmDateOverrides: {
+        non_responders: ['p1', 'p2'],
+        spot_not_held: ['p1', 'p2'],
+        deadline_recipient_count: 2,
+        deadline_responded_count: 0,
+        actions: {
+          ...baseWlrfmActions(),
+          checkin_sent_at: new Date('2026-09-19T18:00:00Z'),
+          deadline_processed_at: new Date('2026-09-22T17:00:00Z'),
+          claims: { deadline: new Date('2026-09-22T17:00:00Z'), summary: new Date('2026-09-22T17:00:00Z') },
+        },
+      },
+    });
+    await db.collection('workflow_locks').doc('wlrfm_2026-09-19__summary').set(lock('summary', new Date('2026-09-22T17:00:00Z')));
+    for (const userId of ['admin1', 'mgr_w']) {
+      await db.collection('messages').doc(`deadline_summary:wlrfm_2026-09-19:${userId}`).set({
+        direction: 'outbound', to: 'x', from: 'console', body: 'x', provider: 'console', provider_message_id: 'y',
+        status: 'simulated', status_at: new Date(), error: null, kind: 'deadline_summary', segments: 1,
+        producer_id: null, market_date_id: 'wlrfm_2026-09-19', user_id: userId, sent_by: null, created_at: new Date('2026-09-22T17:00:00Z'),
+      });
+    }
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await processMarketDates(db as never, env, { now: new Date('2026-09-22T17:11:00Z') });
+
+    expect(kindMessages(db, 'deadline_summary')).toHaveLength(2); // the two seeded rows, nothing new
+    const emailLogs = logSpy.mock.calls.filter((args) => typeof args[0] === 'string' && args[0].includes('[email:console]'));
+    expect(emailLogs).toHaveLength(0);
+    const dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
+    expect((dateDoc.actions as Record<string, unknown>).summary_sent_at).toEqual(new Date('2026-09-22T17:11:00Z'));
+    logSpy.mockRestore();
   });
 });
 
