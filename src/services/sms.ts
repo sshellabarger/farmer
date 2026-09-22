@@ -54,6 +54,16 @@ export interface SendSmsArgs {
   sent_by?: string | null;
   /** Extra keys on the `messages` row, e.g. { broadcast_id }, { reminder_id }. */
   extra?: Record<string, unknown>;
+  /**
+   * Phase 3 fix: an at-most-once key. When set it becomes the `messages` row
+   * id and the queued row is written with the atomic `create()` instead of
+   * `set()`, so a second send with the same key — from an overlapping
+   * scheduler tick, a retried webhook, anything — fails with
+   * DuplicateSendError BEFORE the provider is called. The log row is the
+   * lock. Deterministic strings only, e.g. `checkin_link:<market_date_id>:<producer_id>`.
+   * Omit it for sends that are meant to repeat (a staff "resend", an OTP).
+   */
+  dedupe_key?: string;
 }
 
 export interface SendSmsResult {
@@ -83,6 +93,37 @@ export class SmsSendError extends Error {
     super(message);
     this.name = 'SmsSendError';
   }
+}
+
+/**
+ * A send with a `dedupe_key` found its `messages` row already present: the
+ * same text was sent (or is being sent) by another caller. Nothing was
+ * written and no provider was called. `existing_message_id` is the row that
+ * holds the lock (equal to the key).
+ */
+export class DuplicateSendError extends Error {
+  readonly code = 'DUPLICATE_SEND';
+  constructor(
+    readonly dedupe_key: string,
+    readonly existing_message_id: string,
+  ) {
+    super(`Duplicate send suppressed: messages/${existing_message_id} already exists for dedupe_key=${dedupe_key}`);
+    this.name = 'DuplicateSendError';
+  }
+}
+
+/**
+ * True when a Firestore write failed because the document already exists —
+ * what `DocumentReference.create()` rejects with. The admin SDK surfaces a
+ * GoogleError with gRPC `code` 6 (ALREADY_EXISTS) and a message that starts
+ * `6 ALREADY_EXISTS: Document already exists: …`; both are recognised so a
+ * wrapped or re-thrown error still counts.
+ */
+export function isAlreadyExists(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: unknown; message?: unknown };
+  if (e.code === 6 || e.code === '6' || e.code === 'ALREADY_EXISTS') return true;
+  return typeof e.message === 'string' && /ALREADY_EXISTS/.test(e.message);
 }
 
 /** Structural guard. Throws SendsDisabledError before any I/O. */
@@ -144,7 +185,10 @@ export function splitMessage(body: string): string[] {
  *   1. `selectSmsProvider` — throws SendsDisabledError before anything is
  *      written or sent;
  *   2. write the `messages` row as `queued` — a failed write throws, so no
- *      text ever goes out unlogged;
+ *      text ever goes out unlogged. With a `dedupe_key` the row id IS the key
+ *      and the write is an atomic `create()`: an existing row means another
+ *      caller owns this send, and DuplicateSendError is thrown here, before
+ *      any provider call (Phase 3 fix — the log row is the lock);
  *   3. send every segment (voip.ms) or print once (console);
  *   4. update the row to `sent` / `simulated`; on failure retry once, then
  *      report to the console and still resolve (the text is out — the
@@ -164,12 +208,12 @@ export async function sendSms(args: SendSmsArgs): Promise<SendSmsResult> {
 
   const chunks = splitMessage(body);
   const now = new Date();
-  const message_id = uuid();
+  const message_id = args.dedupe_key ?? uuid();
   const row = db.collection('messages').doc(message_id);
 
   // (2) Queued row first. `extra` goes first so a caller can never clobber
   // the core fields with it.
-  await row.set({
+  const queued = {
     ...(args.extra ?? {}),
     direction: 'outbound',
     to,
@@ -187,7 +231,19 @@ export async function sendSms(args: SendSmsArgs): Promise<SendSmsResult> {
     user_id: args.user_id ?? null,
     sent_by: args.sent_by ?? null,
     created_at: now,
-  });
+  };
+  if (args.dedupe_key === undefined) {
+    await row.set(queued);
+  } else {
+    // Atomic: two callers racing on the same key cannot both get past here,
+    // whatever they read beforehand. The loser never reaches the provider.
+    try {
+      await row.create(queued);
+    } catch (err) {
+      if (isAlreadyExists(err)) throw new DuplicateSendError(args.dedupe_key, message_id);
+      throw err;
+    }
+  }
 
   // (3) Send.
   let provider_message_id: string;
@@ -227,19 +283,32 @@ export async function sendSms(args: SendSmsArgs): Promise<SendSmsResult> {
   return { message_id, provider, provider_message_id, status, segments: chunks.length };
 }
 
+export type TrySendSmsResult =
+  | ({ ok: true } & SendSmsResult)
+  | {
+      ok: false;
+      /** True when a `dedupe_key` collided: the text already went out (or is going out) under `message_id`. Not a failure. */
+      duplicate: boolean;
+      message_id: string | null;
+      error: string;
+    };
+
 /**
  * `sendSms` that never throws — every failure (SendsDisabledError included)
- * becomes `{ ok: false }` so a webhook or a broadcast loop can carry on.
+ * becomes `{ ok: false }` so a webhook or a broadcast loop can carry on. A
+ * DuplicateSendError comes back as `{ ok: false, duplicate: true }` with the
+ * existing row's id, so callers can count it as "already sent".
  */
-export async function trySendSms(
-  args: SendSmsArgs,
-): Promise<({ ok: true } & SendSmsResult) | { ok: false; message_id: string | null; error: string }> {
+export async function trySendSms(args: SendSmsArgs): Promise<TrySendSmsResult> {
   try {
     const result = await sendSms(args);
     return { ok: true, ...result };
   } catch (err) {
+    if (err instanceof DuplicateSendError) {
+      return { ok: false, duplicate: true, message_id: err.existing_message_id, error: err.message };
+    }
     const error = err instanceof Error ? err.message : String(err);
     const message_id = err instanceof SmsSendError ? err.message_id : null;
-    return { ok: false, message_id, error };
+    return { ok: false, duplicate: false, message_id, error };
   }
 }
