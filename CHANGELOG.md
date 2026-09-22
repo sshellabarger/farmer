@@ -117,6 +117,12 @@ by three adversarial verifiers: no blockers.
   an imported past date is frozen and the six remaining Saturdays are created, twice,
   idempotently. 191 tests. The error notifier's Anthropic call is bounded (15 s, no
   retries) so it can never hold a scheduler invocation open.
+- **Measured while diagnosing:** the failed run's five-segment alert text spent ~2 minutes
+  inside voip.ms (~25 s per segment; the request had no timeout). `src/services/voipms.ts`
+  now aborts a request after 45 s, so a hung provider fails the send (`messages` row
+  `failed`, `SmsSendError`) instead of holding a 120 s function open. Phase 3's engine is
+  briefed to treat every send as interruptible: per-recipient idempotency through the
+  `messages` log and a per-run wall-clock budget.
 - Phase 1 leftovers closed with `gcloud`: only the two expected scheduler jobs remain;
   the orphaned `sendNotification` Cloud Tasks queue is deleted.
 
