@@ -4,7 +4,7 @@ import type { Env } from '../config/env.js';
 import { nextAllowedInstant } from '../utils/quiet-hours.js';
 import { wallClock, parseDate, weekdayOf, DAYS_OF_WEEK } from '../utils/tz.js';
 import { toDate } from '../utils/dates.js';
-import { marketDateFromData } from './market-dates.js';
+import { marketDateFromData, reminderStateKey } from './market-dates.js';
 import type { MarketDateDoc, MarketDateActions, ReminderSent } from './market-dates.js';
 import { DEFAULT_WORKFLOW, DEFAULT_QUIET_HOURS } from './markets.js';
 import type { FarmersMarket } from './markets.js';
@@ -19,14 +19,25 @@ import { sendEmail } from './email.js';
  * deadline flagging and the staff summary, all quiet-hours aware and
  * idempotent across overlapping 5-minute scheduler ticks.
  *
- * Concurrency (Phase 3 fix). Two things make overlapping runs safe, and
- * neither is a read-then-write:
+ * Concurrency (Phase 3 fix, rounds 1 and 2). Three things make overlapping
+ * runs safe, and none is a read-then-write:
  *   1. every step takes an atomic lock — `workflow_locks/<date_id>__<key>`
  *      written with `DocumentReference.create()`, which fails with
  *      ALREADY_EXISTS when the doc is there (`claim()` below);
  *   2. every engine send carries a deterministic `dedupe_key`, so `sendSms`
  *      creates its `messages` row atomically and a second attempt is refused
- *      before the provider is called (`DuplicateSendError`).
+ *      before the provider is called (`DuplicateSendError`);
+ *   3. THE ENGINE NEVER WRITES THE `actions` MAP, ONLY FIELDS INSIDE IT
+ *      (round 2). Every write names Firestore field paths —
+ *      `'actions.checkin_sent_at'`, `'actions.claims.<key>'`,
+ *      `'actions.reminder_state.offset_<n>'`, … — so two runs holding
+ *      DIFFERENT step locks in the same tick, or the admin close (which takes
+ *      no lock), write disjoint paths and the last writer cannot drop the
+ *      other's outcome. Round 1 rewrote the whole map from the snapshot taken
+ *      in `claim()`; that lost a concurrent run's "superseded" decision (and
+ *      re-sent the reminder a tick later) and cleared a concurrent close's
+ *      flags (and re-emailed the summary at the deadline). `claim()` no
+ *      longer even hands a snapshot back, so no step can spread one.
  * The `actions.claims[key]` map on the market_date is still written for the
  * status page, but it is informational only — it is no longer the guard.
  */
@@ -39,11 +50,30 @@ export const SCAN_WINDOW_MS = 7 * 24 * 60 * 60_000;
  */
 export const CLAIM_TTL_MS = 10 * 60_000;
 
-/** Deterministic at-most-once keys for every engine send (contract §2.4's per-recipient dedupe, made atomic). */
+/**
+ * Deterministic at-most-once keys for every engine send (contract §2.4's
+ * per-recipient dedupe, made atomic). ':' is the separator, so the keys are
+ * injective only because no part can contain it: market slugs match
+ * /^[a-z0-9][a-z0-9-]{1,31}$/ (src/services/markets.ts), a market_date id is
+ * `<slug>_<YYYY-MM-DD>`, producer and user ids are uuid v4 (short
+ * alphanumerics in tests) and an offset is an integer. `keyPart` makes that
+ * guarantee explicit rather than assumed: a part containing ':' throws
+ * instead of minting a key that another recipient's key could equal.
+ */
+function keyPart(value: string | number, what: string): string {
+  const s = String(value);
+  if (s.length === 0 || s.includes(':')) {
+    throw new Error(`dedupe key part ${what} must be non-empty and contain no ':' (got ${JSON.stringify(s)})`);
+  }
+  return s;
+}
 export const DEDUPE_KEYS = {
-  checkin_link: (marketDateId: string, producerId: string) => `checkin_link:${marketDateId}:${producerId}`,
-  checkin_reminder: (marketDateId: string, producerId: string, offsetMin: number) => `checkin_reminder:${marketDateId}:${producerId}:${offsetMin}`,
-  deadline_summary: (marketDateId: string, userId: string) => `deadline_summary:${marketDateId}:${userId}`,
+  checkin_link: (marketDateId: string, producerId: string) =>
+    `checkin_link:${keyPart(marketDateId, 'market_date_id')}:${keyPart(producerId, 'producer_id')}`,
+  checkin_reminder: (marketDateId: string, producerId: string, offsetMin: number) =>
+    `checkin_reminder:${keyPart(marketDateId, 'market_date_id')}:${keyPart(producerId, 'producer_id')}:${keyPart(offsetMin, 'offset_min')}`,
+  deadline_summary: (marketDateId: string, userId: string) =>
+    `deadline_summary:${keyPart(marketDateId, 'market_date_id')}:${keyPart(userId, 'user_id')}`,
 } as const;
 
 export interface EngineResult {
@@ -388,9 +418,7 @@ async function buildDeadlineSummaryEmail(
 
 /**
  * Sends the staff deadline-summary text (to every `staffForMarket` phone)
- * and, when `env.ALERT_EMAIL` is set, one email. Never throws for a
- * disabled email provider (SendsDisabledError is swallowed); any other
- * error propagates so the caller's claim is not mistaken for success.
+ * and, when `env.ALERT_EMAIL` is set, one email.
  *
  * Every text carries `DEDUPE_KEYS.deadline_summary(date, user)`, so a staff
  * member gets at most one summary per date however many runs (or an admin
@@ -398,6 +426,15 @@ async function buildDeadlineSummaryEmail(
  * `duplicates`, not `sms`. The email has no log row and therefore no atomic
  * guard: `opts.email` lets the engine send it only from the run that created
  * the summary lock (see the summary step) — a stale-lock takeover skips it.
+ *
+ * The email never throws (round 2): a disabled provider (SendsDisabledError)
+ * is silent, and any other failure — Resend down, a bad key, a read that
+ * failed while building the body — is logged with console.error and comes
+ * back as `email: false`, so the caller still completes its step. The texts
+ * are the authoritative channel and are atomic; a lost email is a logged
+ * degradation, whereas round 1 let it propagate, which left `summary_sent_at`
+ * unset with the summary lock held and, because a takeover never emails,
+ * meant the email was never sent at all.
  */
 export async function sendDeadlineSummary(
   db: Firestore,
@@ -447,7 +484,9 @@ export async function sendDeadlineSummary(
       await sendEmail({ env, to: env.ALERT_EMAIL, subject, message });
       emailSent = true;
     } catch (err) {
-      if (!(err instanceof SendsDisabledError)) throw err;
+      if (!(err instanceof SendsDisabledError)) {
+        console.error(`Deadline summary email not sent for ${date.id} (${market.id}); the ${smsCount + duplicates} staff texts are the record`, err);
+      }
     }
   }
 
@@ -475,6 +514,10 @@ async function computeDeadlineStats(
  * always writes the non-responder flags and counts; sends the staff summary
  * immediately (no quiet-hours deferral — a manual admin act) only when
  * `notify`. Zero recipients always skips the summary regardless of `notify`.
+ *
+ * Writes field paths only, never the `actions` map: the engine may be inside
+ * a check-in or reminder loop on this very date, and its own field-path
+ * writes and these commute (round 2 — see the file comment).
  */
 export async function processDeadline(
   db: Firestore,
@@ -485,34 +528,27 @@ export async function processDeadline(
 ): Promise<{ recipients: number; responded: number; non_responders: string[]; summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed' }> {
   const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
   const ref = db.collection('market_dates').doc(date.id);
-  const freshSnap = await ref.get();
-  const fresh = freshSnap.exists ? marketDateFromData(freshSnap.id, freshSnap.data() as Record<string, unknown>) : date;
 
   const baseUpdate: Record<string, unknown> = {
     non_responders: nonResponderIds,
     spot_not_held: nonResponderIds,
     deadline_recipient_count: recipients.length,
     deadline_responded_count: responded.length,
+    'actions.deadline_processed_at': opts.now,
     updated_at: opts.now,
   };
 
   if (recipients.length === 0) {
-    await ref.update({
-      ...baseUpdate,
-      actions: { ...fresh.actions, deadline_processed_at: opts.now, summary_sent_at: null, summary_skipped: 'no_recipients' },
-    });
+    await ref.update({ ...baseUpdate, 'actions.summary_sent_at': null, 'actions.summary_skipped': 'no_recipients' });
     return { recipients: 0, responded: 0, non_responders: nonResponderIds, summary: 'skipped_no_recipients' };
   }
 
   if (!opts.notify) {
-    await ref.update({
-      ...baseUpdate,
-      actions: { ...fresh.actions, deadline_processed_at: opts.now, summary_skipped: 'notify_false' },
-    });
+    await ref.update({ ...baseUpdate, 'actions.summary_skipped': 'notify_false' });
     return { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds, summary: 'skipped_notify_false' };
   }
 
-  await ref.update({ ...baseUpdate, actions: { ...fresh.actions, deadline_processed_at: opts.now } });
+  await ref.update(baseUpdate);
   try {
     await sendDeadlineSummary(
       db,
@@ -522,7 +558,7 @@ export async function processDeadline(
       { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds },
       { now: opts.now },
     );
-    await ref.update({ actions: { ...fresh.actions, deadline_processed_at: opts.now, summary_sent_at: opts.now } });
+    await ref.update({ 'actions.summary_sent_at': opts.now, updated_at: opts.now });
     return { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds, summary: 'sent' };
   } catch {
     return { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds, summary: 'failed' };
@@ -536,7 +572,6 @@ type ClaimResult =
   | { status: 'claimed' }
   | {
       status: 'proceed';
-      fresh: MarketDateDoc;
       /** True when this run created the lock; false when it took over a stale one. */
       created: boolean;
     };
@@ -558,15 +593,18 @@ export function workflowLockId(dateId: string, key: string): string {
  *    older → the owner died (the function times out at 300 s) and this run
  *    takes the lock over with `set()`.
  * 3. The informational `actions.claims[key]` on the market_date is written
- *    as before for the status page. It is no longer the guard.
+ *    as a field path for the status page. It is no longer the guard, and the
+ *    snapshot read in (1) is deliberately NOT returned: a step must never
+ *    write from it (round 2).
  *
  * Residual race, documented: the takeover in (2) is itself read-then-write,
  * so two runs arriving together at a lock that is already stale can both
  * proceed. That is harmless — every send under the lock is atomic on its
  * own `dedupe_key` (a duplicate never reaches the provider) and every flag
- * write is idempotent — except for the summary *email*, which has no log
- * row; the summary step therefore emails only from the run that created the
- * lock (`created: true`), never from a takeover. Locks are never cleared.
+ * write is a field path carrying the same value — except for the summary
+ * *email*, which has no log row; the summary step therefore emails only from
+ * the run that created the lock (`created: true`), never from a takeover.
+ * Locks are never cleared.
  */
 async function claim(
   db: Firestore,
@@ -604,14 +642,16 @@ async function claim(
     });
   }
 
-  await ref.update({
-    actions: { ...fresh.actions, claims: { ...(fresh.actions.claims ?? {}), [key]: now } },
-    updated_at: now,
-  });
-  return { status: 'proceed', fresh, created };
+  await ref.update({ [`actions.claims.${key}`]: now, updated_at: now });
+  return { status: 'proceed', created };
 }
 
-/** Sends (or marks superseded) a single reminder offset, under its own claim. */
+/**
+ * Sends (or marks superseded) a single reminder offset, under its own claim.
+ * `claimed` is true when another live run holds this offset's lock (counted
+ * in `skipped_claimed`); a step another run has already finished is `done`
+ * and counts as nothing.
+ */
 async function processReminderOffset(
   db: Firestore,
   env: Env,
@@ -620,10 +660,10 @@ async function processReminderOffset(
   offsetMin: number,
   mode: 'superseded' | 'send',
   now: Date,
-): Promise<{ sent: number }> {
+): Promise<{ sent: number; claimed: boolean }> {
   const key = `reminder_${offsetMin}`;
   const c = await claim(db, date.id, key, now, (a) => a.reminders_sent.some((r) => r.offset_min === offsetMin));
-  if (c.status !== 'proceed') return { sent: 0 };
+  if (c.status !== 'proceed') return { sent: 0, claimed: c.status === 'claimed' };
 
   let entry: ReminderSent;
   if (mode === 'superseded') {
@@ -661,12 +701,15 @@ async function processReminderOffset(
     entry = { offset_min: offsetMin, sent_at: now, recipients: sent, failed, skipped: null };
   }
 
-  const claims = { ...(c.fresh.actions.claims ?? {}), [key]: now };
+  // This offset's outcome on its own field path: a run holding a different
+  // reminder lock writes a different path, so neither can drop the other's
+  // decision. Readers see the offset-sorted `reminders_sent` array that
+  // marketDateFromData derives from this map.
   await db.collection('market_dates').doc(date.id).update({
-    actions: { ...c.fresh.actions, claims, reminders_sent: [...c.fresh.actions.reminders_sent, entry] },
+    [`actions.reminder_state.${reminderStateKey(offsetMin)}`]: entry,
     updated_at: now,
   });
-  return { sent: mode === 'send' ? entry.recipients : 0 };
+  return { sent: mode === 'send' ? entry.recipients : 0, claimed: false };
 }
 
 /**
@@ -682,9 +725,9 @@ async function processRemindersStep(
   date: MarketDateDoc,
   schedule: DateSchedule,
   now: Date,
-): Promise<{ sent: number }> {
-  if (!date.actions.checkin_sent_at) return { sent: 0 };
-  if (schedule.deadline_at.getTime() <= now.getTime()) return { sent: 0 };
+): Promise<{ sent: number; claimed: number }> {
+  if (!date.actions.checkin_sent_at) return { sent: 0, claimed: 0 };
+  if (schedule.deadline_at.getTime() <= now.getTime()) return { sent: 0, claimed: 0 };
 
   const sentOffsets = new Set(date.actions.reminders_sent.map((r) => r.offset_min));
   const checkinSentAt = date.actions.checkin_sent_at;
@@ -706,14 +749,17 @@ async function processRemindersStep(
   const multiSuperseded = dueOffsets.slice(0, -1);
 
   let sentTotal = 0;
+  let claimedTotal = 0;
   for (const offset of [...lateSuperseded, ...multiSuperseded].sort((a, b) => a - b)) {
-    await processReminderOffset(db, env, market, date, offset, 'superseded', now);
+    const r = await processReminderOffset(db, env, market, date, offset, 'superseded', now);
+    if (r.claimed) claimedTotal++;
   }
   if (winner !== undefined) {
-    const { sent } = await processReminderOffset(db, env, market, date, winner, 'send', now);
-    sentTotal += sent;
+    const r = await processReminderOffset(db, env, market, date, winner, 'send', now);
+    sentTotal += r.sent;
+    if (r.claimed) claimedTotal++;
   }
-  return { sent: sentTotal };
+  return { sent: sentTotal, claimed: claimedTotal };
 }
 
 /** contract §3.2/§3.1 — one scan of every `collecting` date within the 7-day window. */
@@ -784,9 +830,10 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
             else if (send.status === 'duplicate') continue; // another run already sent it: skipped, not failed
             else sentCount++;
           }
-          const claims = { ...(c.fresh.actions.claims ?? {}), checkin: now };
           await db.collection('market_dates').doc(date.id).update({
-            actions: { ...c.fresh.actions, claims, checkin_sent_at: now, checkin_recipients: recipients.length, checkin_failed: failedCount },
+            'actions.checkin_sent_at': now,
+            'actions.checkin_recipients': recipients.length,
+            'actions.checkin_failed': failedCount,
             updated_at: now,
           });
           result.checkin_sent += sentCount;
@@ -797,8 +844,9 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
       {
         const snap = await db.collection('market_dates').doc(date.id).get();
         const fresh = marketDateFromData(snap.id, snap.data() as Record<string, unknown>);
-        const { sent } = await processRemindersStep(db, env, market, fresh, schedule, now);
+        const { sent, claimed } = await processRemindersStep(db, env, market, fresh, schedule, now);
         result.reminders_sent += sent;
+        result.skipped_claimed += claimed;
       }
 
       // ── Deadline ─────────────────────────────────────────────────────
@@ -810,21 +858,19 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
           if (c.status === 'claimed') result.skipped_claimed++;
           if (c.status === 'proceed') {
             const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
-            const claims = { ...(c.fresh.actions.claims ?? {}), deadline: now };
-            const actions: MarketDateActions = {
-              ...c.fresh.actions,
-              claims,
-              deadline_processed_at: now,
-              ...(recipients.length === 0 ? { summary_sent_at: null, summary_skipped: 'no_recipients' as const } : {}),
-            };
-            await db.collection('market_dates').doc(date.id).update({
+            const update: Record<string, unknown> = {
               non_responders: nonResponderIds,
               spot_not_held: nonResponderIds,
               deadline_recipient_count: recipients.length,
               deadline_responded_count: responded.length,
-              actions,
+              'actions.deadline_processed_at': now,
               updated_at: now,
-            });
+            };
+            if (recipients.length === 0) {
+              update['actions.summary_sent_at'] = null;
+              update['actions.summary_skipped'] = 'no_recipients';
+            }
+            await db.collection('market_dates').doc(date.id).update(update);
             result.deadlines_processed += 1;
           }
         }
@@ -851,10 +897,13 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
             // it; a stale-lock takeover (the creator died after claiming)
             // re-sends the texts (all refused as duplicates if they went out)
             // but never the email — a possibly missing email beats a double
-            // one. Residual window: a creator that died after emailing but
-            // before writing summary_sent_at leaves the email sent once and
-            // the flag written by the takeover; a creator that died before
-            // emailing leaves no email at all (the texts still go out).
+            // one. An email failure is logged inside sendDeadlineSummary and
+            // does not stop this step: summary_sent_at is still written, so
+            // the lock is not held open over a lost email. Residual window: a
+            // creator that died after emailing but before writing
+            // summary_sent_at leaves the email sent once and the flag written
+            // by the takeover; a creator that died before emailing leaves no
+            // email at all (the texts still go out).
             await sendDeadlineSummary(
               db,
               env,
@@ -863,11 +912,7 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
               { recipients: recipientsCount, responded: respondedCount, non_responders: nonResponders },
               { now, email: c.created },
             );
-            const claims = { ...(c.fresh.actions.claims ?? {}), summary: now };
-            await db.collection('market_dates').doc(date.id).update({
-              actions: { ...c.fresh.actions, claims, summary_sent_at: now },
-              updated_at: now,
-            });
+            await db.collection('market_dates').doc(date.id).update({ 'actions.summary_sent_at': now, updated_at: now });
             result.summaries_sent += 1;
           }
         }

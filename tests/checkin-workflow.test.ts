@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fakeDb } from './helpers/fake-db.js';
 import { processMarketDates, computeSchedule, listRecipients, TEMPLATES } from '../src/services/checkin-workflow.js';
+import { marketDateFromData } from '../src/services/market-dates.js';
 import { DEFAULT_WORKFLOW, DEFAULT_QUIET_HOURS } from '../src/services/markets.js';
 import type { FarmersMarket } from '../src/services/markets.js';
 import { splitMessage } from '../src/services/sms.js';
@@ -175,6 +176,11 @@ function kindMessages(db: ReturnType<typeof fakeDb>, kind: string) {
   return Object.values(db.dump('messages')).filter((m) => (m as Record<string, unknown>).kind === kind) as Record<string, unknown>[];
 }
 
+/** The derived `reminders_sent` every reader sees: the engine stores one `actions.reminder_state.offset_<n>` field per offset. */
+function remindersSentOf(db: ReturnType<typeof fakeDb>, id: string) {
+  return marketDateFromData(id, db.dump('market_dates')[id]! as Record<string, unknown>).actions.reminders_sent;
+}
+
 describe('processMarketDates — Saturday timeline (wlrfm)', () => {
   it('checkin -> reminders -> deadline -> summary, idempotent on repeat runs', async () => {
     const db = seed();
@@ -240,9 +246,7 @@ describe('processMarketDates — Saturday timeline (wlrfm)', () => {
     expect(reminderMsgs).toHaveLength(1);
     expect(reminderMsgs[0]!.producer_id).toBe('p2');
     expect(reminderMsgs[0]!.offset_min).toBe(1440);
-    dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
-    actions = dateDoc.actions as Record<string, unknown>;
-    let remindersSent = actions.reminders_sent as Record<string, unknown>[];
+    let remindersSent = remindersSentOf(db, 'wlrfm_2026-09-19');
     expect(remindersSent).toHaveLength(1);
     expect(remindersSent[0]).toMatchObject({ offset_min: 1440, recipients: 1, failed: 0, skipped: null });
     const p2TokenCountAfter1 = Object.values(db.dump('link_tokens')).filter((t) => (t as Record<string, unknown>).producer_id === 'p2').length;
@@ -251,9 +255,7 @@ describe('processMarketDates — Saturday timeline (wlrfm)', () => {
     await processMarketDates(db as never, env, { now: new Date('2026-09-21T17:00:00Z') });
     reminderMsgs = kindMessages(db, 'checkin_reminder');
     expect(reminderMsgs).toHaveLength(2);
-    dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
-    actions = dateDoc.actions as Record<string, unknown>;
-    remindersSent = actions.reminders_sent as Record<string, unknown>[];
+    remindersSent = remindersSentOf(db, 'wlrfm_2026-09-19');
     expect(remindersSent).toHaveLength(2);
     expect(remindersSent[1]).toMatchObject({ offset_min: 2880, recipients: 1 });
 
@@ -330,7 +332,7 @@ describe('processMarketDates — late-deploy supersede', () => {
     const dateDoc = db.dump('market_dates')['wlrfm_2026-09-19']! as Record<string, unknown>;
     const actions = dateDoc.actions as Record<string, unknown>;
     expect(actions.checkin_sent_at).toEqual(new Date('2026-09-21T20:00:00Z'));
-    const remindersSent = actions.reminders_sent as Record<string, unknown>[];
+    const remindersSent = remindersSentOf(db, 'wlrfm_2026-09-19');
     expect(remindersSent).toHaveLength(2);
     expect(remindersSent.every((r) => r.skipped === 'superseded')).toBe(true);
     expect(kindMessages(db, 'checkin_reminder')).toHaveLength(0);

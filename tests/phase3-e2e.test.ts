@@ -15,7 +15,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { fakeDb } from './helpers/fake-db.js';
 import { processMarketDates } from '../src/services/checkin-workflow.js';
-import { generateMarketDates } from '../src/services/market-dates.js';
+import { generateMarketDates, marketDateFromData } from '../src/services/market-dates.js';
 import { DEFAULT_WORKFLOW, DEFAULT_QUIET_HOURS } from '../src/services/markets.js';
 import type { FarmersMarket } from '../src/services/markets.js';
 import { signJwt } from '../src/utils/jwt.js';
@@ -228,14 +228,16 @@ describe('Phase 3 end-to-end — one producer who answers', () => {
     const r2 = await tick(db, T_REMINDER_1);
     expect(r2).toMatchObject({ reminders_sent: 0, errors: [] });
     expect(rowsOfKind(db, 'checkin_reminder')).toHaveLength(0);
+    // What every reader sees: reminders_sent derived from the per-offset reminder_state fields the engine writes.
+    const remindersSent = () => marketDateFromData(DATE_ID, dateDoc()).actions.reminders_sent;
+    expect(remindersSent()).toEqual([{ offset_min: 1440, sent_at: T_REMINDER_1, recipients: 0, failed: 0, skipped: null }]);
     let actions = dateDoc().actions as Record<string, unknown>;
-    expect(actions.reminders_sent).toEqual([{ offset_min: 1440, sent_at: T_REMINDER_1, recipients: 0, failed: 0, skipped: null }]);
+    expect(Object.keys(actions.reminder_state as Record<string, unknown>)).toEqual(['offset_1440']);
 
     now(T_REMINDER_2);
     await tick(db, T_REMINDER_2);
     expect(rowsOfKind(db, 'checkin_reminder')).toHaveLength(0);
-    actions = dateDoc().actions as Record<string, unknown>;
-    expect((actions.reminders_sent as unknown[]).map((r) => (r as { offset_min: number }).offset_min)).toEqual([1440, 2880]);
+    expect(remindersSent().map((r) => r.offset_min)).toEqual([1440, 2880]);
 
     // ── Deadline: flags written, one summary to the admin ────────────────
     now(T_DEADLINE);

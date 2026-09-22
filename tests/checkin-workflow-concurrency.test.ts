@@ -9,12 +9,14 @@
 //      written with create() — the log row is the lock, so a duplicate can
 //      never reach the provider.
 // The staff resend is an intentional second text and carries no key.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import type { Firestore } from 'firebase-admin/firestore';
 import { fakeDb } from './helpers/fake-db.js';
 import { tokenFor } from './helpers/staff-auth.js';
-import { processMarketDates, DEDUPE_KEYS, workflowLockId } from '../src/services/checkin-workflow.js';
+import { processMarketDates, DEDUPE_KEYS, workflowLockId, CLAIM_TTL_MS } from '../src/services/checkin-workflow.js';
+import { marketDateFromData } from '../src/services/market-dates.js';
 import { sendSms, trySendSms, DuplicateSendError, isAlreadyExists } from '../src/services/sms.js';
 import { sendSms as voipmsSend } from '../src/services/voipms.js';
 import { marketDateRoutes } from '../src/routes/market-dates.js';
@@ -118,11 +120,13 @@ const run = (db: Db, now: Date) => processMarketDates(asFirestore(db), env, { no
 const concurrent = (db: Db, now: Date, n: number) => Promise.all(Array.from({ length: n }, () => run(db, now)));
 
 /**
- * Count the `market_dates` updates that TRANSITION a flag from unset to set
- * (every engine update rewrites the whole `actions` map, so a later write
- * carrying the flag forward is not a second "set"). The proof that a flag is
- * set once, independent of the value — concurrent runs at the same tick all
- * write the same `now`, so comparing values would prove nothing.
+ * Count the `market_dates` updates that TRANSITION a flag from unset to set.
+ * Shape-agnostic: the round-2 engine writes field paths
+ * (`'actions.checkin_sent_at'`), the round-1 engine rewrote the whole map
+ * (`actions: {…}`); counting either lets one assertion prove a flag is set
+ * exactly once against both. The value is deliberately not compared —
+ * concurrent runs at the same tick all write the same `now`, so comparing
+ * values would prove nothing.
  */
 function countFlagWrites(db: Db) {
   const counts = { checkin_sent_at: 0, deadline_processed_at: 0, summary_sent_at: 0, non_responders: 0 };
@@ -139,7 +143,8 @@ function countFlagWrites(db: Db) {
         const prevActions = (prev.actions ?? {}) as Record<string, unknown>;
         const actions = (data.actions ?? {}) as Record<string, unknown>;
         for (const flag of ['checkin_sent_at', 'deadline_processed_at', 'summary_sent_at'] as const) {
-          if (actions[flag] && !prevActions[flag]) counts[flag]++;
+          const written = data[`actions.${flag}`] ?? actions[flag];
+          if (written && !prevActions[flag]) counts[flag]++;
         }
         if ('non_responders' in data && !('non_responders' in prev)) counts.non_responders++;
         return update(data);
@@ -159,10 +164,90 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 const smsPrints = () => logSpy.mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('[sms:console]')).length;
 const emailPrints = () => logSpy.mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('[email:console]')).length;
+
+/** The staff routes over the same fake db; rbac is mocked above the way every staff route test does it. */
+async function buildRoutes(db: Db) {
+  const app = Fastify();
+  app.decorate('db', db as never);
+  app.decorate('env', env as never);
+  await app.register(marketDateRoutes, { prefix: '/api/market-dates' });
+  await app.ready();
+  return app;
+}
+
+// ─── Interleaving helpers (round 2) ─────────────────────────────────────────
+//
+// A run is tagged through AsyncLocalStorage so a gate can single out ONE run's
+// write while another run overlaps it — the fake db is in-memory and every
+// await is a real suspension point, so this is a faithful interleave.
+
+const runName = new AsyncLocalStorage<string>();
+const namedRun = (name: string, db: Db, now: Date) => runName.run(name, () => run(db, now));
+
+/**
+ * True when a `market_dates` update carries the outcome of reminder offset
+ * N — in either shape: the round-1 whole-map array (`actions.reminders_sent`
+ * containing the offset) or the round-2 field path
+ * (`actions.reminder_state.offset_<N>`). Shape-agnostic so the gated cases
+ * below reproduce against the round-1 engine too.
+ */
+function carriesReminderOffset(data: Record<string, unknown>, offset: number): boolean {
+  if (`actions.reminder_state.offset_${offset}` in data) return true;
+  const actions = data.actions as { reminders_sent?: { offset_min: number }[] } | undefined;
+  return Array.isArray(actions?.reminders_sent) && actions.reminders_sent.some((r) => r.offset_min === offset);
+}
+
+/**
+ * Suspend the first `update()` on `collectionName` that `match` accepts until
+ * `release()` is called; `reached` resolves the moment that write arrives.
+ * Composes with the other wrappers in this file (each rebinds db.collection).
+ */
+function gateUpdate(db: Db, collectionName: string, match: (id: string, data: Record<string, unknown>) => boolean) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  let arrived!: () => void;
+  const reached = new Promise<void>((r) => {
+    arrived = r;
+  });
+  let armed = true;
+  const collection = db.collection.bind(db);
+  db.collection = (name: string) => {
+    const col = collection(name);
+    if (name !== collectionName) return col;
+    const doc = col.doc.bind(col);
+    col.doc = (id?: string) => {
+      const ref = doc(id);
+      const update = ref.update.bind(ref);
+      ref.update = async (data) => {
+        if (armed && match(ref.id, data)) {
+          armed = false;
+          arrived();
+          await gate;
+        }
+        return update(data);
+      };
+      return ref;
+    };
+    return col;
+  };
+  return { reached, release };
+}
+
+/** What every reader (the status route, the web page, isDateDecided) sees: the derived, offset-sorted array. */
+const remindersState = (db: Db) =>
+  marketDateFromData(DATE_ID, db.dump('market_dates')[DATE_ID]! as Record<string, unknown>).actions.reminders_sent.map((r) => ({
+    offset_min: r.offset_min,
+    recipients: r.recipients,
+    failed: r.failed,
+    skipped: r.skipped,
+  }));
 
 describe('(a) the verifier\'s reproduction — two concurrent runs at the same tick, two recipients', () => {
   it('sends exactly one checkin_link per producer and sets checkin_sent_at once', async () => {
@@ -239,9 +324,10 @@ describe('(b) five concurrent runs on every tick of a 10-recipient date', () => 
     expect(date.deadline_recipient_count).toBe(10);
     expect(date.deadline_responded_count).toBe(0);
     expect(writes).toEqual({ checkin_sent_at: 1, deadline_processed_at: 1, summary_sent_at: 1, non_responders: 1 });
-    const remindersSent = actions.reminders_sent as Record<string, unknown>[];
+    const remindersSent = remindersState(db); // derived from the per-offset reminder_state fields
     expect(remindersSent.map((r) => r.offset_min)).toEqual([1440, 2880]); // one entry per offset, not one per run
     expect(remindersSent.every((r) => r.recipients === 10 && r.failed === 0 && r.skipped === null)).toBe(true);
+    expect(Object.keys(actions.reminder_state as Record<string, unknown>).sort()).toEqual(['offset_1440', 'offset_2880']); // the stored shape
     expect(actions.summary_sent_at).toEqual(ticks[3]);
 
     // One lock per step; a fifth run of the same tick changes nothing.
@@ -339,15 +425,6 @@ describe('(c) a run that dies after the 3rd of 6 sends', () => {
 });
 
 describe('(d) the staff resend is an intentional second text', () => {
-  async function buildRoutes(db: Db) {
-    const app = Fastify();
-    app.decorate('db', db as never);
-    app.decorate('env', env as never);
-    await app.register(marketDateRoutes, { prefix: '/api/market-dates' });
-    await app.ready();
-    return app;
-  }
-
   it('after the engine\'s keyed text, a resend produces a second (uuid-keyed) row, and a third on repeat', async () => {
     const db = seed(2);
     await run(db, new Date('2026-09-19T18:00:00Z'));
@@ -509,5 +586,178 @@ describe('(f) fake-db DocumentReference.create()', () => {
     const snap = await db.collection('workflow_locks').doc('x').get();
     expect(snap.exists).toBe(true);
     expect(typeof (snap.data()!.claimed_at as { toDate: () => Date }).toDate).toBe('function');
+  });
+});
+
+// ─── Round 2: the adversary's engine-vs-engine and engine-vs-close findings ──
+//
+// Both findings share one root: every step's final write rewrote the WHOLE
+// `actions` map from the snapshot taken in claim(). Two overlapping runs
+// holding DIFFERENT step locks in the same tick (or the admin close, which
+// takes no lock) each write a map that lacks the other's outcome, and the
+// last writer drops it. Round 2 writes only the fields inside `actions`
+// (Firestore dotted paths), so the writes commute.
+
+describe('(g) two runs at a tick where reminder_1440 must be superseded and reminder_2880 sent', () => {
+  const T_CHECKIN = new Date('2026-09-19T18:00:00Z');
+  /** The engine missed the 1440 tick (an outage): both offsets are due together, only the latest is sent. */
+  const T_BOTH_DUE = new Date('2026-09-21T17:00:00Z');
+  /** A check-in sent after the 1440 slot (Sun 12:00 CDT): 1440 is superseded outright, 2880 is due a day later. */
+  const T_LATE_CHECKIN = new Date('2026-09-20T18:00:00Z');
+
+  /** Two recipients, the check-in text already sent (the 1440 slot untouched). */
+  async function seedAfterCheckin(checkinSentAt: Date) {
+    const db = seed(2);
+    await db.collection('market_dates').doc(DATE_ID).update({
+      'actions.checkin_sent_at': checkinSentAt,
+      'actions.checkin_recipients': 2,
+      'actions.checkin_failed': 0,
+      'actions.claims.checkin': checkinSentAt,
+    });
+    await db.collection('workflow_locks').doc(workflowLockId(DATE_ID, 'checkin')).set({ market_date_id: DATE_ID, key: 'checkin', claimed_at: checkinSentAt, run_id: 'earlier', created_at: checkinSentAt });
+    return db;
+  }
+
+  const SETTLED = [
+    { offset_min: 1440, recipients: 0, failed: 0, skipped: 'superseded' },
+    { offset_min: 2880, recipients: 2, failed: 0, skipped: null },
+  ];
+
+  /** Both outcomes recorded, one reminder text per producer, and the ticks that follow — inside and past the lock TTL — send nothing more. */
+  async function expectSettled(db: Db, tick: Date) {
+    expect(remindersState(db)).toEqual(SETTLED);
+    for (const later of [new Date(tick.getTime() + 5 * 60_000), new Date(tick.getTime() + CLAIM_TTL_MS + 60_000)]) {
+      const r = await run(db, later);
+      expect(r.errors).toEqual([]);
+      expect(r.reminders_sent).toBe(0);
+    }
+    const reminders = rowsOfKind(db, 'checkin_reminder');
+    expect(reminders.map((r) => [r.producer_id, r.offset_min]).sort()).toEqual([
+      ['p01', 2880],
+      ['p02', 2880],
+    ]);
+    expect(smsPrints()).toBe(2);
+    expect(remindersState(db)).toEqual(SETTLED);
+    expect(Object.keys(db.dump('workflow_locks')).sort()).toEqual(['checkin', 'reminder_1440', 'reminder_2880'].map((k) => workflowLockId(DATE_ID, k)).sort());
+  }
+
+  it('run concurrently (Promise.all): both outcomes survive and no tick afterwards sends more', async () => {
+    const db = await seedAfterCheckin(T_CHECKIN);
+    const results = await Promise.all([namedRun('A', db, T_BOTH_DUE), namedRun('B', db, T_BOTH_DUE)]);
+    expect(results.flatMap((r) => r.errors)).toEqual([]);
+    expect(results.map((r) => r.reminders_sent).sort()).toEqual([0, 2]);
+    expect(results.reduce((n, r) => n + r.skipped_claimed, 0)).toBeGreaterThanOrEqual(1); // the loser of a reminder lock is counted
+    await expectSettled(db, T_BOTH_DUE);
+  });
+
+  it('gated: run A held between its reminder_1440 claim and its final write while run B completes the 2880 send', async () => {
+    const db = await seedAfterCheckin(T_CHECKIN);
+    const holdA = gateUpdate(db, 'market_dates', (id, data) => id === DATE_ID && runName.getStore() === 'A' && carriesReminderOffset(data, 1440));
+
+    const a = namedRun('A', db, T_BOTH_DUE);
+    await holdA.reached; // A owns the reminder_1440 lock and is about to record "superseded"
+    const rb = await namedRun('B', db, T_BOTH_DUE); // B: 1440 is claimed → skip; 2880 is free → send to both
+    expect(rb.reminders_sent).toBe(2);
+    expect(rb.skipped_claimed).toBe(1);
+    expect(remindersState(db).map((r) => r.offset_min)).toEqual([2880]);
+
+    holdA.release();
+    const ra = await a; // A's write lands AFTER B's; then A finds reminder_2880 already DONE (B finished it before A got there — done, not claimed)
+    expect(ra.errors).toEqual([]);
+    expect(ra.reminders_sent).toBe(0);
+    expect(ra.skipped_claimed).toBe(0);
+    await expectSettled(db, T_BOTH_DUE);
+  });
+
+  it('gated the other way: the 2880 sender writes last from a snapshot taken before the supersede landed', async () => {
+    // The write order that loses the supersede decision: A's "superseded"
+    // lands, then B's final write (from B's claim-time snapshot, which
+    // predates A's write) lands on top of it. Round 1 then re-sent
+    // reminder_1440 on the first tick past the lock TTL.
+    const db = await seedAfterCheckin(T_CHECKIN);
+    const holdA = gateUpdate(db, 'market_dates', (id, data) => id === DATE_ID && runName.getStore() === 'A' && carriesReminderOffset(data, 1440));
+    const holdB = gateUpdate(db, 'market_dates', (id, data) => id === DATE_ID && runName.getStore() === 'B' && carriesReminderOffset(data, 2880));
+
+    const a = namedRun('A', db, T_BOTH_DUE);
+    await holdA.reached; // A holds reminder_1440, its "superseded" write is pending
+    const b = namedRun('B', db, T_BOTH_DUE);
+    await holdB.reached; // B skipped 1440 (claimed), claimed 2880, texted both producers; its final write is pending
+    expect(rowsOfKind(db, 'checkin_reminder')).toHaveLength(2);
+
+    holdA.release();
+    const ra = await a; // A records "superseded", then finds 2880 claimed (B's lock is live, its write still pending)
+    expect(ra.reminders_sent).toBe(0);
+    expect(ra.skipped_claimed).toBe(1); // the loser of a reminder lock is counted (round 2)
+    expect(remindersState(db).map((r) => r.offset_min)).toEqual([1440]);
+
+    holdB.release();
+    const rb = await b; // B's write lands last
+    expect(rb.reminders_sent).toBe(2);
+    await expectSettled(db, T_BOTH_DUE);
+  });
+
+  it('late check-in (checkin_sent_at after the 1440 slot), same two-gate interleave: both entries survive', async () => {
+    const db = await seedAfterCheckin(T_LATE_CHECKIN);
+    const holdA = gateUpdate(db, 'market_dates', (id, data) => id === DATE_ID && runName.getStore() === 'A' && carriesReminderOffset(data, 1440));
+    const holdB = gateUpdate(db, 'market_dates', (id, data) => id === DATE_ID && runName.getStore() === 'B' && carriesReminderOffset(data, 2880));
+
+    const a = namedRun('A', db, T_BOTH_DUE);
+    await holdA.reached;
+    const b = namedRun('B', db, T_BOTH_DUE);
+    await holdB.reached;
+    holdA.release();
+    await a;
+    holdB.release();
+    await b;
+    await expectSettled(db, T_BOTH_DUE);
+  });
+});
+
+describe('(h) an admin close {notify:true} issued while the engine is mid check-in loop', () => {
+  it('both sets of flags survive, exactly one summary email, and the scheduled deadline tick sends nothing more', async () => {
+    const T_CHECKIN = new Date('2026-09-19T18:00:00Z');
+    const T_DEADLINE = new Date('2026-09-22T17:00:00Z');
+    vi.useFakeTimers({ toFake: ['Date'] }); // the close route reads the real clock
+    vi.setSystemTime(T_CHECKIN);
+    const db = seed(3);
+    const app = await buildRoutes(db);
+    const headers = { authorization: `Bearer ${tokenFor('admin1')}` };
+
+    // Hold the engine after its 2nd send: the post-send link_tokens.update({ sent_message_id }) is the 2nd such write.
+    let tokenUpdates = 0;
+    const midLoop = gateUpdate(db, 'link_tokens', () => ++tokenUpdates === 2);
+    const engine = run(db, T_CHECKIN);
+    await midLoop.reached;
+    expect(rowsOfKind(db, 'checkin_link')).toHaveLength(2);
+
+    const close = await app.inject({ method: 'POST', url: `/api/market-dates/${DATE_ID}/close`, headers, payload: { notify: true } });
+    expect(close.statusCode).toBe(200);
+    expect(close.json().result).toMatchObject({ recipients: 3, responded: 0, non_responders: ['p01', 'p02', 'p03'], summary: 'sent' });
+    expect(rowsOfKind(db, 'deadline_summary').map((s) => s.user_id).sort()).toEqual(['admin1', 'mgr_w']);
+    expect(emailPrints()).toBe(1);
+
+    midLoop.release();
+    const r1 = await engine;
+    expect(r1.errors).toEqual([]);
+    expect(r1.checkin_sent).toBe(3);
+    expect(rowsOfKind(db, 'checkin_link')).toHaveLength(3);
+
+    const date = db.dump('market_dates')[DATE_ID]! as Record<string, unknown>;
+    const actions = date.actions as Record<string, unknown>;
+    expect(actions.checkin_sent_at).toEqual(T_CHECKIN);
+    expect(actions.checkin_recipients).toBe(3);
+    expect(actions.deadline_processed_at).toEqual(T_CHECKIN); // the close's flags survive the engine's final write
+    expect(actions.summary_sent_at).toEqual(T_CHECKIN);
+    expect(date.non_responders).toEqual(['p01', 'p02', 'p03']);
+    expect(emailPrints()).toBe(1);
+
+    // The scheduled deadline tick afterwards: nothing left to do, no second summary, no second email.
+    vi.setSystemTime(T_DEADLINE);
+    const r2 = await run(db, T_DEADLINE);
+    expect(r2).toMatchObject({ deadlines_processed: 0, summaries_sent: 0, errors: [] });
+    expect(emailPrints()).toBe(1);
+    expect(rowsOfKind(db, 'deadline_summary')).toHaveLength(2);
+    expect(db.count('messages')).toBe(5); // 3 links + 2 summaries
+    await app.close();
   });
 });

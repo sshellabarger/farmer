@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { Timestamp } from 'firebase-admin/firestore';
 import { fakeDb } from './helpers/fake-db.js';
 import { toDate, toDateOrEpoch, toMillis } from '../src/utils/dates.js';
-import { generateMarketDates, marketDateFromData } from '../src/services/market-dates.js';
+import { generateMarketDates, marketDateFromData, isDateDecided, reminderStateKey } from '../src/services/market-dates.js';
 import type { FarmersMarket } from '../src/services/markets.js';
 
 const market: FarmersMarket = {
@@ -102,6 +102,126 @@ describe('market dates read back from Firestore', () => {
     expect(doc.actions.checkin_sent_at).toBeNull();
     expect(doc.actions.approved_at).toBeNull();
     expect(doc.created_at.getTime()).toBe(end.getTime());
+  });
+
+  it('derives reminders_sent, offset-sorted, from the per-offset reminder_state map the engine writes (round 2)', () => {
+    const at = Timestamp.fromDate(new Date('2026-09-21T17:00:00Z'));
+    const doc = marketDateFromData('wlrfm_2026-09-19', {
+      market_id: 'wlrfm',
+      date: '2026-09-19',
+      status: 'collecting',
+      actions: {
+        reminders_sent: [],
+        reminder_state: {
+          [reminderStateKey(2880)]: { offset_min: 2880, sent_at: at, recipients: 2, failed: 0, skipped: null },
+          [reminderStateKey(1440)]: { offset_min: 1440, sent_at: at, recipients: 0, failed: 0, skipped: 'superseded' },
+        },
+      },
+    });
+    expect(doc.actions.reminders_sent.map((r) => [r.offset_min, r.skipped, r.recipients])).toEqual([
+      [1440, 'superseded', 0],
+      [2880, null, 2],
+    ]);
+    expect(doc.actions.reminders_sent[0]!.sent_at).toEqual(at.toDate());
+    expect(reminderStateKey(1440)).toBe('offset_1440');
+    expect(() => reminderStateKey(1.5)).toThrow();
+
+    // A legacy array alone still reads (no production doc has one; kept for safety).
+    const legacy = marketDateFromData('x', { actions: { reminders_sent: [{ offset_min: 1440, sent_at: at, recipients: 1, failed: 0, skipped: null }] } });
+    expect(legacy.actions.reminders_sent.map((r) => r.offset_min)).toEqual([1440]);
+    // Both present: the map wins for an offset it holds; an offset only the array holds is kept.
+    const both = marketDateFromData('x', {
+      actions: {
+        reminders_sent: [
+          { offset_min: 1440, sent_at: at, recipients: 1, failed: 0, skipped: null },
+          { offset_min: 60, sent_at: at, recipients: 3, failed: 0, skipped: null },
+        ],
+        reminder_state: { offset_1440: { offset_min: 1440, sent_at: at, recipients: 5, failed: 0, skipped: null } },
+      },
+    });
+    expect(both.actions.reminders_sent.map((r) => [r.offset_min, r.recipients])).toEqual([
+      [60, 3],
+      [1440, 5],
+    ]);
+    expect(marketDateFromData('x', { actions: {} }).actions.reminders_sent).toEqual([]);
+    expect(marketDateFromData('x', {}).actions.reminders_sent).toEqual([]);
+  });
+
+  it('isDateDecided freezes a date whose only engine action is a reminder_state entry; informational claims never count', () => {
+    const now = new Date('2026-09-21T18:00:00Z');
+    const base = { market_id: 'wlrfm', date: '2026-09-26', status: 'collecting', end_at: new Date('2026-09-26T17:00:00Z'), actions: {} };
+    const entry = { offset_min: 1440, sent_at: now, recipients: 0, failed: 0, skipped: 'superseded' };
+    expect(isDateDecided(marketDateFromData('x', base), now)).toBe(false);
+    expect(isDateDecided(marketDateFromData('x', { ...base, actions: { reminder_state: { offset_1440: entry } } }), now)).toBe(true);
+    expect(isDateDecided(marketDateFromData('x', { ...base, actions: { reminders_sent: [entry] } }), now)).toBe(true);
+    expect(isDateDecided(marketDateFromData('x', { ...base, actions: { claims: { checkin: now } } }), now)).toBe(false);
+    expect(isDateDecided(marketDateFromData('x', { ...base, actions: { checkin_sent_at: now } }), now)).toBe(true);
+  });
+
+  it('the generator freezes a date the engine touched only through reminder_state, and updates an undecided one by field path', async () => {
+    const day = (date: string, hoursZ: number, plusDays = 0) => new Date(Date.parse(`${date}T${String(hoursZ).padStart(2, '0')}:00:00Z`) + plusDays * 86_400_000);
+    const dateDoc = (date: string, actions: Record<string, unknown>) => ({
+      market_id: 'wlrfm',
+      date,
+      start_time: '08:00',
+      end_time: '12:00',
+      start_at: day(date, 13),
+      end_at: day(date, 17),
+      status: 'collecting',
+      schedule_version: 'v1',
+      special: false,
+      note: '',
+      actions: {
+        checkin_sent_at: null,
+        reminders_sent: [],
+        deadline_at: day(date, 17, 3),
+        deadline_processed_at: null,
+        drafts_generated_at: null,
+        approved_at: null,
+        booth_texts_sent_at: null,
+        ...actions,
+      },
+      extra_questions: [],
+      sponsor_id: null,
+      cancellation_reason: null,
+      cancelled_at: null,
+      cancelled_by: null,
+      generated_at: new Date('2026-09-01T00:00:00Z'),
+      source: 'generator',
+      created_at: new Date('2026-09-01T00:00:00Z'),
+      updated_at: new Date('2026-09-01T00:00:00Z'),
+    });
+    const superseded = { offset_min: 1440, sent_at: new Date('2026-10-04T17:00:00Z'), recipients: 0, failed: 0, skipped: 'superseded' };
+    const db = fakeDb({
+      market_dates: {
+        'wlrfm_2026-10-03': dateDoc('2026-10-03', { reminder_state: { offset_1440: superseded } }),
+        'wlrfm_2026-10-10': dateDoc('2026-10-10', { claims: { checkin: new Date('2026-10-03T18:00:00Z') } }), // informational only → undecided
+      },
+    });
+    // The schedule changes: markets now end at 13:00.
+    const changed: FarmersMarket = { ...market, schedule: { ...market.schedule, versions: [{ ...market.schedule.versions[0]!, end_time: '13:00' }] } };
+    const now = new Date('2026-09-22T08:15:00Z');
+    const r = await generateMarketDates(db as never, changed, { scope: 'window', now, actor: 'scheduler' });
+    // Seven in-season Saturdays in the window (09-19 … 10-31); two exist: one frozen (the engine touched it), one updated.
+    expect(r).toMatchObject({ frozen: 1, updated: 1, created: 5, cancelled: 0 });
+
+    const frozen = db.dump('market_dates')['wlrfm_2026-10-03']! as Record<string, unknown>;
+    expect(frozen.end_time).toBe('12:00'); // untouched, including its actions
+    expect((frozen.actions as Record<string, unknown>).reminder_state).toEqual({ offset_1440: superseded });
+
+    const updated = db.dump('market_dates')['wlrfm_2026-10-10']! as Record<string, unknown>;
+    expect(updated.end_time).toBe('13:00');
+    expect(updated.end_at).toEqual(new Date('2026-10-10T18:00:00Z'));
+    expect(updated.actions).toEqual({
+      checkin_sent_at: null,
+      reminders_sent: [],
+      deadline_at: new Date('2026-10-13T18:00:00Z'), // the one action field the generator owns
+      deadline_processed_at: null,
+      drafts_generated_at: null,
+      approved_at: null,
+      booth_texts_sent_at: null,
+      claims: { checkin: new Date('2026-10-03T18:00:00Z') }, // everything else inside actions is left alone
+    });
   });
 
   it('the nightly roll freezes an imported past date and creates the upcoming Saturdays (the production case)', async () => {
