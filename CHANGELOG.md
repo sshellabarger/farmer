@@ -79,6 +79,25 @@ by three adversarial verifiers: no blockers.
 - Still deferred: D11 (`functions/` subdirectory), S10 Secret Manager (done with the
   owner), D15 page-2 application fields.
 
+### Deployed — 2026-09-22 (~00:25 UTC, from `main` `9298699`)
+- Functions: `api` and `processReminders` updated, `rollMarketDates` created. The CLI
+  loaded `.env` + `.env.arkansaslocalfoodnetwork`, so production sends are enabled
+  (pre-flight resolved `voipms` / `resend` / `ALLOW_REAL_SENDS=true`). Bundle 237 KB.
+- Hosting: 17 static routes released. `/apply` and every `/admin/*` page answer 200;
+  every protected API route answers 401; `POST /api/applications {}` → 400, nothing written.
+- Survey import (D20): `farmers_markets/wlrfm` (Saturdays 08:00–12:00 America/Chicago,
+  2026-04-18 → 2026-10-31), 23 `market_dates`, 39 `producers` (none with a phone number),
+  39 active `producer_memberships`, 508 `checkins` (512 responses; the 4 same-producer,
+  same-Saturday duplicates resolved latest-wins). A second dry run against the live
+  database matched all 39 producers and 23 dates and proposed no writes. `users` and
+  `farms` untouched.
+- CI green on `3843a4d`, `8cd7c34`, `9298699`.
+- Noted, not caused by this deploy: the `reminders` collection went from 6 documents to 0
+  on 2026-09-21 between 12:34:16 and 12:34:22 UTC — six authenticated
+  `DELETE /api/reminders/:id` requests from the settings page (Cloud Logging), i.e. the
+  owner removing test reminders while verifying Phase 1. Confirmed by point-in-time reads
+  (6 at 12:30Z, 0 at 13:00Z).
+
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
 Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8 and D9

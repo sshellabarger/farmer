@@ -13,7 +13,7 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   or later): functions `api` + `processReminders` only; the eleven v1 collections and all
   ten v1 indexes are deleted; hosting serves the transition pages and the SJCA legal pages.
   `main` is what production runs again — deploy from `main` only.
-- **Phase 2 is built and merged (2026-09-21):** `farmers_markets` + `market_dates` with a
+- **Phase 2 is deployed (2026-09-22) and seeded with the 2026 WLRFM survey history:** `farmers_markets` + `market_dates` with a
   versioned schedule and an idempotent generator, roles/audit log, `producers`,
   `producer_memberships`, `applications`, the structural send guard, the admin web app and
   the survey importer. The contract every executor built against is
