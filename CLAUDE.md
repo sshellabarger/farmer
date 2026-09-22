@@ -13,9 +13,17 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   or later): functions `api` + `processReminders` only; the eleven v1 collections and all
   ten v1 indexes are deleted; hosting serves the transition pages and the SJCA legal pages.
   `main` is what production runs again — deploy from `main` only.
-- **Phase 2 is next** (SPEC §8): markets with configurable schedules, producers,
-  applications, admin roles, the `messages` log everywhere, and the console-provider
-  send guard. Nothing from v1 is left to retire.
+- **Phase 2 is built and merged (2026-09-21):** `farmers_markets` + `market_dates` with a
+  versioned schedule and an idempotent generator, roles/audit log, `producers`,
+  `producer_memberships`, `applications`, the structural send guard, the admin web app and
+  the survey importer. The contract every executor built against is
+  `docs/phase2-contract.md`; the changelog has the fold-in. **Phase 3 is next** (SPEC §8):
+  check-in links and texts, reminders, deadline flagging, STOP/HELP, quiet hours.
+- **Production sends are opt-in.** `SMS_PROVIDER`/`EMAIL_PROVIDER` default to `console`;
+  real providers exist only with `NODE_ENV=production` and `ALLOW_REAL_SENDS=true`. Those
+  keys live in `.env.arkansaslocalfoodnetwork` (git-ignored, non-secret), which the
+  Firebase CLI merges over `.env` at deploy and dotenv never reads — so `npm run dev` and
+  tests cannot text anyone even with production credentials in `.env`.
 - Data left in Firestore on purpose: `users` (the admin login), `farms` (D3 — migrated to
   `producers` after Phase 2 testing), `reminders`, `feedback`, `invites`, `error_alerts`,
   and the 17 Storage photos. The pre-Phase-1 export is at
@@ -32,7 +40,7 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
 | Runtime | Node 22, TypeScript 5.7, ESM |
 | API | Fastify 5 built by **`src/app.ts` `buildApp()`**, mounted inside one Firebase Cloud Function v2 `api` (`src/functions.ts`) via `fastify.inject`; `src/server.ts` runs the same app locally |
 | Data | **Firestore** (admin SDK only; `firestore.rules` / `storage.rules` deny all client access). No SQL, no migrations. |
-| Scheduled work | Cloud Scheduler via `onSchedule` — currently only `processReminders` (every 15 min) |
+| Scheduled work | Cloud Scheduler via `onSchedule`: `processReminders` (every 15 min) and `rollMarketDates` (nightly; regenerates each market's rolling date window) |
 | SMS | **voip.ms only** (`src/services/voipms.ts` behind `src/services/sms.ts`). Telnyx and WhatsApp were archived to `archive/v1-channels/`. Cloud Tasks was retired (it never ran in prod). |
 | Inbound texts | `src/services/inbound.ts` — a keyword stopgap (STOP/START/HELP + one courtesy reply per 24 h), logs every message to the `messages` collection. The Phase 3 check-in workflow replaces it. |
 | Email | Resend (`src/services/email.ts`) |
@@ -49,13 +57,15 @@ npm run dev:web        # Next dev server on :3001 (proxies /api to :3000)
 npm run typecheck      # tsc --noEmit (tests/ are not type-checked by this)
 npm test               # vitest run — tests/** only (vitest.config.ts excludes archive/)
 npm run build          # rm -rf dist && tsc   (dist/ is what deploys; the clean step matters)
+npm run import:survey -- --source <path|gs://…> --market wlrfm --dry-run   # Google-Form history → Firestore; add --write to persist
 npm run deploy:functions   # prompts to DELETE functions whose exports are gone (add --force non-interactively); that is how scheduler jobs are removed
 npm run deploy:hosting     # builds web/ via the frameworks integration and ships it, legal pages included
 npm run deploy:firestore   # rules + indexes
 ```
 
 There is no seed script any more. Local tests need a dummy `.env` (git-ignored):
-`ANTHROPIC_API_KEY=test JWT_SECRET=test-secret SMS_PROVIDER=voipms NODE_ENV=test`.
+`ANTHROPIC_API_KEY=test JWT_SECRET=test-secret SMS_PROVIDER=console EMAIL_PROVIDER=console NODE_ENV=test`
+(`tests/setup/test-mode.ts` forces console mode regardless and fails fast otherwise).
 CI (`.github/workflows/ci.yml`) runs typecheck + tests + web typecheck on every push and
 never deploys. Deploys need both `firebase login --reauth` and `gcloud auth login`, and an
 explicit owner go-ahead in the session — never on the strength of an allowlist entry.
@@ -66,13 +76,18 @@ explicit owner go-ahead in the session — never on the strength of an allowlist
 src/app.ts               buildApp(): plugins, error handler (before routes), /health + /api/health, route list
 src/functions.ts         exports: api (onRequest), processReminders (onSchedule)
 src/server.ts            local runner over the same buildApp()
-src/routes/              auth, sms, admin, profile, invite, push, errors, feedback, reminders, uploads
-src/services/            inbound (stopgap), sms + voipms, otp, push, email, error-notify, support-notify, storage, reminders
-src/middleware/rbac.ts   authenticate, requireRole
-src/utils/               jwt, http-error-handler, serialize, sort, errors
+src/routes/              auth, sms, admin, admin-users, audit-log, dashboard, markets, producers, memberships,
+                         applications, checkins, profile, invite, push, errors, feedback, reminders, uploads
+src/services/            sms (+voipms, console) — the ONE logged send; inbound (stopgap), markets, market-dates
+                         (generator), producers, identity, audit, otp, push, email, error-notify, support-notify,
+                         storage, reminders
+src/middleware/          rbac.ts (authenticate, requireRole), market-scope.ts (requireStaff, requireMarketAccess)
+src/utils/               tz (Intl local↔UTC), jwt, http-error-handler, serialize, sort, errors
+scripts/import-survey.mjs   the Google-Form history importer (excluded from the functions bundle)
 src/types/schema.ts      shared string-union types (documentation, not enforcement)
 src/db/firestore.ts      getDb() + the list of collections the code uses
-web/src/app/             /  /changed  /login  /admin  /feedback  /settings
+web/src/app/             /  /changed  /apply (public)  /login  /admin (dashboard)  /admin/markets  /admin/producers
+                         /admin/applications  /admin/users  /feedback  /settings
 archive/                 v1 design package, prototype, postgres-era code, channels, AI harness, web pages, ops log, Firestore schema snapshot
 docs/                    SPEC.md, MONITORING.md
 ```
@@ -96,17 +111,19 @@ docs/                    SPEC.md, MONITORING.md
 - **Never reuse the v1 names `markets`, `farms`, the `market` role or the `/market` URL for
   the new farmers-market meaning.** New collections are `farmers_markets`, `market_dates`,
   `producers` (SPEC §7.7). `farms` and `users` data are untouched until the D3 migration.
-- Tests: vitest in `tests/`; anything that imports a route must `vi.mock` the send
-  functions (`sendSms`, `sendOtp`). `src/config/env.ts` still loads `.env` with
-  `override: true` at import — the structural send guard is Phase 2 (SPEC §7.3).
+- Tests: vitest in `tests/` against `tests/helpers/fake-db.ts` (equality `where`, `limit`,
+  `get/set/update/delete/add`; no `orderBy`/`in`/batch — keep production queries inside
+  that envelope). Sends need no mocking: the console provider is structural.
+- Firestore query envelope: one equality filter at the DB, everything else in memory —
+  `firestore.indexes.json` stays empty by construction.
 
 ## Ground rules
 
 1. **Secrets only in environment variables.** Add every new key to `.env.example` with a
    comment. Never print `.env`, `service-account.json`, or `.claude/settings.local.json`.
-2. **Development must never send real texts or emails.** Until the `SMS_PROVIDER=console`
-   / `ALLOW_REAL_SENDS` guard ships (Phase 2), do not keep production credentials in a
-   dev machine's `.env`.
+2. **Development must never send real texts or emails.** Enforced in code since Phase 2
+   (console providers by default; `ALLOW_REAL_SENDS=true` only in the deploy-time env
+   file). Never set `ALLOW_REAL_SENDS` in a local `.env`.
 3. **Keep `CHANGELOG.md` current** and update `docs/SPEC.md` when a decision changes.
 4. **Commit messages are descriptive, especially for removals:**
    `Retire <what>, replaced by <what>. See tag farmlink-v1-final.`

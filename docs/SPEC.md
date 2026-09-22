@@ -6,7 +6,11 @@
 is retired in production: functions `processRecurringOrders`, `freshnessAlerts` and
 `sendNotification` deleted; `api` and `processReminders` redeployed from the retired code
 base; hosting released with the transition pages and the SJCA legal pages; all ten v1
-composite indexes deleted; the eleven retired collections deleted (§4.6). Phase 2 next.
+composite indexes deleted; the eleven retired collections deleted (§4.6). **Phase 2 built
+and merged 2026-09-21** — markets with configurable schedules, producers and applications,
+roles, the structural test mode, the admin web app and the survey importer
+(`docs/phase2-contract.md`, `CHANGELOG.md`); deploy and the WLRFM history import follow,
+then Phase 3 (check-ins and text reminders).
 Items marked **⚠ OPEN** are proposals with a default, not settled facts.
 
 ---

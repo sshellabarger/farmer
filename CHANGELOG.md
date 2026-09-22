@@ -26,6 +26,59 @@ America/Chicago.
 - The live voip.ms inbound webhook is unauthenticated; the WhatsApp route accepts
   unsigned payloads; the Cloud Tasks queue has never executed.
 
+## [Unreleased] — SJCA rework, Phase 2: markets, producers, applications, roles, test mode, importer (2026-09-21)
+
+Built by five parallel executors against a written contract (`docs/phase2-contract.md`),
+merged as `rework/phase-2` in a green order (19 commits, 83 files, 186 tests) and checked
+by three adversarial verifiers: no blockers.
+
+### Added
+- `farmers_markets` with a versioned, admin-editable schedule — season, weekdays, hours,
+  timezone, skipped and special dates, workflow offsets from the market's end time, quiet
+  hours, extra questions — and `market_dates` materialised by an idempotent generator
+  (`src/services/market-dates.ts`; Intl-based local↔UTC conversion tested across both
+  2026 DST transitions; past or acted-on dates are never rewritten; nightly
+  `rollMarketDates` scheduler).
+- Roles `admin` and `market_manager` with `assigned_market_ids`, `requireMarketAccess`,
+  an `audit_log` of admin actions, admin-user invites by text, `GET /api/dashboard`.
+- `producers` (identity by email, business domain and name key — `emails[]`, `aliases[]`),
+  `producer_memberships` with applied → under_review → approved → active → inactive
+  transitions, `applications` (public, rate-limited `POST /api/applications`; approving
+  upserts the producer by email, never by name), check-in reads.
+- **Structural test mode.** `SMS_PROVIDER` and `EMAIL_PROVIDER` default to `console`; a
+  real provider can be constructed only when `NODE_ENV=production` and
+  `ALLOW_REAL_SENDS=true`, otherwise `sendSms` throws `SendsDisabledError`. Every send —
+  OTP, reminders, broadcasts, invites, inbound replies — goes through the one logged
+  `sendSms` and writes a `messages` row (`status: simulated` in test mode). `env.ts` no
+  longer overrides the process environment from `.env`; a vitest setup file asserts
+  console mode before any test; `GET /api/admin/providers` shows the live configuration.
+- Admin web app: dashboard, markets list and detail with the schedule editor and dates
+  table, producers list and detail, applications inbox, staff users, and the public
+  `/apply` form (page-1 fields; page-2 pending D15). Fully static build.
+- `scripts/import-survey.mjs` (`npm run import:survey -- --source <path|gs://…> --market
+  wlrfm --dry-run|--write`): imports Google-Form weekly-survey history into producers,
+  memberships, market dates and check-ins, idempotently, printing only counts and
+  business names. 57 tests of its own.
+- `docs/phase2-contract.md` (the contract, verbatim) and `docs/phase2/notes-D.md`.
+
+### Changed
+- `authenticate()` rejects `active: false` users; `/api/auth/me` returns
+  `assigned_market_ids`. `trustProxy: true` so rate limiting keys on the real client IP.
+- `firebase.json`: `scripts/` excluded from the functions bundle. CI runs in console test
+  mode. `.env.*` ignored: production sends are enabled by a project-scoped
+  `.env.arkansaslocalfoodnetwork` (non-secret keys) that the Firebase CLI merges at deploy
+  and dotenv never reads.
+
+### Deviations and follow-ups
+- Dashboard `next_date` counts any non-cancelled upcoming date (the contract said
+  `collecting` only) — kept deliberately; revisit when Phase 3 adds the other statuses.
+- Full-collection scans in `GET /api/audit-log` (no `actor_id`), `GET /api/producers` (no
+  `market_id`) and `upsertProducerByEmail` — fine at this scale.
+- Executors A1/A2/B/C's release notes live in the run results, not `docs/phase2/`: an
+  orchestration rule forbade writing there. This entry is the fold-in.
+- Still deferred: D11 (`functions/` subdirectory), S10 Secret Manager (done with the
+  owner), D15 page-2 application fields.
+
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
 Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8 and D9
