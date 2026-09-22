@@ -1,11 +1,15 @@
 // Phase 3 contract §5.1 / §7.2: the inbound upgrade — YES/NO on an open
 // check-in, HELP with a link, forward-to-staff, the unchanged courtesy
-// reply, and STOP/START on both `users` and `producers`.
+// reply, and STOP/START on both `users` and `producers`. Round 2 of the fix:
+// a provider redelivery (same voip.ms id) is idempotent.
+//
+// The clock is pinned (2026-09-20T12:00Z) because the routes read the real
+// clock and the fixtures' tokens expire on 2026-09-25T17:00Z.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import { smsRoutes } from '../src/routes/sms.js';
-import { REPLIES } from '../src/services/inbound.js';
+import { REPLIES, inboundRowId } from '../src/services/inbound.js';
 import { checkinUrl } from '../src/services/open-checkin.js';
 import { sendSms as voipmsSend } from '../src/services/voipms.js';
 import { fakeDb } from './helpers/fake-db.js';
@@ -27,7 +31,8 @@ const ADMIN_PHONE = '+15015550201';
 const MGR_W_PHONE = '+15015550202';
 const MGR_A_PHONE = '+15015550203';
 
-const FUTURE = new Date('2026-09-25T17:00:00Z'); // link_tokens.expires_at, still open
+const NOW = new Date('2026-09-20T12:00:00Z'); // the faked clock every route reads
+const FUTURE = new Date('2026-09-25T17:00:00Z'); // link_tokens.expires_at, still open at NOW
 const PAST = new Date('2020-01-01T00:00:00Z'); // expired
 
 function baseFixtures() {
@@ -112,23 +117,39 @@ async function buildApp(env: Record<string, string>, db: ReturnType<typeof fakeD
 
 const REAL = { SMS_PROVIDER: 'voipms', ALLOW_REAL_SENDS: 'true' };
 
-function inbound(message: string, from: string) {
-  return `from=${from.replace('+', '')}&message=${encodeURIComponent(message)}&id=sms-${Math.random().toString(36).slice(2)}`;
+let seq = 0;
+/**
+ * One voip.ms delivery in the webhook's query/form shape. Every call is a
+ * distinct message (a fresh, counter-based `id`, so two legitimately
+ * different texts in one test never share an id); pass `id` explicitly to
+ * model a REDELIVERY of an earlier message, or `null` for a delivery with no
+ * id at all (the route then falls back to `voipms-<Date.now()>`).
+ */
+function inbound(message: string, from: string, id: string | null = `sms-${++seq}`) {
+  const base = `from=${from.replace('+', '')}&message=${encodeURIComponent(message)}`;
+  return id === null ? base : `${base}&id=${encodeURIComponent(id)}`;
 }
 
 const outbound = (db: ReturnType<typeof fakeDb>) => Object.values(db.dump('messages')).filter((m) => m.direction === 'outbound');
+const inboundRows = (db: ReturnType<typeof fakeDb>) => Object.entries(db.dump('messages')).filter(([, m]) => m.direction === 'inbound');
 const byKind = (db: ReturnType<typeof fakeDb>, kind: string) => outbound(db).filter((m) => m.kind === kind);
 const checkinDoc = (db: ReturnType<typeof fakeDb>, id: string) => db.dump('checkins')[id];
+/** The adversary's reproduction shape: the webhook as a form POST. */
+const post = (app: Awaited<ReturnType<typeof buildApp>>, body: string) =>
+  app.inject({ method: 'POST', url: '/voipms/inbound', payload: body, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
 
 const LINK = checkinUrl(APP_URL, 't1');
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   voipms.mockClear();
   voipms.mockImplementation(async () => 'msg-id');
   vi.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -317,6 +338,94 @@ describe('unknown numbers — unchanged from Phase 1', () => {
 
     expect(outbound(db)).toHaveLength(2);
     expect(outbound(db).map((m) => m.kind).sort()).toEqual(['auto_reply', 'opt_out_confirm']);
+  });
+});
+
+describe('a provider redelivery (the same voip.ms id) is idempotent', () => {
+  it('a free text delivered twice, sequentially and then concurrently: one inbound row, one forward per staff member, one courtesy reply', async () => {
+    const db = seededDb();
+    const app = await buildApp({}, db);
+    const delivery = inbound('running late today', P1_PHONE, 'sms-777');
+
+    expect((await post(app, delivery)).statusCode).toBe(200);
+    expect((await post(app, delivery)).statusCode).toBe(200);
+    const again = await Promise.all([post(app, delivery), post(app, delivery)]);
+    expect(again.map((r) => r.statusCode)).toEqual([200, 200]);
+
+    const rows = inboundRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]![0]).toBe('inbound:sms-777'); // the row id is the provider id
+    expect(rows[0]![1]).toMatchObject({ provider_message_id: 'sms-777', from: P1_PHONE, body: 'running late today' });
+
+    const forwards = byKind(db, 'forwarded_inbound');
+    expect(forwards).toHaveLength(2); // admin1 + mgr_w, once each
+    expect(forwards.map((m) => m.to).sort()).toEqual([ADMIN_PHONE, MGR_W_PHONE].sort());
+    expect(forwards.every((m) => m.inbound_message_id === 'inbound:sms-777')).toBe(true);
+    expect(byKind(db, 'auto_reply')).toHaveLength(1);
+    expect(outbound(db)).toHaveLength(3);
+  });
+
+  it('a redelivered YES records one check-in and one "Got it" reply; a redelivered HELP replies once', async () => {
+    const db = seededDb();
+    const app = await buildApp({}, db);
+    const yes = inbound('YES', P1_PHONE, 'sms-778');
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${yes}` });
+    await Promise.all([post(app, yes), app.inject({ method: 'GET', url: `/voipms/inbound?${yes}` })]);
+
+    expect(inboundRows(db)).toHaveLength(1);
+    expect(checkinDoc(db, `${DATE_ID}_p1`)).toMatchObject({ source: 'sms', attending_next: true, partial: true, submissions: 1 });
+    expect(byKind(db, 'auto_reply')).toHaveLength(1);
+
+    const help = inbound('HELP', P1_PHONE, 'sms-779');
+    await post(app, help);
+    await post(app, help);
+    expect(byKind(db, 'help')).toHaveLength(1);
+    expect(inboundRows(db)).toHaveLength(2);
+  });
+
+  it('two different ids from the same phone are two messages: two rows, two forwards each', async () => {
+    const db = seededDb();
+    const app = await buildApp({}, db);
+    await post(app, inbound('first', P1_PHONE, 'sms-780'));
+    await post(app, inbound('first', P1_PHONE, 'sms-781')); // same text, new id: a new message
+    expect(inboundRows(db).map(([id]) => id).sort()).toEqual(['inbound:sms-780', 'inbound:sms-781']);
+    expect(byKind(db, 'forwarded_inbound')).toHaveLength(4);
+    expect(byKind(db, 'auto_reply')).toHaveLength(1); // the courtesy reply is still once per 24 h
+  });
+
+  it('a delivery with no id twice is two messages (the route\'s voipms-<now> fallback identifies nothing)', async () => {
+    // With the clock pinned, Date.now() is constant: both fallbacks are the
+    // SAME string, which is exactly why the fallback must not be used as the
+    // row id — nothing says these are one message.
+    const db = seededDb();
+    const app = await buildApp({}, db);
+    await post(app, inbound('hello without an id', P1_PHONE, null));
+    await post(app, inbound('hello without an id', P1_PHONE, null));
+    const rows = inboundRows(db);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(([id]) => !id.startsWith('inbound:') && /^[0-9a-f-]{36}$/.test(id))).toBe(true);
+    expect(rows.every(([, m]) => String(m.provider_message_id).startsWith('voipms-'))).toBe(true);
+    expect(byKind(db, 'forwarded_inbound')).toHaveLength(4);
+  });
+
+  it('the same id carrying a different text is not a redelivery: both texts are processed', async () => {
+    const db = seededDb();
+    const app = await buildApp({}, db);
+    await post(app, inbound('hello from p1', P1_PHONE, 'sms-900'));
+    await post(app, inbound('hello from p4', P4_PHONE, 'sms-900'));
+    const rows = inboundRows(db);
+    expect(rows).toHaveLength(2);
+    expect(rows.map(([, m]) => m.from).sort()).toEqual([P1_PHONE, P4_PHONE]);
+    expect(byKind(db, 'forwarded_inbound')).toHaveLength(3); // p1 → admin1 + mgr_w; p4 (no membership) → admin1
+  });
+
+  it('inboundRowId: a real provider id is deterministic, the fallback and illegal ids get a uuid', () => {
+    expect(inboundRowId('123456')).toBe('inbound:123456');
+    expect(inboundRowId(' 123456 ')).toBe('inbound:123456');
+    for (const bad of ['voipms-1758369600000', '', '   ', 'a/b', '.', '..', '__x__', 'x'.repeat(1001)]) {
+      expect(inboundRowId(bad)).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    expect(inboundRowId('voipms-1')).not.toBe(inboundRowId('voipms-1'));
   });
 });
 

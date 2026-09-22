@@ -2,13 +2,15 @@ import type { Firestore } from 'firebase-admin/firestore';
 import type { FastifyBaseLogger } from 'fastify';
 import { v4 as uuid } from 'uuid';
 import type { Env } from '../config/env.js';
-import { trySendSms, type SmsKind } from './sms.js';
+import { trySendSms, isAlreadyExists, type SmsKind } from './sms.js';
 import { checkinUrl, findOpenCheckin, recordAttendingNext, staffForMarket, toDate } from './open-checkin.js';
 
 /**
  * Phase 3 inbound handler (SPEC §7.4, Phase 3 contract §5.1).
  *
- * Order: (1) log every inbound text to `messages`; (2) look up a matching
+ * Order: (1) log every inbound text to `messages` — atomically, under a row
+ * id derived from the provider's message id, so a webhook redelivery of the
+ * same text stops right there (see `inboundRowId`); (2) look up a matching
  * `users` row (staff) and a matching `producers` row; (3) STOP/START always
  * reply, on either kind of match, even to an unknown number; (4) for a known
  * producer — HELP (with a check-in link when one is open), YES/NO against an
@@ -50,6 +52,24 @@ const AUTO_REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // A forwarded text's body is capped at 300 chars total, ASCII ellipsis.
 const FORWARD_BODY_MAX = 300;
+
+/**
+ * The `messages` row id for an inbound text (Phase 3 fix, round 2 — the
+ * idempotent webhook). voip.ms sends its own message id with every delivery
+ * and the route passes it through as `providerMessageId`, so a real id
+ * yields the deterministic `inbound:<id>`: a redelivery of the same message
+ * lands on the same row and the atomic `create()` refuses it. The route
+ * falls back to `voipms-<Date.now()>` when the id is absent; that is minted
+ * per delivery and identifies nothing, so it — like anything that is not a
+ * legal Firestore doc id — gets a uuid as before, and two deliveries without
+ * a real id are two messages (the provider gave us nothing to dedupe on).
+ */
+export function inboundRowId(providerMessageId: string): string {
+  const pid = providerMessageId.trim();
+  const unusable =
+    pid === '' || pid.startsWith('voipms-') || pid.includes('/') || pid === '.' || pid === '..' || /^__.*__$/.test(pid) || Buffer.byteLength(pid, 'utf8') > 1000;
+  return unusable ? uuid() : `inbound:${pid}`;
+}
 
 /** `body.trim().toUpperCase()` with trailing punctuation/whitespace stripped. */
 export function normalizeKeyword(body: string): string {
@@ -120,9 +140,16 @@ export async function handleInboundText({
 }): Promise<void> {
   const now = new Date();
 
-  // (1) Log the inbound text. This is the only record of it.
-  const inboundMessageId = uuid();
-  await db.collection('messages').doc(inboundMessageId).set({
+  // (1) Log the inbound text. This is the only record of it and, for a real
+  // provider id, the idempotency guard: the row is written with the atomic
+  // create() under `inbound:<provider id>`, so a redelivery (voip.ms retries
+  // any non-200 response and can repeat a delivery outright) finds the row
+  // already there and returns here, before any reply, forward or state
+  // change — the first delivery did all of that. The one exception is an id
+  // reused for a DIFFERENT message (never observed; guarded because voip.ms
+  // does not document id uniqueness across SMS and MMS): the existing row's
+  // sender and body differ, so the text is processed under a uuid row.
+  const inboundRow = {
     direction: 'inbound',
     from,
     to: env.VOIPMS_DID ?? '',
@@ -135,7 +162,21 @@ export async function handleInboundText({
     kind: 'inbound',
     segments: 1,
     created_at: now,
-  });
+  };
+  let inboundMessageId = inboundRowId(providerMessageId);
+  try {
+    await db.collection('messages').doc(inboundMessageId).create(inboundRow);
+  } catch (err) {
+    if (!isAlreadyExists(err)) throw err;
+    const existing = (await db.collection('messages').doc(inboundMessageId).get()).data() as Record<string, unknown> | undefined;
+    if (existing && existing.from === from && existing.body === body) {
+      log.info({ from, provider_message_id: providerMessageId, message_id: inboundMessageId }, 'Inbound text redelivered by the provider; already handled, ignoring');
+      return;
+    }
+    log.warn({ from, provider_message_id: providerMessageId, message_id: inboundMessageId }, 'Provider message id reused for a different text; logging it under a fresh row');
+    inboundMessageId = uuid();
+    await db.collection('messages').doc(inboundMessageId).create(inboundRow);
+  }
 
   // (2) Lookups.
   const userSnap = await db.collection('users').where('phone', '==', from).limit(1).get();
@@ -239,6 +280,8 @@ export async function handleInboundText({
         producer_id: producerId,
         extra: { inbound_message_id: inboundMessageId },
         // At most one forward per inbound row per staff member (Phase 3 fix).
+        // The row id is stable for a real provider id (round 2), so this now
+        // also holds across a webhook redelivery — which never gets this far.
         dedupe_key: `forwarded_inbound:${inboundMessageId}:${s.user_id}`,
       });
       if (!result.ok && !result.duplicate) log.warn({ to: s.phone, kind: 'forwarded_inbound', error: result.error }, 'Inbound forward failed to send');
