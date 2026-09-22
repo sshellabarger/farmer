@@ -7,6 +7,7 @@ import { applicationSchema, canTransition, upsertProducerByEmail, type Membershi
 import { normalizeEmail } from '../services/identity.js';
 import { normalizePhone } from './sms.js';
 import { byDateDesc } from '../utils/sort.js';
+import { toDate } from '../utils/dates.js';
 
 const applicationActionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('review') }),
@@ -43,8 +44,8 @@ export async function applicationRoutes(app: FastifyInstance) {
         const data = d.data();
         if (data.status !== 'new') return false;
         if (normalizeEmail(data.email as string) !== email) return false;
-        const submitted = data.submitted_at instanceof Date ? data.submitted_at : new Date(data.submitted_at as string);
-        return now.getTime() - submitted.getTime() < DAY_MS;
+        const submitted = toDate(data.submitted_at);
+        return submitted !== null && now.getTime() - submitted.getTime() < DAY_MS;
       });
       if (recentDuplicate) {
         return reply.status(409).send({ error: 'We already have a recent application for this email' });

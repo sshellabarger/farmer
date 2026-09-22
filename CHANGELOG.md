@@ -98,6 +98,28 @@ by three adversarial verifiers: no blockers.
   owner removing test reminders while verifying Phase 1. Confirmed by point-in-time reads
   (6 at 12:30Z, 0 at 13:00Z).
 
+### Hotfix — Firestore Timestamps (2026-09-22)
+
+- **Broken:** the first production run of `rollMarketDates` (triggered manually at
+  01:10 UTC) threw `doc.end_at.getTime is not a function` and hit the 120 s request
+  timeout; it created none of WLRFM's upcoming Saturdays. The same pattern sat in
+  `GET /api/dashboard`, `GET /api/markets/:id`, the date cancel/uncancel route, the
+  application duplicate check and the producer check-in summary. The owner received the
+  automatic alert text.
+- **Cause:** the admin SDK returns `Timestamp` for every stored date; Phase 2 code cast
+  documents to interfaces typed `Date` and compared with `.getTime()`. The test fake
+  returned the `Date` objects it was given, so 186 tests could not see it.
+- **Fix:** `src/utils/dates.ts` (`toDate`, `toDateOrEpoch`, `toMillis`);
+  `marketDateFromData()` is now the one way to turn a `market_dates` snapshot into a
+  `MarketDateDoc`; the routes above read through it or `toDate()`. `tests/helpers/fake-db.ts`
+  now hands back `Timestamp` instances on every read, exactly like production (`dump()`
+  stays raw), and `tests/firestore-timestamps.test.ts` replays the production case:
+  an imported past date is frozen and the six remaining Saturdays are created, twice,
+  idempotently. 191 tests. The error notifier's Anthropic call is bounded (15 s, no
+  retries) so it can never hold a scheduler invocation open.
+- Phase 1 leftovers closed with `gcloud`: only the two expected scheduler jobs remain;
+  the orphaned `sendNotification` Cloud Tasks queue is deleted.
+
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
 Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8 and D9

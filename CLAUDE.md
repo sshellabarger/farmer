@@ -17,8 +17,10 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   versioned schedule and an idempotent generator, roles/audit log, `producers`,
   `producer_memberships`, `applications`, the structural send guard, the admin web app and
   the survey importer. The contract every executor built against is
-  `docs/phase2-contract.md`; the changelog has the fold-in. **Phase 3 is next** (SPEC §8):
-  check-in links and texts, reminders, deadline flagging, STOP/HELP, quiet hours.
+  `docs/phase2-contract.md`; the changelog has the fold-in. Hotfix 2026-09-22: every read
+  of a Firestore date field now goes through `src/utils/dates.ts` (see Conventions).
+  **Phase 3 is next** (SPEC §8): check-in links and texts, reminders, deadline flagging,
+  STOP/HELP, quiet hours.
 - **Production sends are opt-in.** `SMS_PROVIDER`/`EMAIL_PROVIDER` default to `console`;
   real providers exist only with `NODE_ENV=production` and `ALLOW_REAL_SENDS=true`. Those
   keys live in `.env.arkansaslocalfoodnetwork` (git-ignored, non-secret), which the
@@ -74,7 +76,7 @@ explicit owner go-ahead in the session — never on the strength of an allowlist
 
 ```
 src/app.ts               buildApp(): plugins, error handler (before routes), /health + /api/health, route list
-src/functions.ts         exports: api (onRequest), processReminders (onSchedule)
+src/functions.ts         exports: api (onRequest), processReminders + rollMarketDates (onSchedule)
 src/server.ts            local runner over the same buildApp()
 src/routes/              auth, sms, admin, admin-users, audit-log, dashboard, markets, producers, memberships,
                          applications, checkins, profile, invite, push, errors, feedback, reminders, uploads
@@ -82,7 +84,7 @@ src/services/            sms (+voipms, console) — the ONE logged send; inbound
                          (generator), producers, identity, audit, otp, push, email, error-notify, support-notify,
                          storage, reminders
 src/middleware/          rbac.ts (authenticate, requireRole), market-scope.ts (requireStaff, requireMarketAccess)
-src/utils/               tz (Intl local↔UTC), jwt, http-error-handler, serialize, sort, errors
+src/utils/               tz (Intl local↔UTC), dates (Firestore Timestamp → Date), jwt, http-error-handler, serialize, sort, errors
 scripts/import-survey.mjs   the Google-Form history importer (excluded from the functions bundle)
 src/types/schema.ts      shared string-union types (documentation, not enforcement)
 src/db/firestore.ts      getDb() + the list of collections the code uses
@@ -100,6 +102,12 @@ docs/                    SPEC.md, MONITORING.md
 - Routes are Fastify plugins registered with a prefix **only in `src/app.ts`**.
 - Firestore through `app.db` / `getDb()`; fields `snake_case`; ids `uuid` v4; timestamps
   `new Date()` (the `preSerialization` hook converts them in responses).
+- **Firestore returns `Timestamp`, not `Date`.** Never call `.getTime()` / `.toISOString()`
+  / `<` on a raw document field: read every date through `toDate()` / `toDateOrEpoch()`
+  (`src/utils/dates.ts`) or a normaliser such as `marketDateFromData()`.
+  `tests/helpers/fake-db.ts` hands Timestamps back on every read (`dump()` stays raw), so a
+  missed conversion fails in a test instead of in production — the nightly
+  `rollMarketDates` run died on exactly this on 2026-09-22.
 - Query pattern: one equality filter at the DB, then filter/sort in memory
   (`src/utils/sort.ts`) so `firestore.indexes.json` stays minimal.
 - **Every outbound text goes through `sendSms()`** and is logged to `messages`

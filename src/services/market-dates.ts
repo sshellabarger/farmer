@@ -1,5 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import { addDays, eachDate, localToUtc, utcToLocalDate, weekdayOf } from '../utils/tz.js';
+import { toDate, toDateOrEpoch } from '../utils/dates.js';
 import type { FarmersMarket, ScheduleVersion } from './markets.js';
 import type { MarketDateStatus } from '../types/schema.js';
 
@@ -144,8 +145,33 @@ function computeExpected(market: FarmersMarket, date: string): ExpectedDay | nul
   return { start_time: version.start_time, end_time: version.end_time, schedule_version: version.id, special: false, note: '' };
 }
 
-function toDoc(id: string, data: Record<string, unknown>): MarketDateDoc {
-  return { id, ...data } as MarketDateDoc;
+/**
+ * A `market_dates` document as read back from Firestore, with every date
+ * field normalised to `Date` (Firestore returns Timestamps). The one way to
+ * turn a snapshot into a MarketDateDoc — routes use it too.
+ */
+export function marketDateFromData(id: string, data: Record<string, unknown>): MarketDateDoc {
+  const a = (data.actions ?? {}) as Record<string, unknown>;
+  const actions: MarketDateActions = {
+    checkin_sent_at: toDate(a.checkin_sent_at),
+    reminders_sent: (Array.isArray(a.reminders_sent) ? a.reminders_sent : []).map(toDate).filter((d): d is Date => d !== null),
+    deadline_at: toDateOrEpoch(a.deadline_at),
+    deadline_processed_at: toDate(a.deadline_processed_at),
+    drafts_generated_at: toDate(a.drafts_generated_at),
+    approved_at: toDate(a.approved_at),
+    booth_texts_sent_at: toDate(a.booth_texts_sent_at),
+  };
+  return {
+    ...(data as Omit<MarketDateDoc, 'id'>),
+    id,
+    start_at: toDateOrEpoch(data.start_at),
+    end_at: toDateOrEpoch(data.end_at),
+    actions,
+    cancelled_at: toDate(data.cancelled_at),
+    generated_at: toDateOrEpoch(data.generated_at),
+    created_at: toDateOrEpoch(data.created_at),
+    updated_at: toDateOrEpoch(data.updated_at),
+  };
 }
 
 export async function generateMarketDates(db: Firestore, market: FarmersMarket, opts: GenerateOptions): Promise<GenerateResult> {
@@ -156,7 +182,7 @@ export async function generateMarketDates(db: Firestore, market: FarmersMarket, 
   const existingSnap = await db.collection('market_dates').where('market_id', '==', market.id).get();
   const existingById = new Map<string, MarketDateDoc>();
   for (const doc of existingSnap.docs) {
-    existingById.set(doc.id, toDoc(doc.id, doc.data() as Record<string, unknown>));
+    existingById.set(doc.id, marketDateFromData(doc.id, doc.data() as Record<string, unknown>));
   }
 
   const result: GenerateResult = { created: 0, updated: 0, cancelled: 0, unchanged: 0, skipped: 0, frozen: 0, from, to };

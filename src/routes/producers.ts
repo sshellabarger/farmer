@@ -7,6 +7,7 @@ import { writeAudit } from '../services/audit.js';
 import { normalizeEmail, nameKey } from '../services/identity.js';
 import { createProducerSchema, updateProducerSchema } from '../services/producers.js';
 import { byStringAsc } from '../utils/sort.js';
+import { toDate } from '../utils/dates.js';
 
 interface MembershipLite {
   market_id: string;
@@ -103,8 +104,7 @@ export async function producerRoutes(app: FastifyInstance) {
     let last: Date | null = null;
     for (const c of checkinsSnap.docs) {
       count += 1;
-      const raw = c.data().submitted_at;
-      const t = raw instanceof Date ? raw : raw ? new Date(raw as string) : null;
+      const t = toDate(c.data().submitted_at);
       if (t && (!last || t > last)) last = t;
     }
 

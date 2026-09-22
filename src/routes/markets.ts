@@ -4,7 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { authenticate, requireRole } from '../middleware/rbac.js';
 import { requireStaff, requireMarketAccess, marketIdFromParams, accessibleMarketIds } from '../middleware/market-scope.js';
 import { writeAudit } from '../services/audit.js';
-import { generateMarketDates } from '../services/market-dates.js';
+import { generateMarketDates, marketDateFromData } from '../services/market-dates.js';
 import type { MarketDateDoc } from '../services/market-dates.js';
 import {
   createMarketSchema,
@@ -34,7 +34,7 @@ function toMarketDTO(market: FarmersMarket, isAdmin: boolean): Partial<FarmersMa
 
 async function marketDateDocs(db: FastifyInstance['db'], marketId: string): Promise<MarketDateDoc[]> {
   const snap = await db.collection('market_dates').where('market_id', '==', marketId).get();
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Record<string, unknown>) }) as MarketDateDoc);
+  return snap.docs.map((d) => marketDateFromData(d.id, d.data() as Record<string, unknown>));
 }
 
 async function nextUpcomingDate(db: FastifyInstance['db'], marketId: string, now: Date) {
@@ -386,7 +386,7 @@ export async function marketRoutes(app: FastifyInstance) {
     if (!doc.exists || (doc.data() as Record<string, unknown>).market_id !== id) {
       return reply.status(404).send({ error: 'Market date not found' });
     }
-    const existing = { id: doc.id, ...(doc.data() as Record<string, unknown>) } as MarketDateDoc;
+    const existing = marketDateFromData(doc.id, doc.data() as Record<string, unknown>);
     const input = patchDateSchema.parse(request.body);
     const now = new Date();
 

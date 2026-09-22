@@ -3,13 +3,31 @@
 // collection().where('==').limit().get(). Anything fancier throws so a test
 // can't silently pass against an unsupported query.
 
+import { Timestamp } from 'firebase-admin/firestore';
+
 type Doc = Record<string, unknown>;
+
+// The admin SDK returns `Timestamp` instances for every date field, never
+// `Date`. Mirror that on every read so code that forgets to normalise (see
+// src/utils/dates.ts) fails here, in a test, instead of in production — the
+// nightly rollMarketDates run died on `doc.end_at.getTime()` on 2026-09-22.
+// `dump()` stays raw so tests can still assert on what was written.
+function fromStore(value: unknown): unknown {
+  if (value instanceof Date) return Timestamp.fromDate(value);
+  if (Array.isArray(value)) return value.map(fromStore);
+  if (value && typeof value === 'object' && !(value instanceof Timestamp)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = fromStore(v);
+    return out;
+  }
+  return value;
+}
 
 class FakeDocRef {
   constructor(private store: Map<string, Doc>, public id: string) {}
   async get() {
     const data = this.store.get(this.id);
-    return { id: this.id, exists: data !== undefined, data: () => (data ? { ...data } : undefined), ref: this };
+    return { id: this.id, exists: data !== undefined, data: () => (data ? (fromStore(data) as Doc) : undefined), ref: this };
   }
   async set(data: Doc, opts?: { merge?: boolean }) {
     const prev = opts?.merge ? this.store.get(this.id) ?? {} : {};
@@ -41,7 +59,7 @@ class FakeQuery {
   async get() {
     let docs = [...this.store.entries()]
       .filter(([, data]) => this.filters.every(([f, v]) => data[f] === v))
-      .map(([id, data]) => ({ id, exists: true, data: () => ({ ...data }), ref: new FakeDocRef(this.store, id) }));
+      .map(([id, data]) => ({ id, exists: true, data: () => fromStore(data) as Doc, ref: new FakeDocRef(this.store, id) }));
     if (this.max !== null) docs = docs.slice(0, this.max);
     return { empty: docs.length === 0, size: docs.length, docs };
   }

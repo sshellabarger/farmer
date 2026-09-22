@@ -90,7 +90,9 @@ async function researchFix(env: Env, classified: ClassifiedError, ctx: NotifyCon
   // Don't call Anthropic if the error IS an Anthropic problem (it would also fail).
   if (classified.isAnthropicError || !env.ANTHROPIC_API_KEY) return undefined;
   try {
-    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    // Bounded: the notifier runs inside scheduler invocations with a 120 s
+    // request timeout, so it must never wait on retries or a slow API.
+    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 15_000, maxRetries: 0 });
     const detail = classified.raw instanceof Error
       ? `${classified.raw.message}\n\n${classified.raw.stack || ''}`
       : String(classified.raw);

@@ -2,11 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { authenticate } from '../middleware/rbac.js';
 import { requireStaff, accessibleMarketIds } from '../middleware/market-scope.js';
 import type { FarmersMarket } from '../services/markets.js';
-import type { MarketDateDoc } from '../services/market-dates.js';
+import { marketDateFromData, type MarketDateDoc } from '../services/market-dates.js';
 
 async function marketDateDocs(db: FastifyInstance['db'], marketId: string): Promise<MarketDateDoc[]> {
   const snap = await db.collection('market_dates').where('market_id', '==', marketId).get();
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Record<string, unknown>) }) as MarketDateDoc);
+  return snap.docs.map((d) => marketDateFromData(d.id, d.data() as Record<string, unknown>));
 }
 
 async function marketProgress(db: FastifyInstance['db'], marketId: string, marketDateId: string) {
