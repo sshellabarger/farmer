@@ -20,6 +20,7 @@
         "tests",
         "archive",
         "src",
+        "scripts",
         "*.md",
         "*.svg",
         "*.jsx",
