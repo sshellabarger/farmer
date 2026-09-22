@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import { marketDateRoutes } from '../src/routes/market-dates.js';
 import { fakeDb } from './helpers/fake-db.js';
@@ -35,6 +35,18 @@ const env = {
   NODE_ENV: 'test', SMS_PROVIDER: 'console', EMAIL_PROVIDER: 'console', ALLOW_REAL_SENDS: 'false',
   APP_URL: 'https://test.example', ALERT_EMAIL: 'alerts@example.com', JWT_SECRET: 'test-secret', ANTHROPIC_API_KEY: 'test',
 } as Env;
+
+// The routes read the real clock: the resend cases need wlrfm_2026-09-19 to
+// be inside its grace window (deadline 09-22T17:00Z + 3 days) and the close
+// cases need wlrfm_2026-03-21 ended and wlrfm_2099-01-03 not. Pinned so the
+// suite does not go red on the real 2026-09-25.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-09-20T12:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function seed(extra: Record<string, Record<string, Record<string, unknown>>> = {}) {
   return fakeDb({

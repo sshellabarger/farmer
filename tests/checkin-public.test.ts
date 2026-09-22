@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import { checkinPublicRoutes } from '../src/routes/checkin-public.js';
 import { createErrorHandler } from '../src/utils/http-error-handler.js';
@@ -12,6 +12,17 @@ const env = {
   NODE_ENV: 'test', SMS_PROVIDER: 'console', EMAIL_PROVIDER: 'console', ALLOW_REAL_SENDS: 'false',
   APP_URL: 'https://test.example', JWT_SECRET: 'test-secret', ANTHROPIC_API_KEY: 'test',
 } as Env;
+
+// The routes read the real clock and every valid fixture token below expires
+// on 2026-09-25T17:00Z (deadline 09-22 + 3 days' grace): pin the clock inside
+// that window so the suite does not go red on the real 2026-09-25.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-09-20T12:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 async function buildApp(db: ReturnType<typeof fakeDb>) {
   const app = Fastify();

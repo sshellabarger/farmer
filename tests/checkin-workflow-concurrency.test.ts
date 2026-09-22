@@ -158,6 +158,12 @@ function countFlagWrites(db: Db) {
 
 let logSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
+  // The engine takes an injected `now`, but case (d) drives the real resend
+  // route, which reads the clock and 409s (past_grace) after 2026-09-25;
+  // case (h) drives the close route and sets its own time. Pinned so the
+  // file does not go red on the real 2026-09-25.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-09-19T18:00:00Z'));
   voipms.mockClear();
   voipms.mockImplementation(async () => 'vm-1');
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
