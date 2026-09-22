@@ -18,6 +18,14 @@ import { pushRoutes } from './routes/push.js';
 import { errorRoutes } from './routes/errors.js';
 import { reminderRoutes } from './routes/reminders.js';
 import { adminRoutes } from './routes/admin.js';
+import { marketRoutes } from './routes/markets.js';
+import { adminUserRoutes } from './routes/admin-users.js';
+import { auditLogRoutes } from './routes/audit-log.js';
+import { dashboardRoutes } from './routes/dashboard.js';
+import { producerRoutes } from './routes/producers.js';
+import { membershipRoutes } from './routes/memberships.js';
+import { applicationRoutes } from './routes/applications.js';
+import { checkinRoutes } from './routes/checkins.js';
 
 export interface BuildAppOptions {
   db: Firestore;
@@ -40,7 +48,9 @@ export interface BuildAppOptions {
  * `listen()`) themselves.
  */
 export async function buildApp({ db, env, logLevel = 'info', notifyOnError = true }: BuildAppOptions): Promise<FastifyInstance> {
-  const app = Fastify({ logger: { level: logLevel } });
+  // trustProxy: req.ip (the rate-limit key) must be the client behind Firebase
+  // Hosting, not the always-127.0.0.1 socket address the function sees.
+  const app = Fastify({ logger: { level: logLevel }, trustProxy: true });
 
   await app.register(cors, { origin: true });
   await app.register(formbody);
@@ -83,6 +93,14 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
   await app.register(errorRoutes, { prefix: '/api/errors' });
   await app.register(reminderRoutes, { prefix: '/api/reminders' });
   await app.register(adminRoutes, { prefix: '/api/admin' });
+  await app.register(marketRoutes, { prefix: '/api/markets' });
+  await app.register(producerRoutes, { prefix: '/api/producers' });
+  await app.register(membershipRoutes, { prefix: '/api/memberships' });
+  await app.register(applicationRoutes, { prefix: '/api/applications' });
+  await app.register(checkinRoutes, { prefix: '/api/checkins' });
+  await app.register(adminUserRoutes, { prefix: '/api/admin/users' });
+  await app.register(auditLogRoutes, { prefix: '/api/audit-log' });
+  await app.register(dashboardRoutes, { prefix: '/api/dashboard' });
 
   // v1 texted "view" links (/api/view/<token> → dashboard with a minted JWT)
   // are retired. The route stays registered so old texts land on an

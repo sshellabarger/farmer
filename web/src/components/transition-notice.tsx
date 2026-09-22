@@ -9,7 +9,7 @@ const LEAD = 'FarmLink is becoming the St. Joseph Center of Arkansas farmers mar
  *  market manager is built. Used by / and by /changed (the landing spot for
  *  the retired texted links: /farmer, /market, /upload-photo, /signup).
  *  Without `title`, the lead sentence is the headline. */
-export function TransitionNotice({ title }: { title?: string }) {
+export function TransitionNotice({ title, children }: { title?: string; children?: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-bg font-sans flex flex-col">
       <Header />
@@ -30,6 +30,7 @@ export function TransitionNotice({ title }: { title?: string }) {
           >
             Market staff: log in <Icon name="arrow" size={16} />
           </Link>
+          {children}
           <div className="mt-12 pt-6 border-t border-border-light flex items-center gap-3">
             <img src="/SJCA_logo_transparent.png" alt="St. Joseph Center of Arkansas" className="h-10 w-auto" />
             <p className="text-[13px] text-text-muted leading-snug m-0">

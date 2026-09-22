@@ -8,6 +8,20 @@ export interface AuthUser {
   name: string;
   role: string;
   phone: string;
+  email: string | null;
+  assigned_market_ids: string[];
+}
+
+/** Fill the Phase 2 fields the API may omit (older tokens, legacy users). */
+function toAuthUser(raw: any): AuthUser {
+  return {
+    id: String(raw?.id ?? ''),
+    name: String(raw?.name ?? ''),
+    role: String(raw?.role ?? ''),
+    phone: String(raw?.phone ?? ''),
+    email: typeof raw?.email === 'string' ? raw.email : null,
+    assigned_market_ids: Array.isArray(raw?.assigned_market_ids) ? raw.assigned_market_ids.map(String) : [],
+  };
 }
 
 interface AuthContextType {
@@ -54,7 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(stored);
     api.getMe()
       .then((data) => {
-        setUser(data.user);
+        setUser(toAuthUser(data.user));
       })
       .catch(() => {
         localStorage.removeItem('farmlink_token');
@@ -72,10 +86,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!data?.token || !data?.user) {
       throw new Error('Login failed — no session returned. Please try again.');
     }
+    const user = toAuthUser(data.user);
     localStorage.setItem('farmlink_token', data.token);
     setToken(data.token);
-    setUser(data.user);
-    return { role: data.user.role };
+    setUser(user);
+    return { role: user.role };
   }, []);
 
   const logout = useCallback(() => {

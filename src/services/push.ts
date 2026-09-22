@@ -2,7 +2,7 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { FieldValue } from 'firebase-admin/firestore';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { sendSms } from './sms.js';
+import { sendSms, type SmsKind } from './sms.js';
 
 /** Store an FCM web-push token on the user's record. */
 export async function registerToken(db: Firestore, userId: string, token: string): Promise<void> {
@@ -84,10 +84,12 @@ export async function notifyByPhoneSmsFirst(
   env: Env,
   phone: string,
   payload: { title: string; body: string; url?: string; sms?: string },
+  kind: SmsKind = 'alert',
 ): Promise<'sms' | 'none'> {
   const snap = await db.collection('users').where('phone', '==', phone).limit(1).get();
+  let userId: string | null = null;
   if (!snap.empty) {
-    const userId = snap.docs[0].id;
+    userId = snap.docs[0].id;
     const tokens: string[] = snap.docs[0].data()?.fcm_tokens || [];
     if (tokens.length > 0) {
       // Best-effort only; do not await for delivery semantics.
@@ -95,7 +97,7 @@ export async function notifyByPhoneSmsFirst(
     }
   }
   try {
-    await sendSms({ env, to: phone, body: payload.sms || payload.body });
+    await sendSms({ env, db, to: phone, body: payload.sms || payload.body, kind, user_id: userId });
     return 'sms';
   } catch {
     return 'none';

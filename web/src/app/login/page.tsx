@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 import { Header } from '@/components/header';
 import { Icon } from '@/components/icons';
 import { FARMLINK_NUMBER_DISPLAY, smsHref } from '@/lib/constants';
+import { isStaffRole } from '@/components/staff-guard';
 
 export default function LoginPage() {
   const { user, isAuthenticated, isLoading, requestOtp, login, logout } = useAuth();
@@ -18,9 +19,9 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [userName, setUserName] = useState<string | null>(null);
 
-  // Already signed in as an admin (e.g. returning with a stored token) → go straight in.
+  // Already signed in as staff (e.g. returning with a stored token) → go straight in.
   useEffect(() => {
-    if (!isLoading && isAuthenticated && user?.role === 'admin') {
+    if (!isLoading && isAuthenticated && isStaffRole(user?.role)) {
       router.replace('/admin');
     }
   }, [isLoading, isAuthenticated, user, router]);
@@ -62,10 +63,10 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const result = await login(phone, code);
-      if (result.role === 'admin') {
+      if (isStaffRole(result.role)) {
         router.push('/admin');
       }
-      // Non-admins stay here: the signed-in branch below shows the staff-only notice.
+      // Non-staff stay here: the signed-in branch below shows the staff-only notice.
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {
@@ -73,7 +74,7 @@ export default function LoginPage() {
     }
   };
 
-  const signedInNonAdmin = !isLoading && isAuthenticated && user?.role !== 'admin';
+  const signedInNonAdmin = !isLoading && isAuthenticated && !isStaffRole(user?.role);
 
   return (
     <div className="min-h-screen bg-bg font-sans">
@@ -182,7 +183,7 @@ export default function LoginPage() {
 
         {/* Text-first reminder */}
         <a
-          href={smsHref('Hi FarmLink!')}
+          href={smsHref('Hi SJCA Markets!')}
           className="mt-5 flex items-center justify-center gap-2 px-4 py-3 rounded-2xl no-underline bg-green-50/70 border border-green-100 text-green-700 text-[13.5px] font-semibold"
         >
           <Icon name="msg" size={15} />

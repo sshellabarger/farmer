@@ -1,9 +1,10 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { v4 as uuid } from 'uuid';
 import { sendPushToUser } from './push.js';
-import { sendSms } from './sms.js';
+import { trySendSms } from './sms.js';
 
+// Personal user reminders (v1 feature kept by decision D6). They are a
+// per-user clock, not a market schedule, and run in the owner's zone.
 const TIMEZONE = 'America/Chicago';
 // A reminder fires when its time has passed within the last CATCH_WINDOW_MIN
 // minutes and it hasn't already been sent today. The scheduler runs every
@@ -70,30 +71,26 @@ export async function processDueReminders(db: Firestore, env: Env): Promise<{ ch
       url: '/settings',
     }).catch(() => {});
 
-    // SMS is the authoritative channel: reminders are time-critical, so we only
-    // mark the reminder sent when the SMS actually goes out.
-    let smsOk = true;
-    try {
-      await sendSms({ env, to: phone, body });
-    } catch {
-      smsOk = false;
-    }
-
-    // Audit trail so delivery failures are diagnosable.
-    await db.collection('notifications').doc(uuid()).set({
-      type: 'reminder',
-      channel: 'sms',
-      status: smsOk ? 'sent' : 'failed',
+    // SMS is the authoritative channel: reminders are time-critical, so the
+    // reminder is marked sent only when the text actually goes out. The
+    // `messages` row written by sendSms (kind 'reminder', reminder_id) is the
+    // audit trail; the v1 `notifications` write is gone.
+    const result = await trySendSms({
+      env,
+      db,
+      to: phone,
+      body,
+      kind: 'reminder',
       user_id: r.user_id,
-      reminder_id: doc.id,
-      created_at: new Date(),
-      sent_at: smsOk ? new Date() : null,
-    }).catch(() => {});
-
-    if (smsOk) {
-      await doc.ref.update({ last_sent_date: dateStr, updated_at: new Date() });
-      sent++;
+      extra: { reminder_id: doc.id },
+    });
+    if (!result.ok) {
+      console.error(`Reminder ${doc.id} not sent: ${result.error}`);
+      continue;
     }
+
+    await doc.ref.update({ last_sent_date: dateStr, updated_at: new Date() });
+    sent++;
   }
 
   return { checked: snap.size, sent };

@@ -31,8 +31,12 @@ export async function inviteRoutes(app: FastifyInstance) {
     const greeting = name ? `Hi ${name}! ` : 'Hi! ';
     const body = `${greeting}${inviterName} invited you to FarmLink, the St. Joseph Center of Arkansas farmers market manager. Learn more: ${app.env.APP_URL}`;
 
+    // Logged to `messages` (kind 'invite') by sendSms; the invitee has no
+    // user yet, so user_id records the inviter.
+    let messageId: string;
     try {
-      await sendSms({ env: app.env, to, body });
+      const result = await sendSms({ env: app.env, db: app.db, to, body, kind: 'invite', user_id: user.id, sent_by: user.id });
+      messageId = result.message_id;
     } catch (err) {
       app.log.error({ err, to }, 'Failed to send invite SMS');
       return reply.status(502).send({ error: 'Could not send the invitation text. Please check the number and try again.' });
@@ -43,6 +47,7 @@ export async function inviteRoutes(app: FastifyInstance) {
       invited_phone: to,
       invited_name: name || null,
       invited_by: user.id,
+      message_id: messageId,
       created_at: new Date(),
     }).catch(() => {});
 
