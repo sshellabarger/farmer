@@ -14,7 +14,9 @@ env:
   # CI and nothing here can send a text or email.
   ANTHROPIC_API_KEY: test
   JWT_SECRET: test-secret
-  SMS_PROVIDER: voipms
+  SMS_PROVIDER: console
+  EMAIL_PROVIDER: console
+  ALLOW_REAL_SENDS: "false"
   NODE_ENV: test
   VOIPMS_USERNAME: ""
   VOIPMS_PASSWORD: ""
