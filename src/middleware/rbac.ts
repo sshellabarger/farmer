@@ -7,6 +7,9 @@ export interface AuthUser {
   name: string | null;
   role: UserRole;
   phone: string | null;
+  email: string | null;
+  /** Markets a `market_manager` may act on. `[]` for every other role and for old docs that lack the field. */
+  assigned_market_ids: string[];
 }
 
 /**
@@ -31,12 +34,19 @@ export function authenticate(app: FastifyInstance) {
       return reply.status(401).send({ error: 'User not found' });
     }
     const user = userDoc.data()!;
+    // `active` is absent on old docs → treated as true (SPEC §2.7). A user
+    // deactivated after their token was issued is rejected on their next call.
+    if (user.active === false) {
+      return reply.status(401).send({ error: 'Account deactivated' });
+    }
 
     request.authUser = {
       id: userDoc.id,
       name: (user.name as string) ?? null,
       role: user.role as UserRole,
       phone: (user.phone as string) ?? null,
+      email: (user.email as string | undefined) ?? null,
+      assigned_market_ids: Array.isArray(user.assigned_market_ids) ? (user.assigned_market_ids as string[]) : [],
     };
   };
 }

@@ -40,4 +40,10 @@ export const collections = {
   notifications: 'notifications',
   /** v1 view-link tokens; no longer written. Data exists until Phase 1 data deletion. */
   view_links: 'view_links',
+  // Phase 2 (SPEC §6, §8; Phase 2 contract §2). Doc id = slug.
+  farmers_markets: 'farmers_markets',
+  // Phase 2. Doc id = `${market_id}_${date}`.
+  market_dates: 'market_dates',
+  // Phase 2. Doc id = uuid. Written by src/services/audit.ts writeAudit().
+  audit_log: 'audit_log',
 } as const;
