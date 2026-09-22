@@ -17,8 +17,9 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   versioned schedule and an idempotent generator, roles/audit log, `producers`,
   `producer_memberships`, `applications`, the structural send guard, the admin web app and
   the survey importer. The contract every executor built against is
-  `docs/phase2-contract.md`; the changelog has the fold-in. Hotfix 2026-09-22: every read
-  of a Firestore date field now goes through `src/utils/dates.ts` (see Conventions).
+  `docs/phase2-contract.md`; the changelog has the fold-in. Hotfix deployed 2026-09-22
+  (`1bcd13b`): every read of a Firestore date field now goes through `src/utils/dates.ts`
+  (see Conventions); voip.ms requests abort after 45 s.
   **Phase 3 is next** (SPEC §8): check-in links and texts, reminders, deadline flagging,
   STOP/HELP, quiet hours.
 - **Production sends are opt-in.** `SMS_PROVIDER`/`EMAIL_PROVIDER` default to `console`;

@@ -125,6 +125,14 @@ by three adversarial verifiers: no blockers.
   `messages` log and a per-run wall-clock budget.
 - Phase 1 leftovers closed with `gcloud`: only the two expected scheduler jobs remain;
   the orphaned `sendNotification` Cloud Tasks queue is deleted.
+- **Deployed 2026-09-22 12:26 UTC** (functions only, from `main` `1bcd13b`; the CLI login
+  had expired, so the deploy authenticated with the project service account through
+  `GOOGLE_APPLICATION_CREDENTIALS` in an isolated CLI config). Env keys verified on the
+  deployed `api` (`NODE_ENV=production`, `ALLOW_REAL_SENDS=true`, `voipms`, `resend`).
+  A manual `rollMarketDates` run then logged `1 markets, created=6 updated=0 cancelled=0`
+  in about a second: `wlrfm_2026-09-26` … `wlrfm_2026-10-31` exist, the 23 imported
+  dates are untouched, no alert fired. The 03:15 CT scheduled run had failed once more on
+  the old code (one more alert text to the owner) before the deploy.
 
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
