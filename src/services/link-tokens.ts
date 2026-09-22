@@ -114,7 +114,18 @@ export async function resolveCheckinToken(db: Firestore, token: string, now: Dat
   return { status: 'ok', token: t, date };
 }
 
-/** Marks a successful POST: `uses + 1`, `used_at: now`. Read-modify-write; no-op on an unknown token. */
+/**
+ * Marks a successful POST: `uses + 1`, `used_at: now`. No-op on an unknown
+ * token.
+ *
+ * Read-modify-write on purpose (Phase 3 fix, round 2 — no FieldValue
+ * sentinels): `uses` is an informational counter behind an advisory cap
+ * (LINK_TOKEN_MAX_USES), so two concurrent submissions that both read the
+ * same value and both write `+1` under-count by one and nothing more. The
+ * update names only `uses` and `used_at`, so no other field of the token
+ * (sent_message_id, expires_at, …) — and never the doc itself — can be lost
+ * to the interleave; a re-opened form counts on top on the next submission.
+ */
 export async function markTokenUsed(db: Firestore, token: string, now: Date): Promise<void> {
   const ref = db.collection('link_tokens').doc(token);
   const doc = await ref.get();

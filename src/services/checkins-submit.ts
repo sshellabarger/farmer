@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Firestore } from 'firebase-admin/firestore';
 import { toDateOrEpoch } from '../utils/dates.js';
+import { isAlreadyExists } from './sms.js';
 import type { ExtraQuestion } from './market-dates.js';
 import type { CheckinSource } from '../types/schema.js';
 
@@ -138,13 +139,24 @@ export interface UpsertFormCheckinArgs {
  * overwrites in place: `submissions` increments, `created_at` is preserved,
  * `partial` becomes false (a form submission always completes the record,
  * even over an SMS-created partial one).
+ *
+ * Concurrency (Phase 3 fix, round 2): read-modify-write on purpose — no
+ * FieldValue sentinels (the fake db has none, and `submissions` is an
+ * informational counter). A FIRST submission is written with the atomic
+ * create(), so two concurrent first submissions cannot both believe they
+ * are first: the loser re-reads the winner's doc and writes on top of it,
+ * keeping the winner's created_at and counting itself (submissions 2, not
+ * 1). Two concurrent RE-submissions can still both read the same count and
+ * both write `+1` — an under-count by one, nothing more: the doc is never
+ * lost, and the later write's answers win, which is the "latest submission
+ * wins" rule of the form anyway.
  */
 export async function upsertFormCheckin(db: Firestore, args: UpsertFormCheckinArgs): Promise<CheckinDoc> {
   const { market_date_id, market_id, producer_id, token_id, input, now } = args;
   const id = `${market_date_id}_${producer_id}`;
   const ref = db.collection('checkins').doc(id);
   const existingSnap = await ref.get();
-  const existing = existingSnap.exists ? (existingSnap.data() as Record<string, unknown>) : null;
+  let existing = existingSnap.exists ? (existingSnap.data() as Record<string, unknown>) : null;
 
   const sales = parseMoney(input.estimated_sales);
   const tx = parseCount(input.transactions_estimate);
@@ -152,7 +164,7 @@ export async function upsertFormCheckin(db: Firestore, args: UpsertFormCheckinAr
   if (sales.value !== null && sales.value > 20000) flags.push('sales_outlier');
   if (tx.ambiguous) flags.push('transactions_ambiguous');
 
-  const doc: CheckinDoc = {
+  const build = (prev: Record<string, unknown> | null): CheckinDoc => ({
     producer_id,
     market_id,
     market_date_id,
@@ -173,11 +185,26 @@ export async function upsertFormCheckin(db: Firestore, args: UpsertFormCheckinAr
     extra_answers: input.extra_answers,
     flags,
     raw_import: null,
-    submissions: (typeof existing?.submissions === 'number' ? (existing.submissions as number) : 0) + 1,
+    submissions: (typeof prev?.submissions === 'number' ? (prev.submissions as number) : 0) + 1,
     partial: false,
-    created_at: existing ? toDateOrEpoch(existing.created_at) : now,
+    created_at: prev ? toDateOrEpoch(prev.created_at) : now,
     updated_at: now,
-  };
+  });
+
+  if (!existing) {
+    const first = build(null);
+    try {
+      await ref.create(first as unknown as Record<string, unknown>);
+      return first;
+    } catch (err) {
+      if (!isAlreadyExists(err)) throw err;
+      // A concurrent submission (form or SMS) created the doc between the
+      // read and this write: count on top of it instead of overwriting it.
+      existing = ((await ref.get()).data() as Record<string, unknown> | undefined) ?? null;
+    }
+  }
+
+  const doc = build(existing);
   await ref.set(doc as unknown as Record<string, unknown>);
   return doc;
 }
