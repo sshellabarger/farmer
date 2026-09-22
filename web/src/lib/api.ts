@@ -1,4 +1,43 @@
+import type {
+  Application,
+  ApplicationInput,
+  AuditEntry,
+  Checkin,
+  CreateMarketInput,
+  CreateProducerInput,
+  DashboardCard,
+  FeePlan,
+  GenerateResult,
+  Market,
+  MarketDate,
+  Membership,
+  MembershipStatus,
+  MembershipWithProducer,
+  Producer,
+  ProducerListItem,
+  Providers,
+  PublicMarket,
+  ScheduleVersionInput,
+  SkippedDate,
+  SmsOutcome,
+  SpecialDate,
+  StaffUser,
+  UpdateMarketDateInput,
+  UpdateMarketInput,
+  UpdateProducerInput,
+} from './types';
+
 const API_BASE = '/api';
+
+/** Query string from an object; '' when nothing is defined. */
+function qs(params?: Record<string, string | number | boolean | undefined | null>): string {
+  if (!params) return '';
+  const entries = Object.entries(params).filter(
+    (e): e is [string, string | number | boolean] => e[1] !== undefined && e[1] !== null && e[1] !== '',
+  );
+  if (entries.length === 0) return '';
+  return '?' + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString();
+}
 
 function getToken(): string | null {
   if (typeof window === 'undefined') return null;
@@ -83,10 +122,79 @@ export const api = {
   deleteFeedback: (id: string) =>
     request<any>(`/feedback/${id}`, { method: 'DELETE' }),
 
-  // Admin
+  // Admin (broadcast)
   getUtilization: () => request<any>('/admin/utilization'),
-  getAdminUsers: () => request<any>('/admin/users'),
   sendBroadcast: (data: { audience: 'farmers' | 'markets' | 'all'; message: string }) =>
     request<any>('/admin/broadcast', { method: 'POST', body: JSON.stringify(data) }),
   getBroadcasts: () => request<any>('/admin/broadcasts'),
+
+  // ── Phase 2 (contract §8.2) ──
+
+  // Markets
+  getPublicMarkets: () => request<{ markets: PublicMarket[] }>('/markets/public'),
+  getMarkets: () => request<{ markets: Market[] }>('/markets'),
+  getMarket: (id: string) => request<{ market: Market }>(`/markets/${id}`),
+  createMarket: (data: CreateMarketInput) =>
+    request<{ market: Market; generation: GenerateResult }>('/markets', { method: 'POST', body: JSON.stringify(data) }),
+  updateMarket: (id: string, data: Partial<UpdateMarketInput>) =>
+    request<{ market: Market; generation?: GenerateResult }>(`/markets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  addScheduleVersion: (id: string, data: ScheduleVersionInput) =>
+    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/versions`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteScheduleVersion: (id: string, versionId: string) =>
+    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/versions/${versionId}`, { method: 'DELETE' }),
+  setSkippedDates: (id: string, skipped_dates: SkippedDate[]) =>
+    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/skipped`, { method: 'PUT', body: JSON.stringify({ skipped_dates }) }),
+  setSpecialDates: (id: string, special_dates: SpecialDate[]) =>
+    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/special`, { method: 'PUT', body: JSON.stringify({ special_dates }) }),
+  generateDates: (id: string, scope: 'window' | 'season' = 'window') =>
+    request<{ generation: GenerateResult }>(`/markets/${id}/dates/generate`, { method: 'POST', body: JSON.stringify({ scope }) }),
+  getMarketDates: (id: string, params?: { from?: string; to?: string; status?: string }) =>
+    request<{ dates: MarketDate[] }>(`/markets/${id}/dates${qs(params)}`),
+  updateMarketDate: (id: string, dateId: string, data: UpdateMarketDateInput) =>
+    request<{ date: MarketDate }>(`/markets/${id}/dates/${dateId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  // Producers / memberships / check-ins
+  getProducers: (params?: { market_id?: string; status?: string; q?: string; include_inactive?: 'true' }) =>
+    request<{ producers: ProducerListItem[] }>(`/producers${qs(params)}`),
+  getProducer: (id: string) =>
+    request<{ producer: Producer; memberships: Membership[]; checkins_summary: { count: number; last_submitted_at: string | null } }>(`/producers/${id}`),
+  createProducer: (data: CreateProducerInput) =>
+    request<{ producer: Producer; memberships: Membership[] }>('/producers', { method: 'POST', body: JSON.stringify(data) }),
+  updateProducer: (id: string, data: Partial<UpdateProducerInput>) =>
+    request<{ producer: Producer }>(`/producers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getMemberships: (params: { market_id: string } | { producer_id: string }) =>
+    request<{ memberships: MembershipWithProducer[] }>(`/memberships${qs(params)}`),
+  createMembership: (data: { producer_id: string; market_id: string; status?: MembershipStatus; fee_plan?: FeePlan }) =>
+    request<{ membership: Membership }>('/memberships', { method: 'POST', body: JSON.stringify(data) }),
+  updateMembership: (id: string, data: { status?: MembershipStatus; fee_plan?: FeePlan; usual_booth_id?: string | null; note?: string }) =>
+    request<{ membership: Membership }>(`/memberships/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getCheckins: (params: { market_date_id: string } | { producer_id: string }) =>
+    request<{ checkins: Checkin[] }>(`/checkins${qs(params)}`),
+
+  // Applications
+  submitApplication: (data: ApplicationInput) =>
+    request<{ id: string; status: 'new' }>('/applications', { method: 'POST', body: JSON.stringify(data) }),
+  getApplications: (params?: { status?: string }) =>
+    request<{ applications: Application[] }>(`/applications${qs(params)}`),
+  getApplication: (id: string) => request<{ application: Application }>(`/applications/${id}`),
+  reviewApplication: (
+    id: string,
+    data: { action: 'review' } | { action: 'decline'; note?: string } | { action: 'approve'; market_ids: string[]; note?: string },
+  ) =>
+    request<{ application: Application; producer?: Producer; memberships?: Membership[] }>(`/applications/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  // Staff users, audit, dashboard, providers
+  getStaffUsers: () => request<{ users: StaffUser[] }>('/admin/users'),
+  inviteStaffUser: (data: { phone: string; name: string; role: 'admin' | 'market_manager'; assigned_market_ids: string[]; email?: string }) =>
+    request<{ user: StaffUser; sms: SmsOutcome }>('/admin/users/invite', { method: 'POST', body: JSON.stringify(data) }),
+  resendStaffInvite: (id: string) =>
+    request<{ sms: SmsOutcome }>(`/admin/users/${id}/resend-invite`, { method: 'POST' }),
+  updateStaffUser: (
+    id: string,
+    data: Partial<{ name: string; email: string | null; role: 'admin' | 'market_manager'; assigned_market_ids: string[]; active: boolean }>,
+  ) => request<{ user: StaffUser }>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getAuditLog: (params?: { limit?: number; collection?: string; actor_id?: string; action_prefix?: string }) =>
+    request<{ entries: AuditEntry[] }>(`/audit-log${qs(params)}`),
+  getDashboard: () => request<{ generated_at: string; markets: DashboardCard[] }>('/dashboard'),
+  getProviders: () => request<Providers>('/admin/providers'),
 };
