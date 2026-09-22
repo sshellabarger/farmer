@@ -1,5 +1,8 @@
 import dotenv from 'dotenv';
-dotenv.config({ override: true });
+// No `override`: a value already in process.env (tests, CI, Cloud Functions)
+// always wins over .env. The vitest setup file relies on this to force the
+// console providers regardless of what a developer keeps in .env.
+dotenv.config();
 import { z } from 'zod';
 
 const envSchema = z.object({
@@ -7,10 +10,18 @@ const envSchema = z.object({
   GCLOUD_PROJECT: z.string().optional(),
   FIREBASE_CONFIG: z.string().optional(),
 
-  // SMS provider. voip.ms is the only one (SPEC §9 D5); the enum stays so a
-  // console/test provider can be added in Phase 2 without changing callers.
-  SMS_PROVIDER: z.enum(['voipms']).default('voipms'),
-  // voip.ms
+  // ─── Test mode (SPEC §7.3) ────────────────────────────────────────────────
+  // The console providers log every text/email and record it in `messages`
+  // as `simulated`. The real providers (voip.ms, Resend) are reachable ONLY
+  // when NODE_ENV=production AND ALLOW_REAL_SENDS=true; otherwise the send
+  // functions throw SendsDisabledError before any I/O. Defaults are console
+  // so a fresh checkout can never send anything real.
+  SMS_PROVIDER: z.enum(['voipms', 'console']).default('console'),
+  EMAIL_PROVIDER: z.enum(['resend', 'console']).default('console'),
+  // Real providers are reachable only when NODE_ENV=production AND this is 'true' (SPEC §7.3).
+  ALLOW_REAL_SENDS: z.enum(['true', 'false']).default('false'),
+
+  // voip.ms (the only real SMS provider, SPEC §9 D5)
   VOIPMS_USERNAME: z.string().optional(),
   VOIPMS_PASSWORD: z.string().optional(),
   VOIPMS_DID: z.string().optional(),

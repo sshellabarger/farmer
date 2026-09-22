@@ -2,7 +2,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 import type { FastifyBaseLogger } from 'fastify';
 import { v4 as uuid } from 'uuid';
 import type { Env } from '../config/env.js';
-import { sendSms } from './sms.js';
+import { trySendSms, type SmsKind } from './sms.js';
 
 /**
  * Phase 1 STOPGAP inbound handler (SPEC §7.4, minimal).
@@ -13,9 +13,9 @@ import { sendSms } from './sms.js';
  * true, and (3) answers anything else with a one-line "the service has
  * changed" note at most once per 24 hours per phone — never a loop.
  *
- * Every outbound reply is logged to `messages` too. Nothing here throws on a
- * send failure: voip.ms retries non-200 webhook responses, which would
- * reprocess the inbound text.
+ * Every outbound reply goes through `trySendSms`, which logs it to
+ * `messages` and never throws: voip.ms retries non-200 webhook responses,
+ * which would reprocess the inbound text.
  */
 
 export const STOP_KEYWORDS = new Set(['STOP', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT']);
@@ -29,7 +29,7 @@ export const REPLIES = {
   closed: "Thanks. FarmLink's ordering service has closed and is becoming the SJCA farmers market manager. A team member will follow up.",
 } as const;
 
-export type OutboundKind = 'opt_out_confirm' | 'opt_in_confirm' | 'help' | 'auto_reply' | 'broadcast';
+export type OutboundKind = Extract<SmsKind, 'opt_out_confirm' | 'opt_in_confirm' | 'help' | 'auto_reply'>;
 
 // Only one "service has changed" auto-reply per phone per window.
 const AUTO_REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -44,71 +44,10 @@ function toDate(value: unknown): Date | null {
 }
 
 /**
- * Send a text and log it to `messages`. Resolves to the log outcome instead
- * of throwing, so callers inside a webhook or a broadcast loop can carry on.
- *
- * The provider send and the log write are deliberately separate: only a
- * failed `sendSms` yields a `failed` row. Once the text is out, the `sent`
- * row is what `repliedRecently()` reads to enforce one courtesy reply per
- * 24 h, so a failed write is retried once and then reported — never recorded
- * as `failed`, which would let a second auto-reply through.
+ * True if an outbound text went out to this phone within the window. A
+ * `simulated` row (console provider) counts the same as `sent`: the reply
+ * "happened" as far as the one-per-24 h rule is concerned.
  */
-export async function sendAndLogSms({
-  db,
-  env,
-  to,
-  body,
-  kind,
-  extra = {},
-}: {
-  db: Firestore;
-  env: Env;
-  to: string;
-  body: string;
-  kind: OutboundKind;
-  extra?: Record<string, unknown>;
-}): Promise<{ ok: true; provider_message_id: string } | { ok: false; error: string }> {
-  const id = uuid();
-  const row = db.collection('messages').doc(id);
-  const base = {
-    direction: 'outbound',
-    to,
-    from: env.VOIPMS_DID ?? '',
-    body,
-    provider: 'voipms',
-    kind,
-    created_at: new Date(),
-    ...extra,
-  };
-
-  let providerMessageId: string;
-  try {
-    providerMessageId = await sendSms({ env, to, body });
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    await row.set({ ...base, provider_message_id: null, status: 'failed', error }).catch(() => {});
-    return { ok: false, error };
-  }
-
-  const sent = { ...base, provider_message_id: providerMessageId, status: 'sent' };
-  try {
-    await row.set(sent);
-  } catch {
-    try {
-      await row.set(sent);
-    } catch (err) {
-      // Swallow: the text went out and a webhook caller must still return
-      // 200. The provider id is the only handle left to reconcile by.
-      console.error(
-        `Sent SMS not logged: messages/${id} write failed twice (provider_message_id=${providerMessageId}, kind=${kind})`,
-        err,
-      );
-    }
-  }
-  return { ok: true, provider_message_id: providerMessageId };
-}
-
-/** True if an outbound text was successfully sent to this phone within the window. */
 async function repliedRecently(db: Firestore, phone: string, now: Date): Promise<boolean> {
   // One equality filter at the DB, the rest in memory (repo convention; no
   // composite index needed).
@@ -116,7 +55,8 @@ async function repliedRecently(db: Firestore, phone: string, now: Date): Promise
   const cutoff = now.getTime() - AUTO_REPLY_WINDOW_MS;
   return snap.docs.some((d) => {
     const m = d.data();
-    if (m.direction !== 'outbound' || m.status !== 'sent') return false;
+    if (m.direction !== 'outbound') return false;
+    if (m.status !== 'sent' && m.status !== 'simulated') return false;
     const at = toDate(m.created_at);
     return !!at && at.getTime() >= cutoff;
   });
@@ -148,6 +88,10 @@ export async function handleInboundText({
     provider: 'voipms',
     provider_message_id: providerMessageId,
     status: 'received',
+    status_at: now,
+    error: null,
+    kind: 'inbound',
+    segments: 1,
     created_at: now,
   });
 
@@ -155,9 +99,10 @@ export async function handleInboundText({
   const userSnap = await db.collection('users').where('phone', '==', from).limit(1).get();
   const userRef = userSnap.empty ? null : userSnap.docs[0].ref;
   const userData = userSnap.empty ? null : userSnap.docs[0].data();
+  const userId = userSnap.empty ? null : userSnap.docs[0].id;
 
   const reply = async (text: string, kind: OutboundKind) => {
-    const result = await sendAndLogSms({ db, env, to: from, body: text, kind });
+    const result = await trySendSms({ db, env, to: from, body: text, kind, user_id: userId });
     if (!result.ok) log.warn({ to: from, kind, error: result.error }, 'Inbound auto-reply failed to send');
   };
 
