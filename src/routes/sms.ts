@@ -78,8 +78,27 @@ export async function smsRoutes(app: FastifyInstance) {
   app.get('/voipms/inbound', handleVoipmsInbound);
   app.post('/voipms/inbound', handleVoipmsInbound);
 
-  // Delivery-status callback (stub; implemented with the message log in a later phase).
-  app.post('/status', async (_request, reply) => {
-    reply.send({ ok: true });
+  // Delivery-status callback — documented no-op (Phase 3 contract §5.3).
+  //
+  // voip.ms's SMS API has no outbound delivery-receipt callback: the wiki
+  // documents callbacks for RECEIVED messages only ("SMS URL Callback"), and
+  // third-party voip.ms integrations poll getSMS for their own view of sent
+  // messages rather than receiving DLRs. Sources: SMS-MMS — VoIP.ms Wiki
+  // (https://wiki.voip.ms/article/SMS-MMS), SMS — VoIP.ms Wiki (beta)
+  // (https://wikibeta.voip.ms/article/SMS), matrisms — a voip.ms bridge that
+  // polls getSMS (https://github.com/Leicas/matrisms).
+  //
+  // Consequence: `messages.status` is terminal at 'sent' for the voip.ms
+  // provider — it means "accepted by voip.ms", not "delivered to the
+  // handset". 'delivered' and a post-send 'failed' are reserved for a future
+  // provider that actually offers delivery receipts. This endpoint stays
+  // registered (so nothing 404s if voip.ms or a future provider is pointed
+  // at it) but accepts any body, writes nothing to `messages` — an
+  // unauthenticated endpoint must never mutate `messages` by provider id —
+  // and returns a fixed `{ ok, updated }` shape so a future provider's
+  // signature check and provider_message_id lookup is an additive change.
+  app.post('/status', async (request, reply) => {
+    app.log.info({ body: request.body }, 'sms/status callback received (no provider supports delivery receipts)');
+    reply.send({ ok: true, updated: false });
   });
 }
