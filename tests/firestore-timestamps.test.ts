@@ -85,7 +85,9 @@ describe('market dates read back from Firestore', () => {
       status: 'collecting',
       actions: {
         checkin_sent_at: null,
-        reminders_sent: [Timestamp.fromDate(end)],
+        // Phase 3 (contract §2.2): reminders_sent entries are ReminderSent
+        // objects, not bare Timestamps.
+        reminders_sent: [{ offset_min: 1440, sent_at: Timestamp.fromDate(end), recipients: 2, failed: 0, skipped: null }],
         deadline_at: Timestamp.fromDate(new Date('2026-09-22T17:00:00Z')),
         deadline_processed_at: null,
       },
@@ -93,7 +95,10 @@ describe('market dates read back from Firestore', () => {
     });
     expect(doc.end_at.getTime()).toBe(end.getTime());
     expect(doc.actions.deadline_at.getTime()).toBe(Date.parse('2026-09-22T17:00:00Z'));
-    expect(doc.actions.reminders_sent[0]!.getTime()).toBe(end.getTime());
+    expect(doc.actions.reminders_sent[0]!.offset_min).toBe(1440);
+    expect(doc.actions.reminders_sent[0]!.sent_at.getTime()).toBe(end.getTime());
+    expect(doc.actions.reminders_sent[0]!.recipients).toBe(2);
+    expect(doc.actions.reminders_sent[0]!.skipped).toBeNull();
     expect(doc.actions.checkin_sent_at).toBeNull();
     expect(doc.actions.approved_at).toBeNull();
     expect(doc.created_at.getTime()).toBe(end.getTime());

@@ -46,4 +46,14 @@ export const collections = {
   market_dates: 'market_dates',
   // Phase 2. Doc id = uuid. Written by src/services/audit.ts writeAudit().
   audit_log: 'audit_log',
+  // Phase 2. Doc id = uuid.
+  producers: 'producers',
+  // Phase 2. Doc id = `${producer_id}_${market_id}`.
+  producer_memberships: 'producer_memberships',
+  // Phase 2. Doc id = uuid.
+  applications: 'applications',
+  // Phase 2/3. Doc id = `${market_date_id}_${producer_id}`.
+  checkins: 'checkins',
+  // Phase 3 (contract §2.1). Doc id = the token itself.
+  link_tokens: 'link_tokens',
 } as const;

@@ -23,6 +23,11 @@ export type FeedbackType = 'feature_request' | 'bug_report';
 export type FeedbackStatus = 'open' | 'under_review' | 'planned' | 'in_progress' | 'resolved' | 'closed';
 export type FeedbackPriority = 'low' | 'medium' | 'high' | 'critical';
 
+// Phase 3 (contract §2.7): check-in workflow.
+export type CheckinSource = 'form' | 'import' | 'sms';
+export type LinkTokenPurpose = 'checkin';
+export type WorkflowActionKey = 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts';
+
 export interface AddressJson {
   street: string;
   city: string;
