@@ -16,14 +16,31 @@ export interface ExtraQuestion {
   options?: string[];
 }
 
+/** Phase 3 contract §2.2: one `reminders_sent` entry per offset the engine has acted on. */
+export interface ReminderSent {
+  offset_min: number;
+  sent_at: Date;
+  recipients: number;
+  failed: number;
+  skipped: 'superseded' | null;
+}
+
 export interface MarketDateActions {
   checkin_sent_at: Date | null;
-  reminders_sent: Date[];
+  reminders_sent: ReminderSent[];
   deadline_at: Date;
   deadline_processed_at: Date | null;
   drafts_generated_at: Date | null;
   approved_at: Date | null;
   booth_texts_sent_at: Date | null;
+  // Phase 3 — absent on every doc the generator alone has ever touched;
+  // readers (marketDateFromData) default them.
+  checkin_recipients?: number;
+  checkin_failed?: number;
+  summary_sent_at?: Date | null;
+  summary_skipped?: 'no_recipients' | 'notify_false' | null;
+  /** keys: 'checkin' | `reminder_${offset_min}` | 'deadline' | 'summary' — never count toward isDateDecided. */
+  claims?: Record<string, Date>;
 }
 
 export interface MarketDateDoc {
@@ -48,6 +65,12 @@ export interface MarketDateDoc {
   source: 'generator' | 'import';
   created_at: Date;
   updated_at: Date;
+  // Phase 3 — written by processDeadline; absent until a date's deadline has
+  // been processed at least once.
+  non_responders?: string[];
+  spot_not_held?: string[];
+  deadline_recipient_count?: number;
+  deadline_responded_count?: number;
 }
 
 export interface GenerateOptions {
@@ -150,16 +173,44 @@ function computeExpected(market: FarmersMarket, date: string): ExpectedDay | nul
  * field normalised to `Date` (Firestore returns Timestamps). The one way to
  * turn a snapshot into a MarketDateDoc — routes use it too.
  */
+function reminderSentFromData(raw: unknown): ReminderSent {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    offset_min: typeof r.offset_min === 'number' ? r.offset_min : 0,
+    sent_at: toDateOrEpoch(r.sent_at),
+    recipients: typeof r.recipients === 'number' ? r.recipients : 0,
+    failed: typeof r.failed === 'number' ? r.failed : 0,
+    skipped: r.skipped === 'superseded' ? 'superseded' : null,
+  };
+}
+
+function claimsFromData(raw: unknown): Record<string, Date> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, Date> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const d = toDate(value);
+    if (d) out[key] = d;
+  }
+  return out;
+}
+
 export function marketDateFromData(id: string, data: Record<string, unknown>): MarketDateDoc {
   const a = (data.actions ?? {}) as Record<string, unknown>;
   const actions: MarketDateActions = {
     checkin_sent_at: toDate(a.checkin_sent_at),
-    reminders_sent: (Array.isArray(a.reminders_sent) ? a.reminders_sent : []).map(toDate).filter((d): d is Date => d !== null),
+    // Phase 3 (contract §2.2): reminders_sent entries are ReminderSent objects,
+    // not bare Timestamps — a naive `.map(toDate)` would silently drop every one.
+    reminders_sent: (Array.isArray(a.reminders_sent) ? a.reminders_sent : []).map(reminderSentFromData),
     deadline_at: toDateOrEpoch(a.deadline_at),
     deadline_processed_at: toDate(a.deadline_processed_at),
     drafts_generated_at: toDate(a.drafts_generated_at),
     approved_at: toDate(a.approved_at),
     booth_texts_sent_at: toDate(a.booth_texts_sent_at),
+    checkin_recipients: typeof a.checkin_recipients === 'number' ? a.checkin_recipients : undefined,
+    checkin_failed: typeof a.checkin_failed === 'number' ? a.checkin_failed : undefined,
+    summary_sent_at: 'summary_sent_at' in a ? toDate(a.summary_sent_at) : undefined,
+    summary_skipped: a.summary_skipped === 'no_recipients' || a.summary_skipped === 'notify_false' ? a.summary_skipped : undefined,
+    claims: claimsFromData(a.claims),
   };
   return {
     ...(data as Omit<MarketDateDoc, 'id'>),
@@ -167,6 +218,10 @@ export function marketDateFromData(id: string, data: Record<string, unknown>): M
     start_at: toDateOrEpoch(data.start_at),
     end_at: toDateOrEpoch(data.end_at),
     actions,
+    non_responders: Array.isArray(data.non_responders) ? (data.non_responders as string[]) : undefined,
+    spot_not_held: Array.isArray(data.spot_not_held) ? (data.spot_not_held as string[]) : undefined,
+    deadline_recipient_count: typeof data.deadline_recipient_count === 'number' ? data.deadline_recipient_count : undefined,
+    deadline_responded_count: typeof data.deadline_responded_count === 'number' ? data.deadline_responded_count : undefined,
     cancelled_at: toDate(data.cancelled_at),
     generated_at: toDateOrEpoch(data.generated_at),
     created_at: toDateOrEpoch(data.created_at),

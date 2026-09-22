@@ -35,7 +35,12 @@ export type SmsKind =
   | 'alert'
   | 'support'
   | 'checkin'
-  | 'booth';
+  | 'booth'
+  // Phase 3 (contract §2.6): the check-in workflow and the inbound upgrade.
+  | 'checkin_link'
+  | 'checkin_reminder'
+  | 'deadline_summary'
+  | 'forwarded_inbound';
 
 export interface SendSmsArgs {
   env: Env;

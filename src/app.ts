@@ -26,6 +26,8 @@ import { producerRoutes } from './routes/producers.js';
 import { membershipRoutes } from './routes/memberships.js';
 import { applicationRoutes } from './routes/applications.js';
 import { checkinRoutes } from './routes/checkins.js';
+import { checkinPublicRoutes } from './routes/checkin-public.js';
+import { marketDateRoutes } from './routes/market-dates.js';
 
 export interface BuildAppOptions {
   db: Firestore;
@@ -98,6 +100,8 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
   await app.register(membershipRoutes, { prefix: '/api/memberships' });
   await app.register(applicationRoutes, { prefix: '/api/applications' });
   await app.register(checkinRoutes, { prefix: '/api/checkins' });
+  await app.register(checkinPublicRoutes, { prefix: '/api/checkin' });
+  await app.register(marketDateRoutes, { prefix: '/api/market-dates' });
   await app.register(adminUserRoutes, { prefix: '/api/admin/users' });
   await app.register(auditLogRoutes, { prefix: '/api/audit-log' });
   await app.register(dashboardRoutes, { prefix: '/api/dashboard' });

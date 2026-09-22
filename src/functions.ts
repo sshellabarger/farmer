@@ -102,3 +102,31 @@ export const rollMarketDates = onSchedule(
     }
   }
 );
+
+// Phase 3 check-in workflow engine (contract §3.1). Runs every 5 minutes;
+// each date's own idempotency claims (src/services/checkin-workflow.ts)
+// make an interrupted run safe to resume on the next tick. The cron's
+// America/Chicago zone only anchors when the job fires — every instant the
+// engine computes comes from each market's own timezone/workflow/quiet_hours.
+export const processMarketDates = onSchedule(
+  { schedule: '*/5 * * * *', timeZone: 'America/Chicago', timeoutSeconds: 300 },
+  async () => {
+    const db = getDb();
+    const env = getEnv();
+    try {
+      const { processMarketDates: run } = await import('./services/checkin-workflow.js');
+      const r = await run(db, env);
+      console.log(
+        `processMarketDates: scanned=${r.scanned} considered=${r.considered} checkin_sent=${r.checkin_sent} reminders_sent=${r.reminders_sent} deadlines=${r.deadlines_processed} summaries=${r.summaries_sent} claimed=${r.skipped_claimed} errors=${r.errors.length}`,
+      );
+      if (r.errors.length > 0) {
+        const { notifyError } = await import('./services/error-notify.js');
+        await notifyError({ env, err: new Error(r.errors.join('\n')), source: 'scheduler:processMarketDates' }).catch(() => {});
+      }
+    } catch (err) {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err, source: 'scheduler:processMarketDates' }).catch(() => {});
+      throw err;
+    }
+  },
+);
