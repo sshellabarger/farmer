@@ -128,7 +128,12 @@ function MarketCard({ card }: { card: DashboardCard }) {
         {collecting_date ? (
           <>
             <div className="flex items-center justify-between text-[13px] mb-1.5">
-              <span className="text-text">Collecting: <strong>{formatDateLabel(collecting_date.date)}</strong></span>
+              <span className="text-text">
+                Collecting:{' '}
+                <Link href={`/admin/market-dates?id=${encodeURIComponent(collecting_date.id)}`} className="font-semibold text-green-700 no-underline hover:underline">
+                  {formatDateLabel(collecting_date.date)}
+                </Link>
+              </span>
               {progress && (
                 <span className="font-mono text-text-soft">
                   {progress.checkins}/{progress.active_memberships} ({percent}%)

@@ -25,6 +25,19 @@ const COLORS: Record<string, { bg: string; text: string }> = {
   failed: { bg: '#FEE2E2', text: '#991B1B' },
   admin: { bg: '#FCE7F3', text: '#9D174D' },
   market_manager: { bg: '#DBEAFE', text: '#1E40AF' },
+  // Phase 3: check-in recipient / message / timeline states (contract §6.3)
+  responded: { bg: '#D1FAE5', text: '#065F46' },
+  no_response: { bg: '#FEF3C7', text: '#92400E' },
+  late: { bg: '#DBEAFE', text: '#1E40AF' },
+  spot_not_held: { bg: '#FEE2E2', text: '#991B1B' },
+  form: { bg: '#F3F4F6', text: '#6B7280' },
+  sms: { bg: '#F3F4F6', text: '#6B7280' },
+  import: { bg: '#F3F4F6', text: '#6B7280' },
+  deferred: { bg: '#F3F4F6', text: '#6B7280' },
+  pending: { bg: '#F3F4F6', text: '#6B7280' },
+  done: { bg: '#D1FAE5', text: '#065F46' },
+  superseded: { bg: '#F3F4F6', text: '#6B7280' },
+  unreachable: { bg: '#F3F4F6', text: '#6B7280' },
 };
 
 export function StatusChip({ status, title }: { status: string; title?: string }) {
