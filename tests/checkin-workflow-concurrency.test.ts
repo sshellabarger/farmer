@@ -823,4 +823,27 @@ describe('(i) the manual close and the engine share the deadline and summary loc
     expect(actions.deadline_processed_at).toEqual(T_DEADLINE);
     expect(actions.summary_sent_at).toEqual(T_DEADLINE);
   });
+
+  it('an early close ends the producer-facing texts for that date', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const T_CHECKIN = new Date('2026-09-19T18:00:00Z');
+    const T_REMINDER = new Date('2026-09-20T17:00:00Z');
+    vi.setSystemTime(new Date('2026-09-19T17:30:00Z')); // half an hour after the close, before the check-in text
+    const db = seed(3);
+    const app = await buildRoutes(db);
+    const headers = { authorization: `Bearer ${tokenFor('admin1')}` };
+
+    const close = await app.inject({ method: 'POST', url: `/api/market-dates/${DATE_ID}/close`, headers, payload: { notify: false } });
+    expect(close.statusCode).toBe(200);
+    expect(close.json().result).toMatchObject({ processed: true, summary: 'skipped_notify_false' });
+
+    for (const t of [T_CHECKIN, T_REMINDER, T_DEADLINE]) {
+      vi.setSystemTime(t);
+      const r = await run(db, t);
+      expect(r).toMatchObject({ checkin_sent: 0, reminders_sent: 0, deadlines_processed: 0, summaries_sent: 0, errors: [] });
+    }
+    expect(db.count('messages')).toBe(0);
+    expect(emailPrints()).toBe(0);
+    await app.close();
+  });
 });

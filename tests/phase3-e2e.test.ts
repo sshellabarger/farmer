@@ -145,6 +145,7 @@ const FULL_FORM = {
 let logSpy: ReturnType<typeof vi.spyOn>;
 function startClock() {
   vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(T_CHECKIN); // fixtures written by seed() get a pinned instant, not install-time
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 }
 afterEach(() => {

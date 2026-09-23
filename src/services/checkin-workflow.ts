@@ -524,10 +524,21 @@ export type CloseOutcome =
   | 'skipped_no_recipients'
   | 'skipped_notify_false'
   | 'failed'
+  /** This call processed the deadline, but the engine's summary step had already sent the summary. */
+  | 'sent_by_engine'
+  /** The engine holds the step lock right now — refresh the status page rather than retrying. */
+  | 'in_progress'
   /** The deadline was already processed (by the engine or an earlier close) — nothing was written or sent. */
-  | 'already_processed'
-  /** The engine holds the step lock right now — nothing was written or sent; try again shortly. */
-  | 'in_progress';
+  | 'already_processed';
+
+export interface CloseResult {
+  /** True when THIS call wrote the deadline flags; the route answers 200 and audits only then. */
+  processed: boolean;
+  recipients: number;
+  responded: number;
+  non_responders: string[];
+  summary: CloseOutcome;
+}
 
 export async function processDeadline(
   db: Firestore,
@@ -535,7 +546,7 @@ export async function processDeadline(
   market: FarmersMarket,
   date: MarketDateDoc,
   opts: { now: Date; notify: boolean; actor: string },
-): Promise<{ recipients: number; responded: number; non_responders: string[]; summary: CloseOutcome }> {
+): Promise<CloseResult> {
   const ref = db.collection('market_dates').doc(date.id);
   const asLoaded = {
     recipients: date.deadline_recipient_count ?? 0,
@@ -547,7 +558,9 @@ export async function processDeadline(
   // close overlapping the engine's deadline tick — or a second close — can
   // neither process the deadline twice nor send the staff summary email twice.
   const deadline = await claim(db, date.id, 'deadline', opts.now, (a) => !!a.deadline_processed_at);
-  if (deadline.status !== 'proceed') return { ...asLoaded, summary: deadline.status === 'claimed' ? 'in_progress' : 'already_processed' };
+  if (deadline.status !== 'proceed') {
+    return { processed: false, ...asLoaded, summary: deadline.status === 'claimed' ? 'in_progress' : 'already_processed' };
+  }
 
   const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
 
@@ -559,30 +572,33 @@ export async function processDeadline(
     'actions.deadline_processed_at': opts.now,
     updated_at: opts.now,
   };
+  const stats = { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds };
 
   if (recipients.length === 0) {
     await ref.update({ ...baseUpdate, 'actions.summary_sent_at': null, 'actions.summary_skipped': 'no_recipients' });
-    return { recipients: 0, responded: 0, non_responders: nonResponderIds, summary: 'skipped_no_recipients' };
+    return { processed: true, ...stats, summary: 'skipped_no_recipients' };
   }
 
   if (!opts.notify) {
     await ref.update({ ...baseUpdate, 'actions.summary_skipped': 'notify_false' });
-    return { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds, summary: 'skipped_notify_false' };
+    return { processed: true, ...stats, summary: 'skipped_notify_false' };
   }
 
   await ref.update(baseUpdate);
 
-  const stats = { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds };
   const summary = await claim(db, date.id, 'summary', opts.now, (a) => a.summary_sent_at != null || a.summary_skipped != null);
-  if (summary.status !== 'proceed') return { ...stats, summary: summary.status === 'claimed' ? 'in_progress' : 'already_processed' };
+  if (summary.status !== 'proceed') {
+    // We processed the deadline; the engine's summary step got there first.
+    return { processed: true, ...stats, summary: summary.status === 'claimed' ? 'in_progress' : 'sent_by_engine' };
+  }
   try {
     // Texts are keyed per staff member; the email goes out only from the run
     // that created the summary lock (same rule as the engine's summary step).
     await sendDeadlineSummary(db, env, market, date, stats, { now: opts.now, email: summary.created });
     await ref.update({ 'actions.summary_sent_at': opts.now, updated_at: opts.now });
-    return { ...stats, summary: 'sent' };
+    return { processed: true, ...stats, summary: 'sent' };
   } catch {
-    return { ...stats, summary: 'failed' };
+    return { processed: true, ...stats, summary: 'failed' };
   }
 }
 
@@ -748,7 +764,8 @@ async function processRemindersStep(
   now: Date,
 ): Promise<{ sent: number; claimed: number }> {
   if (!date.actions.checkin_sent_at) return { sent: 0, claimed: 0 };
-  if (schedule.deadline_at.getTime() <= now.getTime()) return { sent: 0, claimed: 0 };
+  // The deadline has passed, or an admin closed the date early: no more producer texts.
+  if (schedule.deadline_at.getTime() <= now.getTime() || date.actions.deadline_processed_at) return { sent: 0, claimed: 0 };
 
   const sentOffsets = new Set(date.actions.reminders_sent.map((r) => r.offset_min));
   const checkinSentAt = date.actions.checkin_sent_at;
@@ -824,7 +841,8 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
       const schedule = computeSchedule(market, date);
 
       // ── Check-in ──────────────────────────────────────────────────────
-      const deadlinePassed = schedule.deadline_at.getTime() <= now.getTime();
+      // An admin close (deadline_processed_at set early) also ends the producer-facing texts.
+      const deadlinePassed = schedule.deadline_at.getTime() <= now.getTime() || !!date.actions.deadline_processed_at;
       if (!date.actions.checkin_sent_at && schedule.checkin_effective_at.getTime() <= now.getTime() && !deadlinePassed) {
         const c = await claim(db, date.id, 'checkin', now, (a) => !!a.checkin_sent_at);
         if (c.status === 'claimed') result.skipped_claimed++;

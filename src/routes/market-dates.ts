@@ -245,8 +245,11 @@ export async function marketDateRoutes(app: FastifyInstance) {
     }
 
     const result = await processDeadline(app.db, app.env, market, date, { now, notify, actor: user.id });
-    if (result.summary === 'already_processed') return reply.status(409).send({ error: 'This date was already processed' });
-    if (result.summary === 'in_progress') return reply.status(409).send({ error: 'The deadline is being processed right now; try again in a minute' });
+    if (!result.processed) {
+      return reply.status(409).send({
+        error: result.summary === 'in_progress' ? 'The engine is processing this deadline right now; refresh the status page' : 'This date was already processed',
+      });
+    }
 
     await writeAudit(app.db, {
       actor_id: user.id,

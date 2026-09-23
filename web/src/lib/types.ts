@@ -507,8 +507,10 @@ export interface MarketDateStatusView {
 
 /** Contract §4.2 `POST /:id/close` result shape. */
 export interface CloseResult {
+  /** True when the request processed the deadline (409 otherwise). */
+  processed: boolean;
   recipients: number;
   responded: number;
   non_responders: string[];
-  summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed' | 'already_processed' | 'in_progress';
+  summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed' | 'sent_by_engine' | 'already_processed' | 'in_progress';
 }
