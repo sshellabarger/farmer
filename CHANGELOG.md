@@ -286,6 +286,28 @@ hardened in a follow-up (`rework/p3-fix`, below) for the one blocker they found.
 - 342 tests (32 files) after round 3; typecheck, web typecheck and the static build
   green at every commit.
 
+### Deployed — 2026-09-23 (16:35 UTC, from `main` `b6f8a27`)
+- Functions: `processMarketDates` created (every 5 minutes, 300 s timeout), `api`,
+  `processReminders` and `rollMarketDates` updated; every function carries
+  `APP_URL=https://farmlink.us` and real sends on. Bundle 315 KB. The first attempt hit a
+  transient "Cloud Runtime Config is currently experiencing issues" from the CLI; the
+  retry a minute later succeeded. Deployed with the project service account through an
+  isolated CLI config (the CLI login had expired), where the `webframeworks` experiment had
+  to be enabled before hosting would build.
+- First engine tick (manual, then the 16:40 UTC scheduled one): `scanned=29 considered=1
+  checkin_sent=0 reminders_sent=0 deadlines=1 summaries=0 claimed=0 errors=0` —
+  `wlrfm_2026-09-19` (the only date inside the 7-day window) got
+  `deadline_processed_at`, `non_responders: []`, `summary_skipped: no_recipients` and
+  one `workflow_locks` doc; the 28 other dates were untouched; zero messages, zero
+  tokens, zero alerts. Exactly the silent first run the contract predicted.
+- Hosting: 28 new files released; on farmlink.us `/checkin` ("Weekly check-in — SJCA
+  Markets"), `/checkin?t=…`, `/admin/market-dates?id=…`, `/admin` and `/apply` answer
+  200; `GET/POST /api/checkin/<unknown token>` 404; the staff status route 401 without a
+  token. The permanent certificate for farmlink.us is still provisioning (temporary one
+  serving); `www.farmlink.us` has no DNS record yet.
+- Nothing texts a producer until an admin gives one a phone; the first real text is the
+  Saturday 13:00 CT check-in link for `wlrfm_2026-09-26`.
+
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
 Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8 and D9

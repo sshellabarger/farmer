@@ -11,9 +11,10 @@ and merged 2026-09-21** — markets with configurable schedules, producers and a
 roles, the structural test mode, the admin web app and the survey importer
 (`docs/phase2-contract.md`, `CHANGELOG.md`) — **deployed 2026-09-22** with the 2026 WLRFM
 survey history imported (D20: 39 producers, 23 dates, 508 check-ins, no phone numbers).
-**Phase 3 built and merged 2026-09-22** — check-in links and texts, reminders, deadline
-flagging, STOP/HELP/YES/NO, quiet hours, the `/checkin` page and the market-date admin
-page (`docs/phase3-contract.md`, `CHANGELOG.md`); deploy pending the owner's go. The same
+**Phase 3 built, merged and deployed 2026-09-23** — check-in links and texts, reminders,
+deadline flagging, STOP/HELP/YES/NO, quiet hours, the `/checkin` page and the market-date
+admin page (`docs/phase3-contract.md`, `CHANGELOG.md`); the first engine tick processed
+the one in-window date silently, as designed. The same
 day `farmlink.us` was reconnected to Firebase Hosting (it had been parked at the registrar;
 production `APP_URL` had been the `web.app` address) and a hotfix shipped for Firestore
 `Timestamp` reads (`src/utils/dates.ts`).

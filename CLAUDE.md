@@ -20,14 +20,14 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   `docs/phase2-contract.md`; the changelog has the fold-in. Hotfix deployed 2026-09-22
   (`1bcd13b`): every read of a Firestore date field now goes through `src/utils/dates.ts`
   (see Conventions); voip.ms requests abort after 45 s.
-- **Phase 3 is built and merged (2026-09-22):** the check-in workflow engine
+- **Phase 3 is deployed (2026-09-23):** the check-in workflow engine
   (`processMarketDates` every 5 min), link tokens, the public `/checkin?t=` page and API,
   reminders, deadline flagging with a staff summary, STOP/START/HELP/YES/NO inbound
   handling, quiet hours, the `/admin/market-dates` page. Contract: `docs/phase3-contract.md`.
   Engine sends are idempotent per recipient (`sendSms` `dedupe_key` → the `messages` row
   is the lock) and each step takes an atomic `workflow_locks` claim via `create()`.
-  Deploy order: functions, then hosting; `APP_URL=https://farmlink.us` is set in the
-  deploy-time env file. Nothing texts a producer until an admin gives one a phone.
+  `APP_URL=https://farmlink.us` (deploy-time env file; the domain was reconnected to
+  Hosting on 2026-09-22). Nothing texts a producer until an admin gives one a phone.
   **Phase 4 is next** (SPEC §8): booth assignment.
 - **Production sends are opt-in.** `SMS_PROVIDER`/`EMAIL_PROVIDER` default to `console`;
   real providers exist only with `NODE_ENV=production` and `ALLOW_REAL_SENDS=true`. Those
