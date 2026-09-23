@@ -1,6 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import { addDays, eachDate, localToUtc, utcToLocalDate, weekdayOf } from '../utils/tz.js';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
+import { isAlreadyExists } from '../db/firestore.js';
 import type { FarmersMarket, ScheduleVersion } from './markets.js';
 import type { MarketDateStatus } from '../types/schema.js';
 
@@ -323,8 +324,17 @@ export async function generateMarketDates(db: Firestore, market: FarmersMarket, 
           created_at: now,
           updated_at: now,
         };
-        await db.collection('market_dates').doc(id).set(doc as Record<string, unknown>);
-        result.created += 1;
+        try {
+          await db.collection('market_dates').doc(id).create(doc as Record<string, unknown>);
+          result.created += 1;
+        } catch (err) {
+          // Another generator run (the nightly roll and an admin schedule save
+          // can overlap) created this date between our read and this write.
+          // Leave it alone: the engine may already have acted on it, and a
+          // blind set() would erase its flags (Phase 3 fix, round 3).
+          if (!isAlreadyExists(err)) throw err;
+          result.unchanged += 1;
+        }
         continue;
       }
 

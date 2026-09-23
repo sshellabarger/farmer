@@ -112,19 +112,10 @@ export class DuplicateSendError extends Error {
   }
 }
 
-/**
- * True when a Firestore write failed because the document already exists —
- * what `DocumentReference.create()` rejects with. The admin SDK surfaces a
- * GoogleError with gRPC `code` 6 (ALREADY_EXISTS) and a message that starts
- * `6 ALREADY_EXISTS: Document already exists: …`; both are recognised so a
- * wrapped or re-thrown error still counts.
- */
-export function isAlreadyExists(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: unknown; message?: unknown };
-  if (e.code === 6 || e.code === '6' || e.code === 'ALREADY_EXISTS') return true;
-  return typeof e.message === 'string' && /ALREADY_EXISTS/.test(e.message);
-}
+// The ALREADY_EXISTS predicate lives with the database code (src/db/firestore.ts);
+// it is re-exported here because the Phase 3 modules import it from this file.
+import { isAlreadyExists } from '../db/firestore.js';
+export { isAlreadyExists };
 
 /** Structural guard. Throws SendsDisabledError before any I/O. */
 export function selectSmsProvider(env: Env): SmsProvider {

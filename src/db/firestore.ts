@@ -59,3 +59,19 @@ export const collections = {
   // Phase 3 fix. Doc id = `${market_date_id}__${step}` (checkin | reminder_<offset> | deadline | summary); created atomically by the engine's claim(), never cleared.
   workflow_locks: 'workflow_locks',
 } as const;
+
+/**
+ * True when a Firestore write failed because the document already exists —
+ * what `DocumentReference.create()` rejects with. The admin SDK surfaces a
+ * GoogleError with gRPC `code` 6 (ALREADY_EXISTS) and a message that starts
+ * `6 ALREADY_EXISTS: Document already exists: …`; both are recognised so a
+ * wrapped or re-thrown error still counts. `create()` is the one atomic
+ * primitive this code base relies on (sends, step locks, first submissions,
+ * generated dates); every caller branches on this predicate.
+ */
+export function isAlreadyExists(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: unknown; message?: unknown };
+  if (e.code === 6 || e.code === '6' || e.code === 'ALREADY_EXISTS') return true;
+  return typeof e.message === 'string' && /ALREADY_EXISTS/.test(e.message);
+}

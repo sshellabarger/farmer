@@ -510,5 +510,5 @@ export interface CloseResult {
   recipients: number;
   responded: number;
   non_responders: string[];
-  summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed';
+  summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed' | 'already_processed' | 'in_progress';
 }

@@ -170,10 +170,10 @@ export async function handleInboundText({
     if (!isAlreadyExists(err)) throw err;
     const existing = (await db.collection('messages').doc(inboundMessageId).get()).data() as Record<string, unknown> | undefined;
     if (existing && existing.from === from && existing.body === body) {
-      log.info({ from, provider_message_id: providerMessageId, message_id: inboundMessageId }, 'Inbound text redelivered by the provider; already handled, ignoring');
+      log.info({ from_last4: from.slice(-4), provider_message_id: providerMessageId, message_id: inboundMessageId }, 'Inbound text redelivered by the provider; already handled, ignoring');
       return;
     }
-    log.warn({ from, provider_message_id: providerMessageId, message_id: inboundMessageId }, 'Provider message id reused for a different text; logging it under a fresh row');
+    log.warn({ from_last4: from.slice(-4), provider_message_id: providerMessageId, message_id: inboundMessageId }, 'Provider message id reused for a different text; logging it under a fresh row');
     inboundMessageId = uuid();
     await db.collection('messages').doc(inboundMessageId).create(inboundRow);
   }

@@ -1,12 +1,10 @@
 import type { Firestore } from 'firebase-admin/firestore';
+import { isAlreadyExists } from '../db/firestore.js';
 
 /**
- * Producer-side check-in lookups shared by the workflow engine and the staff
- * routes (executor A) and by the inbound text handler (executor B).
- *
- * SHARED VERBATIM: executor A owns this file; executor B copies it
- * byte-for-byte. Do not reformat or extend it here — put extensions in your
- * own module and import from this one.
+ * Producer-side check-in lookups shared by the workflow engine, the staff
+ * routes and the inbound text handler. (Built as a "copy verbatim" module by
+ * two Phase 3 executors; since the merge this is the single copy.)
  *
  * Firestore access stays inside the fake-db envelope (Phase 2 contract
  * §1.1.4): one equality filter per query, everything else in memory.
@@ -119,6 +117,9 @@ export interface AttendingNextResult {
  * Record a YES/NO answer texted by a producer. Creates a minimal
  * `source: 'sms'` check-in (every §2.6 field present, empty) when none exists
  * for the date, otherwise only updates `attending_next` on the existing one.
+ * The create is atomic: a form submission landing in the same instant keeps
+ * every one of its answers and gains only the texted one (a read-then-set here
+ * could replace a full check-in with this stub).
  */
 export async function recordAttendingNext(
   db: Firestore,
@@ -129,12 +130,18 @@ export async function recordAttendingNext(
 ): Promise<AttendingNextResult> {
   const id = `${open.market_date_id}_${open.producer_id}`;
   const ref = db.collection('checkins').doc(id);
-  const existing = await ref.get();
-  if (existing.exists) {
-    await ref.update({ attending_next: attending, attending_next_raw: raw, updated_at: now });
-    return { checkin_id: id, created: false };
+  try {
+    await ref.create(stubCheckin(open, attending, raw, now));
+    return { checkin_id: id, created: true };
+  } catch (err) {
+    if (!isAlreadyExists(err)) throw err;
   }
-  await ref.set({
+  await ref.update({ attending_next: attending, attending_next_raw: raw, updated_at: now });
+  return { checkin_id: id, created: false };
+}
+
+function stubCheckin(open: OpenCheckin, attending: boolean, raw: string, now: Date): Record<string, unknown> {
+  return {
     producer_id: open.producer_id,
     market_id: open.market_id,
     market_date_id: open.market_date_id,
@@ -159,6 +166,5 @@ export async function recordAttendingNext(
     partial: true,
     created_at: now,
     updated_at: now,
-  });
-  return { checkin_id: id, created: true };
+  };
 }

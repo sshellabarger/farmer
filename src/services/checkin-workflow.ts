@@ -519,15 +519,37 @@ async function computeDeadlineStats(
  * a check-in or reminder loop on this very date, and its own field-path
  * writes and these commute (round 2 — see the file comment).
  */
+export type CloseOutcome =
+  | 'sent'
+  | 'skipped_no_recipients'
+  | 'skipped_notify_false'
+  | 'failed'
+  /** The deadline was already processed (by the engine or an earlier close) — nothing was written or sent. */
+  | 'already_processed'
+  /** The engine holds the step lock right now — nothing was written or sent; try again shortly. */
+  | 'in_progress';
+
 export async function processDeadline(
   db: Firestore,
   env: Env,
   market: FarmersMarket,
   date: MarketDateDoc,
   opts: { now: Date; notify: boolean; actor: string },
-): Promise<{ recipients: number; responded: number; non_responders: string[]; summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed' }> {
-  const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
+): Promise<{ recipients: number; responded: number; non_responders: string[]; summary: CloseOutcome }> {
   const ref = db.collection('market_dates').doc(date.id);
+  const asLoaded = {
+    recipients: date.deadline_recipient_count ?? 0,
+    responded: date.deadline_responded_count ?? 0,
+    non_responders: date.non_responders ?? [],
+  };
+
+  // Round 3: the manual close takes the same step locks as the engine, so a
+  // close overlapping the engine's deadline tick — or a second close — can
+  // neither process the deadline twice nor send the staff summary email twice.
+  const deadline = await claim(db, date.id, 'deadline', opts.now, (a) => !!a.deadline_processed_at);
+  if (deadline.status !== 'proceed') return { ...asLoaded, summary: deadline.status === 'claimed' ? 'in_progress' : 'already_processed' };
+
+  const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
 
   const baseUpdate: Record<string, unknown> = {
     non_responders: nonResponderIds,
@@ -549,19 +571,18 @@ export async function processDeadline(
   }
 
   await ref.update(baseUpdate);
+
+  const stats = { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds };
+  const summary = await claim(db, date.id, 'summary', opts.now, (a) => a.summary_sent_at != null || a.summary_skipped != null);
+  if (summary.status !== 'proceed') return { ...stats, summary: summary.status === 'claimed' ? 'in_progress' : 'already_processed' };
   try {
-    await sendDeadlineSummary(
-      db,
-      env,
-      market,
-      date,
-      { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds },
-      { now: opts.now },
-    );
+    // Texts are keyed per staff member; the email goes out only from the run
+    // that created the summary lock (same rule as the engine's summary step).
+    await sendDeadlineSummary(db, env, market, date, stats, { now: opts.now, email: summary.created });
     await ref.update({ 'actions.summary_sent_at': opts.now, updated_at: opts.now });
-    return { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds, summary: 'sent' };
+    return { ...stats, summary: 'sent' };
   } catch {
-    return { recipients: recipients.length, responded: responded.length, non_responders: nonResponderIds, summary: 'failed' };
+    return { ...stats, summary: 'failed' };
   }
 }
 

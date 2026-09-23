@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Fastify from 'fastify';
 import { marketRoutes } from '../src/routes/markets.js';
 import { signJwt } from '../src/utils/jwt.js';
@@ -7,6 +7,17 @@ import { createErrorHandler } from '../src/utils/http-error-handler.js';
 
 const SECRET = 'test-secret';
 const ENV = { JWT_SECRET: SECRET, NODE_ENV: 'test' } as never;
+
+// The market routes generate the rolling date window from the real clock and
+// the fixture's season ends 2026-10-31: pin the clock inside the season so the
+// suite does not turn red in November.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-09-20T12:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function seededDb(extra: Record<string, Record<string, Record<string, unknown>>> = {}) {
   return fakeDb({

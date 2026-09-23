@@ -15,8 +15,9 @@ import Fastify from 'fastify';
 import type { Firestore } from 'firebase-admin/firestore';
 import { fakeDb } from './helpers/fake-db.js';
 import { tokenFor } from './helpers/staff-auth.js';
-import { processMarketDates, DEDUPE_KEYS, workflowLockId, CLAIM_TTL_MS } from '../src/services/checkin-workflow.js';
+import { processMarketDates, processDeadline, DEDUPE_KEYS, workflowLockId, CLAIM_TTL_MS } from '../src/services/checkin-workflow.js';
 import { marketDateFromData } from '../src/services/market-dates.js';
+import type { FarmersMarket } from '../src/services/markets.js';
 import { sendSms, trySendSms, DuplicateSendError, isAlreadyExists } from '../src/services/sms.js';
 import { sendSms as voipmsSend } from '../src/services/voipms.js';
 import { marketDateRoutes } from '../src/routes/market-dates.js';
@@ -765,5 +766,61 @@ describe('(h) an admin close {notify:true} issued while the engine is mid check-
     expect(rowsOfKind(db, 'deadline_summary')).toHaveLength(2);
     expect(db.count('messages')).toBe(5); // 3 links + 2 summaries
     await app.close();
+  });
+});
+
+// Round 3: the manual close takes the engine's own step locks, so it can
+// neither process a deadline twice nor send the staff summary email twice.
+describe('(i) the manual close and the engine share the deadline and summary locks', () => {
+  const T_DEADLINE = new Date('2026-09-22T17:00:00Z'); // deadline_offset_min 4320 after the 2026-09-19 close
+
+  it('two concurrent closes: one processes the deadline and emails once, the other is refused', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T_DEADLINE);
+    const db = seed(3);
+    const app = await buildRoutes(db);
+    const headers = { authorization: `Bearer ${tokenFor('admin1')}` };
+
+    const [a, b] = await Promise.all([
+      app.inject({ method: 'POST', url: `/api/market-dates/${DATE_ID}/close`, headers, payload: { notify: true } }),
+      app.inject({ method: 'POST', url: `/api/market-dates/${DATE_ID}/close`, headers, payload: { notify: true } }),
+    ]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    const won = a.statusCode === 200 ? a : b;
+    expect(won.json().result).toMatchObject({ recipients: 3, responded: 0, non_responders: ['p01', 'p02', 'p03'], summary: 'sent' });
+    expect(rowsOfKind(db, 'deadline_summary').map((s) => s.user_id).sort()).toEqual(['admin1', 'mgr_w']);
+    expect(emailPrints()).toBe(1);
+
+    const actions = (db.dump('market_dates')[DATE_ID] as Record<string, unknown>).actions as Record<string, unknown>;
+    expect(actions.deadline_processed_at).toEqual(T_DEADLINE);
+    expect(actions.summary_sent_at).toEqual(T_DEADLINE);
+
+    // The scheduled tick afterwards has nothing left to do.
+    const r = await run(db, T_DEADLINE);
+    expect(r).toMatchObject({ deadlines_processed: 0, summaries_sent: 0, errors: [] });
+    expect(emailPrints()).toBe(1);
+    expect(rowsOfKind(db, 'deadline_summary')).toHaveLength(2);
+    await app.close();
+  });
+
+  it('a close that read the date before the engine processed it is refused and sends nothing', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T_DEADLINE);
+    const db = seed(3);
+    const before = marketDateFromData(DATE_ID, (await db.collection('market_dates').doc(DATE_ID).get()).data() as Record<string, unknown>);
+    const market = { id: 'wlrfm', ...((await db.collection('farmers_markets').doc('wlrfm').get()).data() as Record<string, unknown>) } as unknown as FarmersMarket;
+
+    const r = await run(db, T_DEADLINE);
+    expect(r).toMatchObject({ deadlines_processed: 1, summaries_sent: 1, errors: [] });
+    expect(emailPrints()).toBe(1);
+
+    // The admin's request loaded `before` while the tick was landing.
+    const result = await processDeadline(asFirestore(db), env, market, before, { now: T_DEADLINE, notify: true, actor: 'admin1' });
+    expect(result.summary).toBe('already_processed');
+    expect(emailPrints()).toBe(1);
+    expect(rowsOfKind(db, 'deadline_summary')).toHaveLength(2);
+    const actions = (db.dump('market_dates')[DATE_ID] as Record<string, unknown>).actions as Record<string, unknown>;
+    expect(actions.deadline_processed_at).toEqual(T_DEADLINE);
+    expect(actions.summary_sent_at).toEqual(T_DEADLINE);
   });
 });
