@@ -386,34 +386,45 @@ function CheckinsSection({
           {summary ? `${summary.count} total · last ${formatStamp(summary.last_submitted_at)}` : ''}
         </span>
       </div>
-      <TableCard minWidth={isAdmin ? 820 : 700}>
+      <TableCard minWidth={isAdmin ? 1020 : 900}>
         <thead>
           <tr className="border-b border-border-light">
             <Th>Market day</Th>
+            <Th>Source</Th>
             <Th>Submitted</Th>
             {isAdmin && <Th>Sales</Th>}
             <Th>Transactions</Th>
             <Th>Attending next</Th>
+            <Th>Bringing</Th>
             <Th>Sold out</Th>
             <Th>Unsold</Th>
+            <Th>Feedback</Th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
-            <EmptyRow colSpan={isAdmin ? 7 : 6}>No check-ins yet.</EmptyRow>
+            <EmptyRow colSpan={isAdmin ? 10 : 9}>No check-ins yet.</EmptyRow>
           ) : (
             rows.map((c) => (
               <tr key={c.id} className="border-b border-border-light last:border-none">
                 <Td>
-                  <div className="font-mono text-[12px]">{dateOf(c)}</div>
+                  <Link href={`/admin/market-dates?id=${encodeURIComponent(c.market_date_id)}`} className="font-mono text-[12px] text-green-700 no-underline hover:underline">
+                    {dateOf(c)}
+                  </Link>
                   <div className="text-[11px] text-text-muted">{marketName(c.market_id)}{c.flags?.length ? ` · ${c.flags.join(', ')}` : ''}</div>
+                </Td>
+                <Td>
+                  <StatusChip status={c.source} />
+                  {c.partial && <div className="text-[11px] text-text-muted mt-0.5">text only</div>}
                 </Td>
                 <Td><span className="text-[12px]">{formatStamp(c.submitted_at)}</span></Td>
                 {isAdmin && <Td><span className="font-mono text-[12px]">{money(c)}</span></Td>}
                 <Td>{c.transactions_estimate?.value ?? (c.transactions_estimate?.raw || '—')}</Td>
                 <Td>{yesNo(c.attending_next)}</Td>
+                <Td><span className="text-[12px]">{c.bringing_next?.length ? c.bringing_next.join(', ') : c.bringing_next_raw || '—'}</span></Td>
                 <Td><span className="text-[12px]">{c.sold_out_items?.length ? c.sold_out_items.join(', ') : c.sold_out_raw || '—'}</span></Td>
                 <Td><span className="text-[12px]">{c.unsold_items?.length ? c.unsold_items.join(', ') : c.unsold_raw || '—'}</span></Td>
+                <Td><span className="text-[12px]">{c.feedback || '—'}</span></Td>
               </tr>
             ))
           )}

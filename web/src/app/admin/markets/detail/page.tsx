@@ -650,7 +650,7 @@ function DatesSection({
         </div>
       }
     >
-      <TableCard minWidth={760}>
+      <TableCard minWidth={860}>
         <thead>
           <tr className="border-b border-border-light">
             <Th>Date</Th>
@@ -658,12 +658,13 @@ function DatesSection({
             <Th>Status</Th>
             <Th>Version</Th>
             <Th>Questions</Th>
+            <Th>Check-ins</Th>
             <Th />
           </tr>
         </thead>
         <tbody>
           {visible.length === 0 ? (
-            <EmptyRow colSpan={6}>{dates.length === 0 ? 'No dates yet — regenerate to create them.' : 'No dates match the filter.'}</EmptyRow>
+            <EmptyRow colSpan={7}>{dates.length === 0 ? 'No dates yet — regenerate to create them.' : 'No dates match the filter.'}</EmptyRow>
           ) : (
             visible.map((d) => {
               const past = Date.parse(d.end_at) < now;
@@ -686,6 +687,18 @@ function DatesSection({
                         {d.extra_questions?.length ?? 0} question{(d.extra_questions?.length ?? 0) === 1 ? '' : 's'} {isOpen ? '▲' : '▼'}
                       </button>
                     </Td>
+                    <Td>
+                      <Link href={`/admin/market-dates?id=${encodeURIComponent(d.id)}`} className="text-green-700 text-xs font-semibold no-underline hover:underline">
+                        Check-ins
+                      </Link>
+                      <div className="text-[12px] text-text-muted mt-0.5 whitespace-nowrap" title="Check-in text sent / reminders sent / deadline processed">
+                        <span title="Check-in text sent">{d.actions?.checkin_sent_at ? '✓' : '·'} link</span>
+                        {' · '}
+                        <span title="Reminders sent">{d.actions?.reminders_sent?.length ?? 0} rem.</span>
+                        {' · '}
+                        <span title="Deadline processed">{d.actions?.deadline_processed_at ? '✓' : '·'} deadline</span>
+                      </div>
+                    </Td>
                     <Td className="text-right whitespace-nowrap">
                       {canEdit && d.status === 'collecting' && !past && cancelling !== d.id && (
                         <button type="button" onClick={() => { setCancelling(d.id); setReason(''); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border" style={{ borderColor: '#fecaca', color: '#dc2626', background: '#fff' }}>
@@ -699,7 +712,7 @@ function DatesSection({
                   </tr>
                   {cancelling === d.id && (
                     <tr className="border-b border-border-light bg-red-50/40">
-                      <td colSpan={6} className="px-4 py-3">
+                      <td colSpan={7} className="px-4 py-3">
                         <div className="flex flex-col sm:flex-row sm:items-end gap-2">
                           <div className="flex-1">
                             <Field label="Reason for cancelling" value={reason} onChange={setReason} placeholder="Severe weather" />
@@ -714,7 +727,7 @@ function DatesSection({
                   )}
                   {isOpen && (
                     <tr className="border-b border-border-light bg-earth-15">
-                      <td colSpan={6} className="px-4 py-3">
+                      <td colSpan={7} className="px-4 py-3">
                         <ExtraQuestionsEditor
                           questions={d.extra_questions || []}
                           readOnly={!canEdit}

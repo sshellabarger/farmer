@@ -1,6 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import { addDays, eachDate, localToUtc, utcToLocalDate, weekdayOf } from '../utils/tz.js';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
+import { isAlreadyExists } from '../db/firestore.js';
 import type { FarmersMarket, ScheduleVersion } from './markets.js';
 import type { MarketDateStatus } from '../types/schema.js';
 
@@ -16,14 +17,50 @@ export interface ExtraQuestion {
   options?: string[];
 }
 
+/** Phase 3 contract §2.2: one `reminders_sent` entry per offset the engine has acted on. */
+export interface ReminderSent {
+  offset_min: number;
+  sent_at: Date;
+  recipients: number;
+  failed: number;
+  skipped: 'superseded' | null;
+}
+
+/**
+ * Stored shape of a reminder outcome (Phase 3 fix, round 2): the engine
+ * writes each offset's `ReminderSent` to its own field,
+ * `actions.reminder_state.<reminderStateKey(offset)>`, with a dotted field
+ * path — never the `actions` map — so two runs holding different reminder
+ * locks write disjoint paths and neither can drop the other's decision.
+ * `actions.reminders_sent`, the array every reader (the status route, the web
+ * page, `isDateDecided`) uses, is DERIVED from that map by
+ * `marketDateFromData`, offset-sorted, over any legacy `reminders_sent`
+ * array. No production doc has either yet, so nothing migrates. Offsets are
+ * integers (zod, `src/services/markets.ts`), so the key is a plain
+ * identifier and dot notation is legal.
+ */
+export function reminderStateKey(offsetMin: number): string {
+  if (!Number.isInteger(offsetMin)) throw new Error(`reminder offset must be an integer (got ${offsetMin})`);
+  return `offset_${offsetMin}`;
+}
+
 export interface MarketDateActions {
   checkin_sent_at: Date | null;
-  reminders_sent: Date[];
+  /** Derived on read from `reminder_state` (see reminderStateKey); never written as an array by the engine. */
+  reminders_sent: ReminderSent[];
   deadline_at: Date;
   deadline_processed_at: Date | null;
   drafts_generated_at: Date | null;
   approved_at: Date | null;
   booth_texts_sent_at: Date | null;
+  // Phase 3 — absent on every doc the generator alone has ever touched;
+  // readers (marketDateFromData) default them.
+  checkin_recipients?: number;
+  checkin_failed?: number;
+  summary_sent_at?: Date | null;
+  summary_skipped?: 'no_recipients' | 'notify_false' | null;
+  /** keys: 'checkin' | `reminder_${offset_min}` | 'deadline' | 'summary' — never count toward isDateDecided. */
+  claims?: Record<string, Date>;
 }
 
 export interface MarketDateDoc {
@@ -48,6 +85,12 @@ export interface MarketDateDoc {
   source: 'generator' | 'import';
   created_at: Date;
   updated_at: Date;
+  // Phase 3 — written by processDeadline; absent until a date's deadline has
+  // been processed at least once.
+  non_responders?: string[];
+  spot_not_held?: string[];
+  deadline_recipient_count?: number;
+  deadline_responded_count?: number;
 }
 
 export interface GenerateOptions {
@@ -150,16 +193,64 @@ function computeExpected(market: FarmersMarket, date: string): ExpectedDay | nul
  * field normalised to `Date` (Firestore returns Timestamps). The one way to
  * turn a snapshot into a MarketDateDoc — routes use it too.
  */
+function reminderSentFromData(raw: unknown): ReminderSent {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    offset_min: typeof r.offset_min === 'number' ? r.offset_min : 0,
+    sent_at: toDateOrEpoch(r.sent_at),
+    recipients: typeof r.recipients === 'number' ? r.recipients : 0,
+    failed: typeof r.failed === 'number' ? r.failed : 0,
+    skipped: r.skipped === 'superseded' ? 'superseded' : null,
+  };
+}
+
+function reminderStateFromData(raw: unknown): ReminderSent[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  return Object.values(raw as Record<string, unknown>).map(reminderSentFromData);
+}
+
+/**
+ * The derived, offset-sorted `reminders_sent`: the `reminder_state` map (the
+ * engine's write shape) over any legacy `reminders_sent` array. An offset
+ * present in both reads from the map; an offset only the array holds is
+ * kept — a recorded outcome is never dropped on read, which is the point of
+ * the per-offset shape.
+ */
+function deriveRemindersSent(a: Record<string, unknown>): ReminderSent[] {
+  const byOffset = new Map<number, ReminderSent>();
+  for (const r of (Array.isArray(a.reminders_sent) ? a.reminders_sent : []).map(reminderSentFromData)) byOffset.set(r.offset_min, r);
+  for (const r of reminderStateFromData(a.reminder_state)) byOffset.set(r.offset_min, r);
+  return [...byOffset.values()].sort((x, y) => x.offset_min - y.offset_min);
+}
+
+function claimsFromData(raw: unknown): Record<string, Date> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, Date> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const d = toDate(value);
+    if (d) out[key] = d;
+  }
+  return out;
+}
+
 export function marketDateFromData(id: string, data: Record<string, unknown>): MarketDateDoc {
   const a = (data.actions ?? {}) as Record<string, unknown>;
   const actions: MarketDateActions = {
     checkin_sent_at: toDate(a.checkin_sent_at),
-    reminders_sent: (Array.isArray(a.reminders_sent) ? a.reminders_sent : []).map(toDate).filter((d): d is Date => d !== null),
+    // Phase 3 (contract §2.2): reminders_sent entries are ReminderSent objects,
+    // not bare Timestamps — a naive `.map(toDate)` would silently drop every
+    // one. Round 2: derived from the per-offset `reminder_state` map.
+    reminders_sent: deriveRemindersSent(a),
     deadline_at: toDateOrEpoch(a.deadline_at),
     deadline_processed_at: toDate(a.deadline_processed_at),
     drafts_generated_at: toDate(a.drafts_generated_at),
     approved_at: toDate(a.approved_at),
     booth_texts_sent_at: toDate(a.booth_texts_sent_at),
+    checkin_recipients: typeof a.checkin_recipients === 'number' ? a.checkin_recipients : undefined,
+    checkin_failed: typeof a.checkin_failed === 'number' ? a.checkin_failed : undefined,
+    summary_sent_at: 'summary_sent_at' in a ? toDate(a.summary_sent_at) : undefined,
+    summary_skipped: a.summary_skipped === 'no_recipients' || a.summary_skipped === 'notify_false' ? a.summary_skipped : undefined,
+    claims: claimsFromData(a.claims),
   };
   return {
     ...(data as Omit<MarketDateDoc, 'id'>),
@@ -167,6 +258,10 @@ export function marketDateFromData(id: string, data: Record<string, unknown>): M
     start_at: toDateOrEpoch(data.start_at),
     end_at: toDateOrEpoch(data.end_at),
     actions,
+    non_responders: Array.isArray(data.non_responders) ? (data.non_responders as string[]) : undefined,
+    spot_not_held: Array.isArray(data.spot_not_held) ? (data.spot_not_held as string[]) : undefined,
+    deadline_recipient_count: typeof data.deadline_recipient_count === 'number' ? data.deadline_recipient_count : undefined,
+    deadline_responded_count: typeof data.deadline_responded_count === 'number' ? data.deadline_responded_count : undefined,
     cancelled_at: toDate(data.cancelled_at),
     generated_at: toDateOrEpoch(data.generated_at),
     created_at: toDateOrEpoch(data.created_at),
@@ -229,8 +324,17 @@ export async function generateMarketDates(db: Firestore, market: FarmersMarket, 
           created_at: now,
           updated_at: now,
         };
-        await db.collection('market_dates').doc(id).set(doc as Record<string, unknown>);
-        result.created += 1;
+        try {
+          await db.collection('market_dates').doc(id).create(doc as Record<string, unknown>);
+          result.created += 1;
+        } catch (err) {
+          // Another generator run (the nightly roll and an admin schedule save
+          // can overlap) created this date between our read and this write.
+          // Leave it alone: the engine may already have acted on it, and a
+          // blind set() would erase its flags (Phase 3 fix, round 3).
+          if (!isAlreadyExists(err)) throw err;
+          result.unchanged += 1;
+        }
         continue;
       }
 
@@ -258,7 +362,11 @@ export async function generateMarketDates(db: Firestore, market: FarmersMarket, 
             schedule_version: expected.schedule_version,
             special: expected.special,
             ...(expected.special ? { note: expected.note } : {}),
-            actions: { ...existing.actions, deadline_at },
+            // A field path, never the `actions` map (round 2): the only
+            // action the generator owns is deadline_at. The map spread it
+            // replaced also carried the normalised doc's `undefined` optional
+            // fields, which the admin SDK rejects outright.
+            'actions.deadline_at': deadline_at,
             generated_at: now,
             updated_at: now,
           });
@@ -266,7 +374,9 @@ export async function generateMarketDates(db: Firestore, market: FarmersMarket, 
         continue;
       }
 
-      // Undecided existing doc: compare, then update only if something changed.
+      // Undecided existing doc (isDateDecided is false: no engine action, not
+      // even a reminder_state entry): compare, then update only if something
+      // changed — and only the one action field the generator owns.
       const same =
         existing.start_time === expected.start_time &&
         existing.end_time === expected.end_time &&
@@ -287,7 +397,7 @@ export async function generateMarketDates(db: Firestore, market: FarmersMarket, 
         end_at,
         schedule_version: expected.schedule_version,
         special: expected.special,
-        actions: { ...existing.actions, deadline_at },
+        'actions.deadline_at': deadline_at,
         generated_at: now,
         updated_at: now,
       };
