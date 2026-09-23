@@ -125,6 +125,14 @@ by three adversarial verifiers: no blockers.
   `messages` log and a per-run wall-clock budget.
 - Phase 1 leftovers closed with `gcloud`: only the two expected scheduler jobs remain;
   the orphaned `sendNotification` Cloud Tasks queue is deleted.
+- **S5 purge (owner-approved 2026-09-22):** the six retired v1 source bundles
+  (`freshnessAlerts/`, `processRecurringOrders/`, `sendNotification/` — two 16 MB versions
+  each, every one packaging `.env`, the service-account key and `.claude/settings.local.json`)
+  deleted from the functions source bucket, and every non-serving Cloud Run revision deleted
+  (`api` 51, `processreminders` 19, `rollmarketdates` 1). The container registry already
+  held only the current images (the superseded ones had been garbage-collected), so no
+  secret-bearing artifact remains in the project — key rotation (S1–S3) is still due because
+  the old bundles were downloadable until today.
 - **Deployed 2026-09-22 12:26 UTC** (functions only, from `main` `1bcd13b`; the CLI login
   had expired, so the deploy authenticated with the project service account through
   `GOOGLE_APPLICATION_CREDENTIALS` in an isolated CLI config). Env keys verified on the
@@ -133,6 +141,150 @@ by three adversarial verifiers: no blockers.
   in about a second: `wlrfm_2026-09-26` … `wlrfm_2026-10-31` exist, the 23 imported
   dates are untouched, no alert fired. The 03:15 CT scheduled run had failed once more on
   the old code (one more alert text to the owner) before the deploy.
+
+## [Unreleased] — SJCA rework, Phase 3: check-in links and texts, reminders, deadline flagging, STOP/HELP, quiet hours (2026-09-22)
+
+Built by three parallel executors against a written contract (`docs/phase3-contract.md`),
+merged as `rework/phase-3` in the contract's order (A engine → B messaging → C web, green
+at every merge point: 256 → 292 tests), checked by three adversarial verifiers, then
+hardened in a follow-up (`rework/p3-fix`, below) for the one blocker they found.
+
+### Added
+- **The check-in workflow engine** (`src/services/checkin-workflow.ts`, scheduler
+  `processMarketDates` every 5 minutes, 300 s timeout). For every `collecting` date whose
+  end is within the last 7 days it computes the schedule from *that market's* workflow
+  offsets and quiet hours (`src/utils/quiet-hours.ts`, `nextAllowedInstant`, tested across
+  both DST transitions and a second timezone): check-in text after the market ends,
+  reminders only to producers with no check-in, deadline flagging (`non_responders`,
+  `spot_not_held`, counts), then one staff summary by text (admins and the market's
+  managers, phones only, opt-outs honoured) and email (`ALERT_EMAIL`). Recipients are
+  active memberships → producers with an E.164 phone and no opt-out; everyone else is
+  listed as excluded with a reason. Older `collecting` dates are ignored forever (the
+  admin `close` route handles them); a date with zero recipients is processed silently —
+  which is what keeps the 23 imported WLRFM dates quiet at deploy time. Templates are
+  ASCII and fit two GSM-7 segments; no text promises a call-back or a held spot.
+- **Link tokens** (`link_tokens`, `src/services/link-tokens.ts`): 32 random bytes
+  base64url, one producer + one date, expiring three days after the deadline, re-openable
+  up to 25 submissions (latest wins); never mints a session (test-enforced: the token
+  modules cannot import `jwt.ts`).
+- **Public check-in** `GET`/`POST /api/checkin/:token` (rate-limited, zod-validated; the
+  producer and date come from the token, never the body; 404 unknown, 410 expired) and
+  the mobile-first page `/checkin?t=…` (no login, `noindex`, plain 404/410 states,
+  thank-you screen, "SJCA staff only, reported in aggregate" on the sales field). Form
+  check-ins are written with `source: 'form'`, `token_id`, `submissions`, `partial`,
+  `flags` and the importer's parsing rules (`src/services/checkins-submit.ts`).
+- **Staff routes** `GET /api/market-dates/:id/status` (recipients, responded, excluded,
+  actions timeline with scheduled vs effective instants), `POST …/resend-checkin`
+  (fresh token, audited), `POST …/close` (admin; manual deadline processing with an
+  optional summary) and the page `/admin/market-dates?id=…`; market detail rows link to it
+  with `✓ link / N rem. / ✓ deadline` glyphs; the dashboard's collecting date links to it;
+  producer detail shows source, bringing and feedback per check-in.
+- **Inbound texts** (`src/services/inbound.ts`): STOP/START now record on `producers`
+  too (`sms_opt_out_at`, `sms_consent`); for a known producer HELP replies with the open
+  check-in link, YES/NO records `attending_next` (creating a minimal `source: 'sms'`,
+  `partial` check-in when none exists) and replies with the link, and anything else is
+  forwarded once to the market's staff as "Text from <business> (<market>): …" followed by
+  the once-per-24 h courtesy reply. Unknown numbers keep the Phase 1 behaviour.
+- `messages.kind` gains `checkin_link`, `checkin_reminder`, `deadline_summary`,
+  `forwarded_inbound`; `market_dates.actions` gains `checkin_recipients`, `checkin_failed`,
+  `summary_sent_at`, `summary_skipped`, `claims`, and `reminders_sent` entries become
+  `{ offset_min, sent_at, recipients, failed, skipped }`.
+- Tests: link tokens, submit parsing, engine timelines (a Saturday 08–12 and a Thursday
+  17–20 market from the same code, quiet-hours deferral, past-date guard, excluded
+  producers, superseded reminders, overlapping runs), public routes, staff routes, inbound
+  YES/NO/HELP/forward/STOP, quiet hours, the `/status` no-op.
+
+### Findings recorded
+- voip.ms has no outbound delivery-receipt callback, so `messages.status` is terminal at
+  `sent` and `POST /api/sms/status` is a documented no-op kept for a future provider.
+- The contract's America/New_York quiet-hours example was off by one hour (EDT, not CDT);
+  the test asserts the value re-derived from `Intl` and every other example matched.
+
+### Deviations from the contract (each recorded in `docs/phase3/notes-*.md`)
+- A: the engine's automatic deadline step writes the flags inline and leaves the staff
+  summary to the separate, quiet-hours-aware summary step; `processDeadline(notify)` is
+  used as-is only by the manual `close` route. `sendSms`'s `extra` keys land at the top
+  level of `messages` rows (`token`, `offset_min`, `inbound_message_id`), as the Phase 2
+  code already did. One test instant differs from the contract's worked example so both
+  reminder offsets are genuinely due.
+- B: YES/NO match the first word of the reply (so "no thanks" is a NO, raw text kept);
+  STOP/START/HELP still match the whole keyword.
+- C: the status response type is `MarketDateStatusView` (Phase 2 already exports
+  `MarketDateStatus` as the lifecycle union); `CheckinForm` takes `marketName`; the
+  after-deadline id lists render as chips resolved to business names.
+- Executor A updated one assertion in `tests/firestore-timestamps.test.ts` for the new
+  `reminders_sent` shape — outside its ownership map, correct and necessary.
+
+### Verification and the concurrency fix (`rework/p3-fix`)
+- Three adversarial verifiers (every commit green; contract + security; timeline
+  behaviour) passed the branch except for one **blocker**: the engine's overlapping-run
+  guard was a read-then-write, so two genuinely concurrent runs — a manual "run now"
+  during a scheduled tick, or a slow run crossing one — both sent. Reproduced: two
+  simultaneous runs on a date with two producers produced four `checkin_link` texts.
+- **Fix — the log row is the lock.** `sendSms()` gains `dedupe_key`: the `messages` row is
+  written under that deterministic id with Firestore's atomic `create()` *before* the
+  provider is called, so a second caller throws `DuplicateSendError` and never reaches
+  voip.ms. Every engine send carries a key (`checkin_link:<date>:<producer>`,
+  `checkin_reminder:<date>:<producer>:<offset>`, `deadline_summary:<date>:<user>`); a
+  duplicate counts as "already sent", never as a failure. Each engine step takes a
+  `workflow_locks/<date>__<step>` lock the same way (stale after 10 minutes — longer than
+  the function can live — then taken over). The staff resend route deliberately carries
+  no key. `tests/helpers/fake-db.ts` gained `create()` with the SDK's `ALREADY_EXISTS`
+  failure shape. The same reproduction now yields two texts, one per producer, with the
+  second run reporting `skipped_claimed: 1`; five concurrent runs across the whole
+  timeline, an interrupted run followed by retries, and a resend racing the engine are
+  all covered in `tests/checkin-workflow-concurrency.test.ts`.
+- `tests/phase3-e2e.test.ts` (the contract's §7.5 flow, owed by the integrator): boots the
+  whole app, runs the engine to mint a link, exercises `GET`/`POST /api/checkin/:token`,
+  the voip.ms webhook with `YES`, the reminder and deadline ticks, the staff status route
+  and the `/status` no-op — twice, once per the contract's two-producer example and once
+  with a lone responder.
+- **Round 2 (`rework/p3-fix2`, after a second adversary):** every engine step had still
+  written the *whole* `actions` map back from its claim-time snapshot, so two runs holding
+  different step locks could drop each other's outcome (a lost "superseded" mark meant a
+  second reminder text; an admin close's flags could be erased and its email sent again).
+  Rule now: **the engine never writes the `actions` map, only fields inside it** —
+  Firestore field paths (`actions.checkin_sent_at`, `actions.claims.<step>`,
+  `actions.reminder_state.offset_<n>`, …); each reminder offset lives in its own field
+  and `marketDateFromData()` derives the `reminders_sent` array every reader uses. The
+  voip.ms inbound webhook is idempotent on the provider's message id (`messages/
+  inbound:<id>` via `create()`; a redelivery returns before any reply, forward or state
+  change). The fake db learned dotted-path `update()` and, like the real SDK, rejects
+  `undefined` values — which exposed that the round-1 engine and the generator's revive
+  path spread `undefined` optional fields into `update()` and would have failed at their
+  first production tick; field-path writes fix that by construction. A transient summary
+  email failure no longer holds a step lock. Clocks pinned in every route test that
+  reads them (three files carried tokens expiring 2026-09-25; CI would have gone red).
+- **Round 3 (integrator):** the admin close now takes the engine's own `deadline` and
+  `summary` locks and emails only when it created the summary lock, so a close
+  overlapping the engine's deadline tick — or two closes — cannot process a deadline
+  twice or email twice (`already_processed` / `in_progress` → 409); the generator creates
+  new dates with `create()` so a date another run created (and the engine acted on)
+  between its scan and its write keeps its flags; a texted YES/NO creates first and
+  updates on `ALREADY_EXISTS`, so a form submission landing in the same instant keeps
+  every answer; `tests/markets-routes.test.ts` pins its clock (its fixture's season ends
+  2026-10-31); the new inbound log lines carry the last four digits of a phone only. A
+  fourth verification pass (green + a forward-clock run of the whole suite at Nov 2026 and
+  Mar 2027, and a third concurrency adversary) found no blocker; from its minors: an
+  early admin close now also ends the producer-facing texts for that date, and the close
+  response says whether it processed the deadline (`processed`) so a close that merely
+  lost the summary lock to the engine is still recorded and audited.
+- Residual windows, stated plainly (`docs/phase3/notes-fix.md`, `notes-fix2.md`): a
+  stale-lock takeover is itself read-then-write — harmless, every text is atomic and
+  every flag write is idempotent; the summary *email* has no log row, so it is sent only
+  by the run that created the summary lock, a takeover never emails, and an email
+  provider failure is logged, not retried (texts are the authoritative channel); a keyed
+  text that failed at the provider keeps its row, so the engine never re-attempts it —
+  the resend button is the retry path for check-in texts and there is none yet for a
+  failed staff summary text; `reminder_state.recipients` counts what the writing run
+  sent, so after a takeover it under-reports (presence, not the count, drives the flow);
+  two overlapping re-submissions of the same form are last-write-wins; a crashed engine
+  run plus a `notify: false` close inside the same stale-lock takeover window can leave
+  both `summary_sent_at` and `summary_skipped` set (staff were told; the flags disagree);
+  `scripts/import-survey.mjs --write` still writes market dates whole and must not be
+  re-run against a live season while the engine acts on those dates.
+- 342 tests (32 files) after round 3; typecheck, web typecheck and the static build
+  green at every commit.
 
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 

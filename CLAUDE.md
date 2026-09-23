@@ -20,8 +20,15 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   `docs/phase2-contract.md`; the changelog has the fold-in. Hotfix deployed 2026-09-22
   (`1bcd13b`): every read of a Firestore date field now goes through `src/utils/dates.ts`
   (see Conventions); voip.ms requests abort after 45 s.
-  **Phase 3 is next** (SPEC §8): check-in links and texts, reminders, deadline flagging,
-  STOP/HELP, quiet hours.
+- **Phase 3 is built and merged (2026-09-22):** the check-in workflow engine
+  (`processMarketDates` every 5 min), link tokens, the public `/checkin?t=` page and API,
+  reminders, deadline flagging with a staff summary, STOP/START/HELP/YES/NO inbound
+  handling, quiet hours, the `/admin/market-dates` page. Contract: `docs/phase3-contract.md`.
+  Engine sends are idempotent per recipient (`sendSms` `dedupe_key` → the `messages` row
+  is the lock) and each step takes an atomic `workflow_locks` claim via `create()`.
+  Deploy order: functions, then hosting; `APP_URL=https://farmlink.us` is set in the
+  deploy-time env file. Nothing texts a producer until an admin gives one a phone.
+  **Phase 4 is next** (SPEC §8): booth assignment.
 - **Production sends are opt-in.** `SMS_PROVIDER`/`EMAIL_PROVIDER` default to `console`;
   real providers exist only with `NODE_ENV=production` and `ALLOW_REAL_SENDS=true`. Those
   keys live in `.env.arkansaslocalfoodnetwork` (git-ignored, non-secret), which the
@@ -43,9 +50,9 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
 | Runtime | Node 22, TypeScript 5.7, ESM |
 | API | Fastify 5 built by **`src/app.ts` `buildApp()`**, mounted inside one Firebase Cloud Function v2 `api` (`src/functions.ts`) via `fastify.inject`; `src/server.ts` runs the same app locally |
 | Data | **Firestore** (admin SDK only; `firestore.rules` / `storage.rules` deny all client access). No SQL, no migrations. |
-| Scheduled work | Cloud Scheduler via `onSchedule`: `processReminders` (every 15 min) and `rollMarketDates` (nightly; regenerates each market's rolling date window) |
-| SMS | **voip.ms only** (`src/services/voipms.ts` behind `src/services/sms.ts`). Telnyx and WhatsApp were archived to `archive/v1-channels/`. Cloud Tasks was retired (it never ran in prod). |
-| Inbound texts | `src/services/inbound.ts` — a keyword stopgap (STOP/START/HELP + one courtesy reply per 24 h), logs every message to the `messages` collection. The Phase 3 check-in workflow replaces it. |
+| Scheduled work | Cloud Scheduler via `onSchedule`: `processMarketDates` (every 5 min — the check-in workflow engine), `processReminders` (every 15 min) and `rollMarketDates` (nightly; regenerates each market's rolling date window) |
+| SMS | **voip.ms only** (`src/services/voipms.ts` behind `src/services/sms.ts`, 45 s request timeout). No outbound delivery receipts exist, so `messages.status` is terminal at `sent`. Telnyx and WhatsApp were archived to `archive/v1-channels/`. Cloud Tasks was retired (it never ran in prod). |
+| Inbound texts | `src/services/inbound.ts` — every inbound text is logged to `messages`; STOP/START (users and producers), HELP (with the open check-in link), YES/NO against an open check-in, everything else forwarded once to the market's staff plus one courtesy reply per 24 h; unknown numbers get the transition reply. |
 | Email | Resend (`src/services/email.ts`) |
 | AI | `@anthropic-ai/sdk` is used only by `src/services/error-notify.ts` to draft alert diagnoses. There is no AI assistant (decision D8). |
 | Web | Next.js 15 / React 19 / Tailwind 4 in `web/`, deployed by Firebase Hosting's web-frameworks integration (current output is fully static); `/api/**` rewrites to the `api` function; retired v1 URLs 301 to `/changed` |
@@ -77,22 +84,25 @@ explicit owner go-ahead in the session — never on the strength of an allowlist
 
 ```
 src/app.ts               buildApp(): plugins, error handler (before routes), /health + /api/health, route list
-src/functions.ts         exports: api (onRequest), processReminders + rollMarketDates (onSchedule)
+src/functions.ts         exports: api (onRequest), processMarketDates + processReminders + rollMarketDates (onSchedule)
 src/server.ts            local runner over the same buildApp()
-src/routes/              auth, sms, admin, admin-users, audit-log, dashboard, markets, producers, memberships,
-                         applications, checkins, profile, invite, push, errors, feedback, reminders, uploads
-src/services/            sms (+voipms, console) — the ONE logged send; inbound (stopgap), markets, market-dates
-                         (generator), producers, identity, audit, otp, push, email, error-notify, support-notify,
-                         storage, reminders
+src/routes/              auth, sms, admin, admin-users, audit-log, dashboard, markets, market-dates (status/resend/close),
+                         checkin-public (/api/checkin/:token), producers, memberships, applications, checkins, profile,
+                         invite, push, errors, feedback, reminders, uploads
+src/services/            sms (+voipms, console) — the ONE logged send; checkin-workflow (the engine + TEMPLATES),
+                         link-tokens, checkins-submit, open-checkin (findOpenCheckin, staffForMarket), inbound, markets,
+                         market-dates (generator + marketDateFromData), producers, identity, audit, otp, push, email,
+                         error-notify, support-notify, storage, reminders
 src/middleware/          rbac.ts (authenticate, requireRole), market-scope.ts (requireStaff, requireMarketAccess)
-src/utils/               tz (Intl local↔UTC), dates (Firestore Timestamp → Date), jwt, http-error-handler, serialize, sort, errors
+src/utils/               tz (Intl local↔UTC), dates (Firestore Timestamp → Date), quiet-hours (nextAllowedInstant), jwt,
+                         http-error-handler, serialize, sort, errors
 scripts/import-survey.mjs   the Google-Form history importer (excluded from the functions bundle)
 src/types/schema.ts      shared string-union types (documentation, not enforcement)
 src/db/firestore.ts      getDb() + the list of collections the code uses
-web/src/app/             /  /changed  /apply (public)  /login  /admin (dashboard)  /admin/markets  /admin/producers
-                         /admin/applications  /admin/users  /feedback  /settings
+web/src/app/             /  /changed  /apply  /checkin?t= (public)  /login  /admin (dashboard)  /admin/markets
+                         /admin/market-dates?id=  /admin/producers  /admin/applications  /admin/users  /feedback  /settings
 archive/                 v1 design package, prototype, postgres-era code, channels, AI harness, web pages, ops log, Firestore schema snapshot
-docs/                    SPEC.md, MONITORING.md
+docs/                    SPEC.md, MONITORING.md, phase2-contract.md, phase3-contract.md, phase3/notes-*.md
 ```
 
 ## Conventions (match the existing code)
@@ -120,9 +130,28 @@ docs/                    SPEC.md, MONITORING.md
 - **Never reuse the v1 names `markets`, `farms`, the `market` role or the `/market` URL for
   the new farmers-market meaning.** New collections are `farmers_markets`, `market_dates`,
   `producers` (SPEC §7.7). `farms` and `users` data are untouched until the D3 migration.
+- **Workflow sends are idempotent by construction.** An engine or webhook send passes
+  `dedupe_key` to `sendSms()` (`<kind>:<market_date_id>:<producer_or_user_id>[:<offset>]`):
+  the `messages` row is then written with `create()` under that id *before* the provider
+  is called, so a duplicate throws `DuplicateSendError` and never reaches voip.ms. Engine
+  steps — and the admin close — take a `workflow_locks` claim the same way. Staff resends
+  deliberately carry no key. Never rely on a read-then-write check to prevent a double
+  text; when a document must exist at most once (a first submission, a generated date,
+  an inbound row keyed by the provider's id), `create()` it and branch on
+  `isAlreadyExists()` (`src/db/firestore.ts`).
+- **Never write `market_dates.actions` as a whole map.** The engine, the close route and
+  the generator write Firestore field paths (`'actions.checkin_sent_at'`,
+  `'actions.claims.<step>'`, `'actions.reminder_state.offset_<n>'`, …) so runs holding
+  different step locks commute; `marketDateFromData()` derives `reminders_sent` from
+  `reminder_state`. The admin SDK rejects `undefined` values in any write — never spread a
+  normalised document back into `update()`.
 - Tests: vitest in `tests/` against `tests/helpers/fake-db.ts` (equality `where`, `limit`,
-  `get/set/update/delete/add`; no `orderBy`/`in`/batch — keep production queries inside
-  that envelope). Sends need no mocking: the console provider is structural.
+  `get/set/update/delete/add/create`, dotted field paths in `update()`; no
+  `orderBy`/`in`/batch/`runTransaction`/`FieldValue` — keep production queries inside that
+  envelope; `create()` fails with code 6 `ALREADY_EXISTS` and `undefined` values are
+  refused, like the real SDK). Every test that drives a route reading the real clock pins
+  it with `vi.useFakeTimers({ toFake: ['Date'] })`. Sends need no mocking: the console
+  provider is structural.
 - Firestore query envelope: one equality filter at the DB, everything else in memory —
   `firestore.indexes.json` stays empty by construction.
 

@@ -11,8 +11,12 @@ and merged 2026-09-21** — markets with configurable schedules, producers and a
 roles, the structural test mode, the admin web app and the survey importer
 (`docs/phase2-contract.md`, `CHANGELOG.md`) — **deployed 2026-09-22** with the 2026 WLRFM
 survey history imported (D20: 39 producers, 23 dates, 508 check-ins, no phone numbers).
-**Phase 3 next** (check-in links and texts, reminders, deadline flagging, STOP/HELP, quiet
-hours).
+**Phase 3 built and merged 2026-09-22** — check-in links and texts, reminders, deadline
+flagging, STOP/HELP/YES/NO, quiet hours, the `/checkin` page and the market-date admin
+page (`docs/phase3-contract.md`, `CHANGELOG.md`); deploy pending the owner's go. The same
+day `farmlink.us` was reconnected to Firebase Hosting (it had been parked at the registrar;
+production `APP_URL` had been the `web.app` address) and a hotfix shipped for Firestore
+`Timestamp` reads (`src/utils/dates.ts`).
 Items marked **⚠ OPEN** are proposals with a default, not settled facts.
 
 ---
@@ -652,6 +656,14 @@ and a short demo checklist for the owner.
    reminders, deadline flagging, admin summary, STOP/HELP (§7.4), quiet hours,
    delivery-status callback. Demo: a Thursday-night and a Saturday-morning market both
    produce correct send times from the same code; opt-out works; nothing sends in dev.
+   **Built 2026-09-22** (`docs/phase3-contract.md`). Finding: voip.ms offers no outbound
+   delivery receipts, so `messages.status` is terminal at `sent` and the callback is a
+   documented no-op. Engine sends are idempotent per recipient (the `messages` row is the
+   lock), every step — and the admin close — takes an atomic `workflow_locks` claim, and
+   every write names field paths inside `actions` rather than the map, so overlapping
+   scheduler runs, a manual close and the nightly generator cannot text anyone twice,
+   email twice or lose each other's flags (three adversarial verification rounds,
+   `CHANGELOG.md`).
 4. **Booth assignment** — booth map editor, suggestions, history, booth-number texts.
 5. **Sponsors and Zeffy** — tiers as data, sponsor calendar, Zeffy webhook + nightly sync
    (≤100 req/min), email matching, manual match queue, paid/unpaid on lists.
@@ -678,6 +690,16 @@ so no transition notice is sent and there is no 30-day hold; the retirement depl
 §4.5 data deletion proceed after check-in #2. D18 **answered** — the operator is St. Joseph
 Center of Arkansas and the domain stays `farmlink.us` (SJCA-owned); the legal pages are
 rewritten accordingly and ship in the same hosting deploy.
+
+**2026-09-22 (Phase 3):** D18 follow-through — `farmlink.us` now points at Firebase
+Hosting (owner fixed the registrar DNS; `www` still needs a redirect) and `APP_URL` moves to
+`https://farmlink.us` at the Phase 3 deploy. Recorded by the contract, open to tightening:
+**D21** sending does not require `producers.sms_consent.status === 'opted_in'` — imported
+producers are `unknown`, an admin-entered phone is the consent event, and STOP is honoured
+everywhere; **D22** check-in links stay valid three days past the deadline (late responses
+are visible as "responded late" but stay `non_responders` at the deadline) and accept up to
+25 submissions; **D23** the unknown-number auto-reply still reads "FarmLink's ordering
+service has closed… A team member will follow up" — owner to supply new wording.
 
 | # | Decision | Default / recommendation |
 |---|---|---|
