@@ -665,7 +665,16 @@ and a short demo checklist for the owner.
    scheduler runs, a manual close and the nightly generator cannot text anyone twice,
    email twice or lose each other's flags (three adversarial verification rounds,
    `CHANGELOG.md`).
-4. **Booth assignment** — booth map editor, suggestions, history, booth-number texts.
+4. **2027 application + booth assignment** — the full producer application rebuilt
+   from the 2026 Jotform and the 2027 Rules & Regulations draft (categories, structured
+   product lists, permits by product type, insurance and Hold Harmless tracking, rate and
+   spaces, SMS consent, e-signature, the \$15 fee via a Zeffy link), returning-vendor
+   prefill links, the WLRFM booth map (V1–V22 from `docs/wlrfm-vendor-map.jpg`), usual
+   booths, per-date assignment drafts after the check-in deadline, manager approval and
+   booth-number texts through the Phase 3 engine's hooks. Scope and decisions D24–D31:
+   `docs/2027-application-review.md` (2026-11-08). Demo: submit a 2027 application end
+   to end, approve it, see the producer textable, draft and approve a Saturday's booths,
+   receive the booth text.
 5. **Sponsors and Zeffy** — tiers as data, sponsor calendar, Zeffy webhook + nightly sync
    (≤100 req/min), email matching, manual match queue, paid/unpaid on lists.
 6. **Mailchimp and Duda drafts** — draft campaign from template; audience sync with
@@ -724,7 +733,8 @@ service has closed… A team member will follow up" — owner to supply new word
 | **D18** | Operator identity for the rewritten legal pages (SJCA vs "FarmLink") and the domain (`farmlink.us` is parked; `stjosephcenter.org`?). | Needed before the Phase 1 hosting deploy. |
 | **D19** | Who receives `privacy@` / `support@farmlink.us` today? | Unknown; likely nobody. |
 | **D20** | Seed Phase 2 with the 2026 WLRFM weekly-survey history (≈335 responses, Apr 18–Sep 20) as test data? | **Yes** — real names, real dates, no phones. The export sits in the private bucket, never in git; Phase 7 re-runs the same importer against the authoritative Google export. |
-| **D15 (still open)** | Page-2 application-form fields. | The weekly survey is not it; the application form ships with page-1 fields until the CSV arrives. |
+| **D15 (resolved 2026-11-08)** | Page-2 application-form fields. | The 2026 Jotform (`ALFNWLRFMVendorApp042026`) is the source, revised by the 2027 Rules & Regulations draft — inventory and gap analysis in `docs/2027-application-review.md`. |
+| **D24–D31** | 2027 application and booth assignment decisions (WLRFM-only form, \$15 fee via Zeffy link, power stalls, owner-supplied legal texts/links, daily-vendor frequency, no auto-reply to unknown numbers, returning-vendor prefill links, `seasonal \| daily` fee plans). | Defaults in `docs/2027-application-review.md` §5; apply unless the owner objects. |
 
 ---
 
