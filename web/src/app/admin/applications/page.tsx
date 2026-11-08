@@ -1,289 +1,253 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import type { Application, ApplicationStatus, Market } from '@/lib/types';
+import type { ApplicationListItem } from '@/lib/phase4-types';
+import type { Market } from '@/lib/types';
 import { useStaffGuard } from '@/components/staff-guard';
 import { StatusChip } from '@/components/status-chip';
-import { CheckboxField, Notice, PrimaryButton, SecondaryButton, TextArea } from '@/components/form';
+import { Field, Notice, SecondaryButton, SelectField } from '@/components/form';
 import { AdminShell, EmptyRow, LoadingScreen, TableCard, Td, Th, formatStamp } from '@/components/admin-shell';
 
-const TABS: { value: ApplicationStatus; label: string }[] = [
+const STATUS_TABS: { value: string; label: string }[] = [
+  { value: '', label: 'All' },
   { value: 'new', label: 'New' },
   { value: 'under_review', label: 'Under review' },
   { value: 'approved', label: 'Approved' },
   { value: 'declined', label: 'Declined' },
+  { value: 'withdrawn', label: 'Withdrawn' },
 ];
 
-/** Applications inbox (admin only, contract §8.3): review, approve or decline. */
+const INSURANCE_LABEL: Record<string, string> = {
+  have: 'Has insurance',
+  none: 'No insurance',
+  need_guidance: 'Needs guidance',
+};
+
+function humanize(key: string): string {
+  return key.replace(/_/g, ' ');
+}
+
 export default function ApplicationsPage() {
+  return (
+    <Suspense fallback={<LoadingScreen />}>
+      <Applications />
+    </Suspense>
+  );
+}
+
+/** Applications queue (admin only): filter, scan, open one to review. */
+function Applications() {
   const { ready } = useStaffGuard({ adminOnly: true });
-  const [tab, setTab] = useState<ApplicationStatus>('new');
-  const [applications, setApplications] = useState<Application[]>([]);
+  const router = useRouter();
+  const params = useSearchParams();
+
   const [markets, setMarkets] = useState<Market[]>([]);
+  const [rows, setRows] = useState<ApplicationListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [expanded, setExpanded] = useState<string | null>(null);
 
-  const load = useCallback(async (status: ApplicationStatus) => {
+  const [status, setStatus] = useState(params.get('status') || 'new');
+  const [marketId, setMarketId] = useState(params.get('market_id') || '');
+  const [season, setSeason] = useState(params.get('season') || '');
+  const [fee, setFee] = useState('');
+  const [category, setCategory] = useState('');
+  const [returning, setReturning] = useState('');
+  const [q, setQ] = useState('');
+  const [debouncedQ, setDebouncedQ] = useState('');
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q.trim()), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  useEffect(() => {
+    if (!ready) return;
+    api
+      .getMarkets()
+      .then((d) => setMarkets([...(d.markets || [])].sort((a, b) => a.name.localeCompare(b.name))))
+      .catch(() => setMarkets([]));
+  }, [ready]);
+
+  const marketName = useCallback((id: string) => markets.find((m) => m.id === id)?.name || id, [markets]);
+
+  const categoryOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const m of markets) {
+      if (marketId && m.id !== marketId) continue;
+      for (const c of m.categories || []) if (!seen.has(c.key)) seen.set(c.key, c.label);
+    }
+    return Array.from(seen.entries()).map(([value, label]) => ({ value, label }));
+  }, [markets, marketId]);
+
+  const productLabel = useCallback(
+    (marketIdOfRow: string, key: string) =>
+      markets.find((m) => m.id === marketIdOfRow)?.product_types?.find((t) => t.key === key)?.label || humanize(key),
+    [markets],
+  );
+
+  const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const data = await api.getApplications({ status });
-      setApplications(data.applications || []);
+      const data = await api.getApplicationsV2({
+        market_id: marketId || undefined,
+        season: season.trim() || undefined,
+        status: status || undefined,
+        fee: fee || undefined,
+        category: category || undefined,
+        returning: returning === 'true' || returning === 'false' ? returning : undefined,
+        q: debouncedQ || undefined,
+      });
+      setRows(data.applications || []);
     } catch (err: any) {
       setError(err?.message || 'Could not load applications');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [marketId, season, status, fee, category, returning, debouncedQ]);
 
   useEffect(() => {
-    if (!ready) return;
-    api.getMarkets().then((d) => setMarkets(d.markets || [])).catch(() => setMarkets([]));
-  }, [ready]);
-
-  useEffect(() => {
-    if (ready) load(tab);
-  }, [ready, tab, load]);
-
-  const marketName = (id: string) => markets.find((m) => m.id === id)?.name || id;
-
-  const onDecided = (id: string) => {
-    setExpanded(null);
-    load(tab);
-  };
+    if (ready) load();
+  }, [ready, load]);
 
   if (!ready) return <LoadingScreen />;
 
   return (
     <AdminShell
       title="Applications"
-      subtitle="Vendor applications to sell at SJCA markets"
-      actions={<SecondaryButton small onClick={() => load(tab)} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</SecondaryButton>}
+      subtitle="Vendor applications for the season. Every producer re-applies each season."
+      actions={<SecondaryButton small onClick={load} disabled={loading}>{loading ? 'Loading...' : 'Refresh'}</SecondaryButton>}
     >
       <div className="flex flex-wrap gap-2 mb-4">
-        {TABS.map((t) => (
+        {STATUS_TABS.map((t) => (
           <button
-            key={t.value}
+            key={t.value || 'all'}
             type="button"
-            onClick={() => setTab(t.value)}
+            onClick={() => setStatus(t.value)}
             className="px-3.5 py-1.5 rounded-full text-xs font-semibold cursor-pointer border"
             style={{
-              background: tab === t.value ? '#EBF4E6' : '#fff',
-              borderColor: tab === t.value ? '#2A5E33' : '#E4DFD3',
-              color: tab === t.value ? '#2A5E33' : '#5C5C5C',
+              background: status === t.value ? '#EBF4E6' : '#fff',
+              borderColor: status === t.value ? '#2A5E33' : '#E4DFD3',
+              color: status === t.value ? '#2A5E33' : '#5C5C5C',
             }}
-            aria-pressed={tab === t.value}
+            aria-pressed={status === t.value}
           >
             {t.label}
           </button>
         ))}
       </div>
 
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-4">
+        <SelectField
+          label="Market"
+          value={marketId}
+          onChange={setMarketId}
+          options={[{ value: '', label: 'All markets' }, ...markets.map((m) => ({ value: m.id, label: m.name }))]}
+        />
+        <Field label="Season" value={season} onChange={setSeason} placeholder="current" />
+        <SelectField
+          label="Application fee"
+          value={fee}
+          onChange={setFee}
+          options={[
+            { value: '', label: 'Any' },
+            { value: 'unpaid', label: 'Unpaid' },
+            { value: 'paid', label: 'Paid' },
+            { value: 'waived', label: 'Waived' },
+          ]}
+        />
+        <SelectField label="Category" value={category} onChange={setCategory} options={[{ value: '', label: 'Any' }, ...categoryOptions]} />
+        <SelectField
+          label="New or returning"
+          value={returning}
+          onChange={setReturning}
+          options={[
+            { value: '', label: 'Either' },
+            { value: 'false', label: 'New vendors' },
+            { value: 'true', label: 'Returning' },
+          ]}
+        />
+        <Field label="Search" value={q} onChange={setQ} placeholder="Business, name or email" />
+      </div>
+
       {error && <div className="mb-4"><Notice kind="error">{error}</Notice></div>}
 
-      <TableCard minWidth={640}>
+      <TableCard minWidth={980}>
         <thead>
           <tr className="border-b border-border-light">
             <Th>Business</Th>
             <Th>Contact</Th>
-            <Th>Markets</Th>
+            <Th>Products</Th>
+            <Th>Booth</Th>
+            <Th>Fee</Th>
+            <Th>Insurance</Th>
             <Th>Submitted</Th>
-            <Th />
+            <Th>Status</Th>
           </tr>
         </thead>
         <tbody>
-          {loading && applications.length === 0 ? (
-            <EmptyRow colSpan={5}>Loading applications…</EmptyRow>
-          ) : applications.length === 0 ? (
-            <EmptyRow colSpan={5}>No {tab.replace('_', ' ')} applications.</EmptyRow>
+          {loading && rows.length === 0 ? (
+            <EmptyRow colSpan={8}>Loading applications...</EmptyRow>
+          ) : rows.length === 0 ? (
+            <EmptyRow colSpan={8}>No applications match these filters.</EmptyRow>
           ) : (
-            applications.map((a) => (
-              <ApplicationRow
+            rows.map((a) => (
+              <tr
                 key={a.id}
-                application={a}
-                markets={markets}
-                marketName={marketName}
-                expanded={expanded === a.id}
-                onToggle={() => setExpanded(expanded === a.id ? null : a.id)}
-                onDecided={() => onDecided(a.id)}
-              />
+                className="border-b border-border-light last:border-none hover:bg-bg-alt transition-colors cursor-pointer"
+                onClick={() => router.push(`/admin/applications/detail?id=${encodeURIComponent(a.id)}`)}
+              >
+                <Td>
+                  <Link
+                    href={`/admin/applications/detail?id=${encodeURIComponent(a.id)}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="font-semibold text-earth-800 no-underline hover:underline"
+                  >
+                    {a.business_name}
+                  </Link>
+                  <div className="text-[11px] text-text-muted">
+                    {marketName(a.market_id)} - {a.season}
+                    {a.is_returning ? ' - returning' : ' - new'}
+                  </div>
+                </Td>
+                <Td>
+                  <div>{a.contact_name}</div>
+                  <div className="text-[12px] text-text-muted">{a.email}</div>
+                  <div className="text-[12px] text-text-muted font-mono">{a.mobile}</div>
+                </Td>
+                <Td>
+                  <div className="flex flex-wrap gap-1">
+                    {a.product_types.map((t) => (
+                      <span key={t} className="text-[12px] px-1.5 py-0.5 rounded bg-earth-50 border border-earth-100">{productLabel(a.market_id, t)}</span>
+                    ))}
+                  </div>
+                  {a.permits_pending > 0 && (
+                    <div className="text-[11px] mt-1" style={{ color: '#92400E' }}>
+                      {a.permits_pending} permit{a.permits_pending === 1 ? '' : 's'} to provide
+                    </div>
+                  )}
+                </Td>
+                <Td>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <StatusChip status={a.rate} />
+                    <span className="text-[12px]">
+                      {a.spaces} space{a.spaces === 1 ? '' : 's'}
+                      {a.electric ? ' - power' : ''}
+                    </span>
+                  </div>
+                </Td>
+                <Td><StatusChip status={a.fee_status} /></Td>
+                <Td><span className="text-[12px]">{INSURANCE_LABEL[a.insurance_status] || a.insurance_status}</span></Td>
+                <Td><span className="text-[12px]">{formatStamp(a.submitted_at)}</span></Td>
+                <Td><StatusChip status={a.status} /></Td>
+              </tr>
             ))
           )}
         </tbody>
       </TableCard>
     </AdminShell>
-  );
-}
-
-function ApplicationRow({
-  application,
-  markets,
-  marketName,
-  expanded,
-  onToggle,
-  onDecided,
-}: {
-  application: Application;
-  markets: Market[];
-  marketName: (id: string) => string;
-  expanded: boolean;
-  onToggle: () => void;
-  onDecided: () => void;
-}) {
-  const a = application;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [mode, setMode] = useState<'none' | 'approve' | 'decline'>('none');
-  const [note, setNote] = useState('');
-  const [marketIds, setMarketIds] = useState<string[]>(a.markets_applied);
-
-  const startReview = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      await api.reviewApplication(a.id, { action: 'review' });
-      onDecided();
-    } catch (err: any) {
-      setError(err?.message || 'Could not start review');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const decline = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      await api.reviewApplication(a.id, { action: 'decline', note: note.trim() || undefined });
-      onDecided();
-    } catch (err: any) {
-      setError(err?.message || 'Could not decline the application');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const approve = async () => {
-    if (marketIds.length === 0) { setError('Choose at least one market.'); return; }
-    setBusy(true);
-    setError('');
-    try {
-      await api.reviewApplication(a.id, { action: 'approve', market_ids: marketIds, note: note.trim() || undefined });
-      onDecided();
-    } catch (err: any) {
-      setError(err?.message || 'Could not approve the application');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const toggleMarket = (id: string) => setMarketIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-
-  return (
-    <>
-      <tr className="border-b border-border-light last:border-none hover:bg-bg-alt transition-colors cursor-pointer" onClick={onToggle}>
-        <Td>
-          <div className="font-semibold text-earth-800">{a.business_name}</div>
-          {a.status === 'approved' && a.producer_id && (
-            <Link
-              href={`/admin/producers/detail?id=${encodeURIComponent(a.producer_id)}`}
-              onClick={(e) => e.stopPropagation()}
-              className="text-[11px] text-green-700 no-underline hover:underline"
-            >
-              View producer →
-            </Link>
-          )}
-        </Td>
-        <Td>
-          <div>{a.contact_person}</div>
-          <div className="text-[12px] text-text-muted">{a.email}</div>
-          <div className="text-[12px] text-text-muted font-mono">{a.phone}</div>
-        </Td>
-        <Td>
-          <div className="flex flex-wrap gap-1">
-            {a.markets_applied.map((id) => (
-              <span key={id} className="text-[12px] px-1.5 py-0.5 rounded bg-earth-50 border border-earth-100">{marketName(id)}</span>
-            ))}
-          </div>
-        </Td>
-        <Td>{formatStamp(a.submitted_at)}</Td>
-        <Td className="text-right">
-          <StatusChip status={a.status} />
-        </Td>
-      </tr>
-      {expanded && (
-        <tr className="border-b border-border-light last:border-none">
-          <td colSpan={5} className="px-4 py-4 bg-bg-alt/60">
-            {error && <div className="mb-3"><Notice kind="error">{error}</Notice></div>}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm mb-3">
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1">Applicant</div>
-                <div>{a.contact_person} · {a.email} · {a.phone}</div>
-              </div>
-              {a.decision_note && (
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1">Decision note</div>
-                  <div>{a.decision_note}</div>
-                </div>
-              )}
-            </div>
-            {Object.keys(a.extra || {}).length > 0 && (
-              <div className="mb-4">
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1">Additional answers</div>
-                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm m-0">
-                  {Object.entries(a.extra).map(([k, v]) => (
-                    <div key={k} className="contents">
-                      <dt className="text-text-muted">{k.replace(/_/g, ' ')}</dt>
-                      <dd className="m-0">{Array.isArray(v) ? v.join(', ') : String(v)}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            )}
-
-            {a.status === 'new' && mode === 'none' && (
-              <div className="flex gap-2">
-                <PrimaryButton small onClick={startReview} disabled={busy}>{busy ? 'Working…' : 'Start review'}</PrimaryButton>
-                <SecondaryButton small onClick={() => setMode('decline')} disabled={busy}>Decline…</SecondaryButton>
-              </div>
-            )}
-            {a.status === 'under_review' && mode === 'none' && (
-              <div className="flex gap-2">
-                <PrimaryButton small onClick={() => setMode('approve')} disabled={busy}>Approve…</PrimaryButton>
-                <SecondaryButton small onClick={() => setMode('decline')} disabled={busy}>Decline…</SecondaryButton>
-              </div>
-            )}
-
-            {mode === 'approve' && (
-              <div className="mt-3 p-3 rounded-xl border border-earth-100 bg-white max-w-md space-y-3">
-                <div className="text-sm font-semibold text-earth-800">Approve for which markets?</div>
-                <div className="flex flex-col gap-1.5">
-                  {a.markets_applied.map((id) => (
-                    <CheckboxField key={id} label={marketName(id)} checked={marketIds.includes(id)} onChange={() => toggleMarket(id)} />
-                  ))}
-                </div>
-                <TextArea label="Note (optional)" value={note} onChange={setNote} />
-                <div className="flex gap-2 justify-end">
-                  <SecondaryButton small onClick={() => setMode('none')} disabled={busy}>Cancel</SecondaryButton>
-                  <PrimaryButton small onClick={approve} disabled={busy}>{busy ? 'Approving…' : 'Approve'}</PrimaryButton>
-                </div>
-              </div>
-            )}
-            {mode === 'decline' && (
-              <div className="mt-3 p-3 rounded-xl border border-earth-100 bg-white max-w-md space-y-3">
-                <TextArea label="Reason (optional)" value={note} onChange={setNote} />
-                <div className="flex gap-2 justify-end">
-                  <SecondaryButton small onClick={() => setMode('none')} disabled={busy}>Cancel</SecondaryButton>
-                  <PrimaryButton small onClick={decline} disabled={busy}>{busy ? 'Declining…' : 'Decline'}</PrimaryButton>
-                </div>
-              </div>
-            )}
-          </td>
-        </tr>
-      )}
-    </>
   );
 }
