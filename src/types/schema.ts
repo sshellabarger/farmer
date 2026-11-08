@@ -49,3 +49,8 @@ export interface ContactJson {
   phone?: string;
   email?: string;
 }
+
+// Phase 4 (contract §2.7–2.8): booths and assignments.
+export type BoothKind = 'stall' | 'food_truck';
+export type AssignmentSource = 'usual' | 'suggested' | 'manual';
+export type DraftSkipReason = 'no_next_date' | 'no_booths' | 'no_attendees';

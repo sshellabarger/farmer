@@ -117,7 +117,7 @@ export const processMarketDates = onSchedule(
       const { processMarketDates: run } = await import('./services/checkin-workflow.js');
       const r = await run(db, env);
       console.log(
-        `processMarketDates: scanned=${r.scanned} considered=${r.considered} checkin_sent=${r.checkin_sent} reminders_sent=${r.reminders_sent} deadlines=${r.deadlines_processed} summaries=${r.summaries_sent} claimed=${r.skipped_claimed} errors=${r.errors.length}`,
+        `processMarketDates: scanned=${r.scanned} considered=${r.considered} checkin_sent=${r.checkin_sent} reminders_sent=${r.reminders_sent} deadlines=${r.deadlines_processed} summaries=${r.summaries_sent} drafts=${r.drafts_generated} booth_texts=${r.booth_texts_sent} claimed=${r.skipped_claimed} errors=${r.errors.length}`,
       );
       if (r.errors.length > 0) {
         const { notifyError } = await import('./services/error-notify.js');

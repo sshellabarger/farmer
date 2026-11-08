@@ -13,6 +13,20 @@ import type { LinkTokenDoc } from './link-tokens.js';
 import { checkinUrl, staffForMarket } from './open-checkin.js';
 import { trySendSms, isAlreadyExists, SendsDisabledError } from './sms.js';
 import { sendEmail } from './email.js';
+import { currentSeason, isVendorOfRecord, listMembershipsForMarket, ofSeason } from './seasons.js';
+import type { SeasonSource } from './seasons.js';
+import { compareBooths, listBooths } from './booths.js';
+import {
+  computeBoothSummary,
+  conflictedBoothIds,
+  currentAssignments,
+  draftAssignments,
+  loadAttendance,
+  nextDateAfter,
+  prepareDraft,
+} from './booth-assignments.js';
+import type { DraftResult } from './booth-assignments.js';
+import type { DraftSkipReason } from '../types/schema.js';
 
 /**
  * The Phase 3 workflow engine (contract §3): check-in texts, reminders,
@@ -74,6 +88,9 @@ export const DEDUPE_KEYS = {
     `checkin_reminder:${keyPart(marketDateId, 'market_date_id')}:${keyPart(producerId, 'producer_id')}:${keyPart(offsetMin, 'offset_min')}`,
   deadline_summary: (marketDateId: string, userId: string) =>
     `deadline_summary:${keyPart(marketDateId, 'market_date_id')}:${keyPart(userId, 'user_id')}`,
+  /** Phase 4: keyed by the TARGET date (the one the booth is for), not the collecting date. */
+  booth: (targetDateId: string, producerId: string) =>
+    `booth:${keyPart(targetDateId, 'target_date_id')}:${keyPart(producerId, 'producer_id')}`,
 } as const;
 
 export interface EngineResult {
@@ -83,6 +100,10 @@ export interface EngineResult {
   reminders_sent: number;
   deadlines_processed: number;
   summaries_sent: number;
+  /** Phase 4: dates whose booth assignments this run drafted (a skipped draft does not count). */
+  drafts_generated: number;
+  /** Phase 4: booth texts this run sent. */
+  booth_texts_sent: number;
   skipped_claimed: number;
   errors: string[];
 }
@@ -178,6 +199,13 @@ export const TEMPLATES = {
   checkin_reminder(args: { market_name: string; deadline_label: string; link: string }): string {
     return `SJCA Markets reminder: your ${args.market_name} check-in is due by ${args.deadline_label}. Spots are not held without a check-in: ${args.link}\nReply STOP to opt out.`;
   },
+  /** Phase 4 (contract §3.5): the vendor's booth for the next market. Labels are the booths' own labels, e.g. `V7 and V8` or `Food truck`. */
+  booth(args: { market_name: string; date_short: string; labels: string[]; first_name: string }): string {
+    const labels = args.labels;
+    const where = labels.length <= 1 ? (labels[0] ?? '') : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+    const lead = args.first_name ? `${args.first_name}, your` : 'your';
+    return `SJCA Markets: ${lead} booth at ${args.market_name} on ${args.date_short} is ${where}. Please check in at the table when you arrive.\nReply STOP to opt out.`;
+  },
   deadline_summary(args: {
     market_name: string;
     date_short: string;
@@ -207,16 +235,23 @@ export const TEMPLATES = {
 };
 
 /**
- * A market's recipients (contract §3.5): active memberships whose producer
- * has a valid, non-opted-out E.164 phone. Everything else is `excluded`
- * with a reason. Sorted by business_name.
+ * A market's recipients (contract §3.5): memberships of the market's CURRENT
+ * season (decision D33; `seasons.ts`) that are `active`, whose producer has a
+ * valid, non-opted-out E.164 phone. Everything else is `excluded` with a
+ * reason. Sorted by business_name. Memberships of other seasons never count.
+ * `opts.now` fixes "current" for the caller (the engine passes its own clock).
  */
-export async function listRecipients(db: Firestore, marketId: string): Promise<{ recipients: Recipient[]; excluded: ExcludedProducer[] }> {
-  const membershipsSnap = await db.collection('producer_memberships').where('market_id', '==', marketId).get();
-  const activeProducerIds = membershipsSnap.docs
-    .map((d) => d.data() as Record<string, unknown>)
-    .filter((m) => m.status === 'active')
-    .map((m) => String(m.producer_id));
+export async function listRecipients(
+  db: Firestore,
+  marketId: string,
+  opts?: { now?: Date },
+): Promise<{ recipients: Recipient[]; excluded: ExcludedProducer[] }> {
+  const marketDoc = await db.collection('farmers_markets').doc(marketId).get();
+  const marketData = marketDoc.exists ? (marketDoc.data() as Record<string, unknown>) : {};
+  const source = { id: marketId, ...marketData, timezone: typeof marketData.timezone === 'string' ? marketData.timezone : 'UTC' } as SeasonSource & { id: string };
+  const season = currentSeason(source, opts?.now ?? new Date());
+  const memberships = ofSeason(await listMembershipsForMarket(db, marketId), season);
+  const activeProducerIds = [...new Set(memberships.filter(isVendorOfRecord).map((m) => m.producer_id))];
 
   const producersSnap = await db.collection('producers').get();
   const producersById = new Map<string, Record<string, unknown>>();
@@ -377,9 +412,9 @@ async function buildDeadlineSummaryEmail(
   db: Firestore,
   market: FarmersMarket,
   date: MarketDateDoc,
-  args: { dateShort: string; deadlineLabel: string; adminLink: string },
+  args: { dateShort: string; deadlineLabel: string; adminLink: string; now: Date },
 ): Promise<string> {
-  const { recipients, excluded } = await listRecipients(db, market.id);
+  const { recipients, excluded } = await listRecipients(db, market.id, { now: args.now });
   const checkinsSnap = await db.collection('checkins').where('market_date_id', '==', date.id).get();
   const byProducer = new Map<string, Record<string, unknown>>();
   for (const d of checkinsSnap.docs) {
@@ -480,7 +515,7 @@ export async function sendDeadlineSummary(
     try {
       const subject = `[SJCA Markets] ${market.name} check-in deadline: ${stats.responded}/${stats.recipients} responded (${dateShortStr})`;
       const deadlineLabel = formatLocalStamp(schedule.deadline_at, market.timezone);
-      const message = await buildDeadlineSummaryEmail(db, market, date, { dateShort: dateShortStr, deadlineLabel, adminLink });
+      const message = await buildDeadlineSummaryEmail(db, market, date, { dateShort: dateShortStr, deadlineLabel, adminLink, now: opts.now });
       await sendEmail({ env, to: env.ALERT_EMAIL, subject, message });
       emailSent = true;
     } catch (err) {
@@ -497,8 +532,9 @@ async function computeDeadlineStats(
   db: Firestore,
   marketId: string,
   marketDateId: string,
+  now: Date,
 ): Promise<{ recipients: Recipient[]; responded: Recipient[]; nonResponderIds: string[] }> {
-  const { recipients } = await listRecipients(db, marketId);
+  const { recipients } = await listRecipients(db, marketId, { now });
   const checkinsSnap = await db.collection('checkins').where('market_date_id', '==', marketDateId).get();
   const respondedIds = new Set(checkinsSnap.docs.map((d) => String((d.data() as Record<string, unknown>).producer_id ?? '')));
   const responded = recipients.filter((r) => respondedIds.has(r.producer_id));
@@ -562,7 +598,7 @@ export async function processDeadline(
     return { processed: false, ...asLoaded, summary: deadline.status === 'claimed' ? 'in_progress' : 'already_processed' };
   }
 
-  const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
+  const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id, opts.now);
 
   const baseUpdate: Record<string, unknown> = {
     non_responders: nonResponderIds,
@@ -706,7 +742,7 @@ async function processReminderOffset(
   if (mode === 'superseded') {
     entry = { offset_min: offsetMin, sent_at: now, recipients: 0, failed: 0, skipped: 'superseded' };
   } else {
-    const { recipients: allRecipients } = await listRecipients(db, market.id);
+    const { recipients: allRecipients } = await listRecipients(db, market.id, { now });
     const checkinsSnap = await db.collection('checkins').where('market_date_id', '==', date.id).get();
     const respondedIds = new Set(checkinsSnap.docs.map((d) => String((d.data() as Record<string, unknown>).producer_id ?? '')));
     // A producer who already answered (even a partial SMS check-in) already holds their spot.
@@ -810,6 +846,8 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
     reminders_sent: 0,
     deadlines_processed: 0,
     summaries_sent: 0,
+    drafts_generated: 0,
+    booth_texts_sent: 0,
     skipped_claimed: 0,
     errors: [],
   };
@@ -847,7 +885,7 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
         const c = await claim(db, date.id, 'checkin', now, (a) => !!a.checkin_sent_at);
         if (c.status === 'claimed') result.skipped_claimed++;
         if (c.status === 'proceed') {
-          const { recipients } = await listRecipients(db, market.id);
+          const { recipients } = await listRecipients(db, market.id, { now });
           const msgSnap = await db.collection('messages').where('market_date_id', '==', date.id).get();
           const alreadySent = new Set(
             msgSnap.docs
@@ -896,7 +934,7 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
           const c = await claim(db, date.id, 'deadline', now, (a) => !!a.deadline_processed_at);
           if (c.status === 'claimed') result.skipped_claimed++;
           if (c.status === 'proceed') {
-            const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id);
+            const { recipients, responded, nonResponderIds } = await computeDeadlineStats(db, market.id, date.id, now);
             const update: Record<string, unknown> = {
               non_responders: nonResponderIds,
               spot_not_held: nonResponderIds,
@@ -957,9 +995,30 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
         }
       }
 
-      // ── Drafts hook (Phase 6 stub) ──────────────────────────────────────
-      if (schedule.drafts_at.getTime() <= now.getTime() && !date.actions.drafts_generated_at) {
-        await generateDrafts();
+      // ── Drafts (Phase 4, contract §3.5) ─────────────────────────────────
+      // Due once `drafts_at` has passed. Fresh read: the steps above may have run.
+      {
+        const snap = await db.collection('market_dates').doc(date.id).get();
+        const fresh = marketDateFromData(snap.id, snap.data() as Record<string, unknown>);
+        if (schedule.drafts_at.getTime() <= now.getTime() && !fresh.actions.drafts_generated_at) {
+          const c = await claim(db, date.id, 'drafts', now, (a) => !!a.drafts_generated_at);
+          if (c.status === 'claimed') result.skipped_claimed++;
+          if (c.status === 'proceed') {
+            const draft = await draftAssignments(db, market, fresh, { now, actor: 'engine', mode: 'initial', record_skip: true });
+            if (!draft.skipped) result.drafts_generated += 1;
+          }
+        }
+      }
+
+      // ── Booth texts (Phase 4): approved, unsent, outside quiet hours ─────
+      {
+        const snap = await db.collection('market_dates').doc(date.id).get();
+        const fresh = marketDateFromData(snap.id, snap.data() as Record<string, unknown>);
+        if (fresh.actions.approved_at && !fresh.actions.booth_texts_sent_at) {
+          const r = await sendBoothTexts(db, env, market, fresh, { now });
+          if (r.status === 'claimed') result.skipped_claimed++;
+          if (r.status === 'sent') result.booth_texts_sent += r.sent;
+        }
       }
     } catch (err) {
       result.errors.push(`${date.id}: ${err instanceof Error ? err.message : String(err)}`);
@@ -969,7 +1028,202 @@ export async function processMarketDates(db: Firestore, env: Env, opts?: { now?:
   return result;
 }
 
-/** Phase 6 stub (contract §3.3): never sets `drafts_generated_at`. */
-async function generateDrafts(): Promise<'not_implemented'> {
-  return 'not_implemented';
+// ─── Phase 4: booth drafts, approval and booth texts ─────────────────────
+
+/** `nextDateAfter` lives with the assignment code (this file imports it); re-exported because the contract names it here. */
+export { nextDateAfter };
+
+export type BoothTextsOutcome =
+  | { status: 'not_approved' | 'already_sent' | 'claimed' }
+  | { status: 'deferred'; deferred_until: Date }
+  | { status: 'sent'; sent: number; failed: number; excluded: number; duplicates: number };
+
+/**
+ * The booth-texts step (contract §3.5): once a date's assignments are approved,
+ * text each seated vendor their booth(s) for the TARGET date. Sent at the first
+ * moment that is both at or after the approval's quiet-hours-adjusted instant and
+ * outside quiet hours now, so a retry after a crash never texts at 22:30. Under
+ * the `booth_texts` step lock; every text carries `DEDUPE_KEYS.booth(target,
+ * producer)`, so overlapping runs and a stale-lock takeover cannot text anyone
+ * twice. Recipients are `listRecipients` (textable, active, current season);
+ * seated vendors who are not recipients are counted as `excluded`. Writes field
+ * paths only.
+ */
+export async function sendBoothTexts(
+  db: Firestore,
+  env: Env,
+  market: FarmersMarket,
+  date: MarketDateDoc,
+  opts: { now: Date },
+): Promise<BoothTextsOutcome> {
+  const { now } = opts;
+  const approvedAt = date.actions.approved_at;
+  if (!approvedAt) return { status: 'not_approved' };
+  if (date.actions.booth_texts_sent_at) return { status: 'already_sent' };
+
+  const quiet = market.quiet_hours ?? DEFAULT_QUIET_HOURS;
+  const earliest = nextAllowedInstant(approvedAt, quiet, market.timezone);
+  const effective = earliest.getTime() > now.getTime() ? earliest : nextAllowedInstant(now, quiet, market.timezone);
+  if (effective.getTime() > now.getTime()) return { status: 'deferred', deferred_until: effective };
+
+  const c = await claim(db, date.id, 'booth_texts', now, (a) => !!a.booth_texts_sent_at);
+  if (c.status === 'claimed') return { status: 'claimed' };
+  if (c.status === 'done') return { status: 'already_sent' };
+
+  const ref = db.collection('market_dates').doc(date.id);
+  const freshSnap = await ref.get();
+  const fresh = marketDateFromData(freshSnap.id, freshSnap.data() as Record<string, unknown>);
+  const targetId = fresh.actions.assignments_target_date_id;
+  if (!targetId) throw new Error(`booth texts for ${date.id}: approved but no target date recorded`);
+  const targetSnap = await db.collection('market_dates').doc(targetId).get();
+  if (!targetSnap.exists) throw new Error(`booth texts for ${date.id}: target date ${targetId} not found`);
+  const target = marketDateFromData(targetSnap.id, targetSnap.data() as Record<string, unknown>);
+
+  const rows = await currentAssignments(db, target.id);
+  const booths = await listBooths(db, market.id, { includeInactive: true });
+  const boothById = new Map(booths.map((b) => [b.id, b]));
+  const boothIdsByProducer = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!boothById.has(row.booth_id)) continue;
+    const list = boothIdsByProducer.get(row.producer_id) ?? [];
+    list.push(row.booth_id);
+    boothIdsByProducer.set(row.producer_id, list);
+  }
+
+  const { recipients } = await listRecipients(db, market.id, { now });
+  const recipientById = new Map(recipients.map((r) => [r.producer_id, r]));
+
+  let sent = 0;
+  let failed = 0;
+  let excluded = 0;
+  let duplicates = 0;
+  for (const producerId of [...boothIdsByProducer.keys()].sort()) {
+    const recipient = recipientById.get(producerId);
+    if (!recipient) {
+      excluded++;
+      continue;
+    }
+    const labels = (boothIdsByProducer.get(producerId) ?? [])
+      .map((id) => boothById.get(id)!)
+      .sort(compareBooths)
+      .map((b) => b.label);
+    const body = TEMPLATES.booth({
+      market_name: market.name,
+      date_short: dateShort(target.date),
+      labels,
+      first_name: firstNameOf(recipient.contact_name),
+    });
+    const result = await trySendSms({
+      env,
+      db,
+      to: recipient.phone,
+      body,
+      kind: 'booth',
+      producer_id: producerId,
+      market_date_id: target.id,
+      extra: { booth_labels: labels, source_date_id: date.id },
+      dedupe_key: DEDUPE_KEYS.booth(target.id, producerId),
+    });
+    if (result.ok) sent++;
+    else if (result.duplicate) duplicates++;
+    else failed++;
+  }
+
+  await ref.update({
+    'actions.booth_texts_sent_at': now,
+    'actions.booth_text_recipients': sent + duplicates,
+    'actions.booth_text_failed': failed,
+    'actions.booth_text_excluded': excluded,
+    updated_at: now,
+  });
+  return { status: 'sent', sent, failed, excluded, duplicates };
+}
+
+export type ManualDraftOutcome =
+  | { status: 'drafted'; draft: DraftResult }
+  | { status: 'approved' | 'already_drafted' | 'in_progress' }
+  | { status: 'skipped'; reason: DraftSkipReason };
+
+/**
+ * The staff "Draft" / "Redraft" button (contract §3.4). Refuses cleanly before
+ * taking any lock (a refusal never leaves one behind): approved dates are closed
+ * to redrafting; a drafted date needs `redraft`; nothing to draft is `skipped`
+ * (and nothing is written). The first draft takes the same `drafts` lock as the
+ * engine's step, so the two cannot both draft; a redraft takes a lock keyed by
+ * the draft version it replaces (`redraft_<assignments_draft_at ms>`), so two
+ * concurrent redrafts collide and the next one, after the version moves on, does not.
+ */
+export async function draftNow(
+  db: Firestore,
+  market: FarmersMarket,
+  date: MarketDateDoc,
+  opts: { now: Date; actor: string; redraft: boolean },
+): Promise<ManualDraftOutcome> {
+  const { now } = opts;
+  if (date.actions.approved_at) return { status: 'approved' };
+  if (date.actions.assignments_draft_at && !opts.redraft) return { status: 'already_drafted' };
+
+  const prep = await prepareDraft(db, market, date, now);
+  if (prep.skipped) return { status: 'skipped', reason: prep.skipped };
+
+  if (!date.actions.drafts_generated_at) {
+    const c = await claim(db, date.id, 'drafts', now, (a) => !!a.drafts_generated_at);
+    if (c.status === 'claimed') return { status: 'in_progress' };
+    if (c.status === 'done') return { status: 'already_drafted' };
+    const draft = await draftAssignments(db, market, date, { now, actor: opts.actor, mode: 'initial' });
+    return { status: 'drafted', draft };
+  }
+
+  const version = date.actions.assignments_draft_at?.getTime() ?? 0;
+  const c = await claim(db, date.id, `redraft_${version}`, now, (a) => (a.assignments_draft_at?.getTime() ?? 0) !== version || !!a.approved_at);
+  if (c.status === 'claimed') return { status: 'in_progress' };
+  if (c.status === 'done') return { status: 'already_drafted' };
+  const draft = await draftAssignments(db, market, date, { now, actor: opts.actor, mode: 'redraft' });
+  return { status: 'drafted', draft };
+}
+
+export type ApproveOutcome =
+  | { status: 'approved'; texts: BoothTextsOutcome }
+  | { status: 'no_draft' | 'already_approved' | 'in_progress' | 'conflicts' };
+
+/**
+ * Staff approval of the drafted assignments (contract §3.4/§3.5). Every refusal
+ * is decided BEFORE the `approve` lock is taken (locks are never cleared, so a
+ * refused attempt must not leave one). Then, under the lock, writes
+ * `actions.approved_at/approved_by/booth_summary` and attempts the booth texts at
+ * once; a quiet-hours deferral is reported and the engine sends them later.
+ */
+export async function approveAssignments(
+  db: Firestore,
+  env: Env,
+  market: FarmersMarket,
+  date: MarketDateDoc,
+  opts: { now: Date; user_id: string },
+): Promise<ApproveOutcome> {
+  const { now } = opts;
+  if (date.actions.approved_at) return { status: 'already_approved' };
+  const targetId = date.actions.assignments_target_date_id;
+  if (!targetId || !date.actions.assignments_draft_at) return { status: 'no_draft' };
+  const rows = await currentAssignments(db, targetId);
+  if (conflictedBoothIds(rows).length > 0) return { status: 'conflicts' };
+
+  const c = await claim(db, date.id, 'approve', now, (a) => !!a.approved_at);
+  if (c.status === 'claimed') return { status: 'in_progress' };
+  if (c.status === 'done') return { status: 'already_approved' };
+
+  const booths = await listBooths(db, market.id);
+  const attendance = await loadAttendance(db, market, date, now);
+  const summary = computeBoothSummary(booths, attendance.attending.map((v) => v.producer_id), rows);
+  const ref = db.collection('market_dates').doc(date.id);
+  await ref.update({
+    'actions.approved_at': now,
+    'actions.approved_by': opts.user_id,
+    'actions.booth_summary': summary,
+    updated_at: now,
+  });
+
+  const snap = await ref.get();
+  const fresh = marketDateFromData(snap.id, snap.data() as Record<string, unknown>);
+  const texts = await sendBoothTexts(db, env, market, fresh, { now });
+  return { status: 'approved', texts };
 }
