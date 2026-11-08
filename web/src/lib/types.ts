@@ -387,6 +387,11 @@ export interface UpdateProducerInput {
   category: string;
   notes: string;
   active: boolean;
+  // Phase 4 (contract 2.3)
+  website: string;
+  social: string;
+  address: ApplicationAddress | null;
+  description_public: string;
 }
 
 /* ── Applications ── */
