@@ -28,6 +28,8 @@ import { applicationRoutes } from './routes/applications.js';
 import { checkinRoutes } from './routes/checkins.js';
 import { checkinPublicRoutes } from './routes/checkin-public.js';
 import { marketDateRoutes } from './routes/market-dates.js';
+import type { StoragePort } from './services/storage-port.js';
+import { firebaseStoragePort } from './services/storage-port.js';
 
 export interface BuildAppOptions {
   db: Firestore;
@@ -39,6 +41,8 @@ export interface BuildAppOptions {
    * always notifies; the local dev runner only does so in production.
    */
   notifyOnError?: boolean;
+  /** Object storage for application uploads. Defaults to Firebase Storage; tests pass `fakeStorage()`. */
+  storage?: StoragePort;
 }
 
 /**
@@ -49,7 +53,7 @@ export interface BuildAppOptions {
  * The returned instance is NOT yet `ready()`; callers await that (or
  * `listen()`) themselves.
  */
-export async function buildApp({ db, env, logLevel = 'info', notifyOnError = true }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({ db, env, logLevel = 'info', notifyOnError = true, storage }: BuildAppOptions): Promise<FastifyInstance> {
   // trustProxy: req.ip (the rate-limit key) must be the client behind Firebase
   // Hosting, not the always-127.0.0.1 socket address the function sees.
   const app = Fastify({ logger: { level: logLevel }, trustProxy: true });
@@ -66,6 +70,7 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
 
   app.decorate('db', db);
   app.decorate('env', env);
+  app.decorate('storage', storage ?? firebaseStoragePort(env));
 
   // Convert Firestore Timestamps to ISO strings in all JSON responses.
   app.addHook('preSerialization', async (_req: FastifyRequest, _reply: FastifyReply, payload: unknown) => serializeTimestamps(payload));

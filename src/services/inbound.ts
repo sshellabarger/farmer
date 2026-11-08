@@ -16,9 +16,8 @@ import { checkinUrl, findOpenCheckin, recordAttendingNext, staffForMarket, toDat
  * producer — HELP (with a check-in link when one is open), YES/NO against an
  * open check-in, otherwise forward the text to market staff plus a once-per-
  * 24h courtesy reply; (5) for everyone else (no producer match — including a
- * known staff user or a wholly unknown number) the Phase 1 stopgap behaviour
- * is unchanged: HELP, then a one-line "service has changed" reply at most
- * once per 24 h, never a loop.
+ * known staff user or a wholly unknown number) D29 applies: HELP is answered,
+ * every other text is logged and nothing is sent back.
  *
  * Every outbound reply goes through `trySendSms`, which logs it to
  * `messages` and never throws: voip.ms retries non-200 webhook responses,
@@ -41,8 +40,6 @@ export const REPLIES = {
   attending_no: (market: string, link: string) => `Got it - you're marked as not attending the next ${market}. You can change that here: ${link}`,
   received: 'Thanks - your message has been passed to SJCA Markets staff.',
   received_with_link: (link: string) => `Thanks - your message has been passed to SJCA Markets staff. Your check-in link: ${link}`,
-  // unchanged: unknown numbers (and any non-producer match) keep today's behaviour
-  closed: "Thanks. FarmLink's ordering service has closed and is becoming the SJCA farmers market manager. A team member will follow up.",
 } as const;
 
 export type OutboundKind = Extract<SmsKind, 'opt_out_confirm' | 'opt_in_confirm' | 'help' | 'auto_reply' | 'forwarded_inbound'>;
@@ -181,7 +178,6 @@ export async function handleInboundText({
   // (2) Lookups.
   const userSnap = await db.collection('users').where('phone', '==', from).limit(1).get();
   const userRef = userSnap.empty ? null : userSnap.docs[0].ref;
-  const userData = userSnap.empty ? null : userSnap.docs[0].data();
   const userId = userSnap.empty ? null : userSnap.docs[0].id;
 
   const producerSnap = await db.collection('producers').where('phone', '==', from).limit(1).get();
@@ -294,14 +290,10 @@ export async function handleInboundText({
     return;
   }
 
-  // (5) No producer match (a known staff user, or a wholly unknown number):
-  // today's Phase 1 stopgap behaviour, unchanged.
+  // (5) No producer match (a known staff user, or a wholly unknown number).
+  // D29: the text is logged above and that is all; nothing is sent back, so a
+  // spammer's text costs no paid segment. STOP/START were answered in (3).
   if (HELP_KEYWORDS.has(keyword)) {
     await reply(REPLIES.help, 'help');
-    return;
   }
-
-  if (userData?.sms_opt_out_at) return;
-  if (await repliedRecently(db, from, now)) return;
-  await reply(REPLIES.closed, 'auto_reply');
 }

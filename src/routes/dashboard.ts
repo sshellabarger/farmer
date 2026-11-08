@@ -3,15 +3,17 @@ import { authenticate } from '../middleware/rbac.js';
 import { requireStaff, accessibleMarketIds } from '../middleware/market-scope.js';
 import type { FarmersMarket } from '../services/markets.js';
 import { marketDateFromData, type MarketDateDoc } from '../services/market-dates.js';
+import { currentSeason, isVendorOfRecord, listMembershipsForMarket } from '../services/seasons.js';
 
 async function marketDateDocs(db: FastifyInstance['db'], marketId: string): Promise<MarketDateDoc[]> {
   const snap = await db.collection('market_dates').where('market_id', '==', marketId).get();
   return snap.docs.map((d) => marketDateFromData(d.id, d.data() as Record<string, unknown>));
 }
 
-async function marketProgress(db: FastifyInstance['db'], marketId: string, marketDateId: string) {
-  const membershipsSnap = await db.collection('producer_memberships').where('market_id', '==', marketId).get();
-  const activeMemberships = membershipsSnap.docs.filter((d) => (d.data() as Record<string, unknown>).status === 'active').length;
+async function marketProgress(db: FastifyInstance['db'], market: FarmersMarket, season: string, marketDateId: string) {
+  // D33: only the market's current season counts.
+  const memberships = await listMembershipsForMarket(db, market.id);
+  const activeMemberships = memberships.filter((m) => m.season === season && isVendorOfRecord(m)).length;
   const checkinsSnap = await db.collection('checkins').where('market_date_id', '==', marketDateId).get();
   const checkins = checkinsSnap.docs.length;
   const percent = activeMemberships > 0 ? Math.round((checkins / activeMemberships) * 100) : 0;
@@ -49,10 +51,12 @@ export async function dashboardRoutes(app: FastifyInstance) {
       past.sort((a, b) => b.end_at.getTime() - a.end_at.getTime());
       const collecting_date = past[0] ?? null;
 
-      const progress = collecting_date ? await marketProgress(app.db, market.id, collecting_date.id) : null;
+      const season = currentSeason(market, now);
+      const progress = collecting_date ? await marketProgress(app.db, market, season, collecting_date.id) : null;
 
       cards.push({
         market: { id: market.id, name: market.name, timezone: market.timezone, active: market.active },
+        season,
         next_date,
         collecting_date,
         progress,

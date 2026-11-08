@@ -13,6 +13,13 @@ export type UserRole = 'admin' | 'market_manager' | 'farmer' | 'market' | 'both'
 /** SPEC §2.2 market_dates.status. */
 export type MarketDateStatus = 'collecting' | 'lineup_final' | 'published' | 'cancelled';
 
+// Phase 4 (contract §2): the 2027 application.
+export type ApplicationStatus = 'new' | 'under_review' | 'approved' | 'declined' | 'withdrawn';
+export type ApplicationFeeStatus = 'unpaid' | 'paid' | 'waived';
+export type PermitStatus = 'uploaded' | 'will_provide' | 'not_required' | 'food_freedom';
+export type InsuranceAnswer = 'have' | 'none' | 'need_guidance';
+export type UploadKind = 'permit' | 'insurance' | 'logo';
+
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageSource = 'sms' | 'web' | 'system';
 export type NotificationType = 'new_inventory' | 'price_change' | 'order_update' | 'reminder';
@@ -25,8 +32,8 @@ export type FeedbackPriority = 'low' | 'medium' | 'high' | 'critical';
 
 // Phase 3 (contract §2.7): check-in workflow.
 export type CheckinSource = 'form' | 'import' | 'sms';
-export type LinkTokenPurpose = 'checkin';
-export type WorkflowActionKey = 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts';
+export type LinkTokenPurpose = 'checkin' | 'application' | 'agreement';
+export type WorkflowActionKey = 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts' | 'approve' | 'booth_texts';
 
 export interface AddressJson {
   street: string;

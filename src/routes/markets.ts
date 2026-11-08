@@ -15,8 +15,16 @@ import {
   extraQuestionSchema,
   DEFAULT_WORKFLOW,
   DEFAULT_QUIET_HOURS,
+  marketFees,
+  marketPaymentLinks,
+  marketLegal,
+  marketCategories,
+  marketProductTypes,
 } from '../services/markets.js';
-import type { FarmersMarket, ScheduleVersion } from '../services/markets.js';
+import type { FarmersMarket, MarketLegal, ScheduleVersion } from '../services/markets.js';
+import { currentSeason, SEASON_LABEL_RE } from '../services/seasons.js';
+import { inviteReapply } from '../services/invites.js';
+import { toDateOrEpoch } from '../utils/dates.js';
 import { byStringAsc } from '../utils/sort.js';
 
 async function loadMarket(db: FastifyInstance['db'], id: string): Promise<FarmersMarket | null> {
@@ -30,6 +38,12 @@ function toMarketDTO(market: FarmersMarket, isAdmin: boolean): Partial<FarmersMa
   if (isAdmin) return market;
   const { mailchimp: _mailchimp, website: _website, ...rest } = market;
   return rest;
+}
+
+/** The legal texts can be 50 000 characters each; the audit row records their versions and lengths, not their bodies. */
+function legalAuditView(legal: MarketLegal): Record<string, unknown> {
+  const { rules_markdown, hold_harmless_markdown, ...rest } = legal;
+  return { ...rest, rules_markdown_length: rules_markdown.length, hold_harmless_markdown_length: hold_harmless_markdown.length };
 }
 
 async function marketDateDocs(db: FastifyInstance['db'], marketId: string): Promise<MarketDateDoc[]> {
@@ -80,6 +94,26 @@ export async function marketRoutes(app: FastifyInstance) {
       markets.push({ id: market.id, name: market.name, location: market.location, timezone: market.timezone, active: market.active, next });
     }
     return { markets };
+  });
+
+  // ─── GET /api/markets/:id/rules (public, Phase 4 §3.1) ───
+  app.get('/:id/rules', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const market = await loadMarket(app.db, id);
+    if (!market) return reply.status(404).send({ error: 'Market not found' });
+    const legal = marketLegal(market);
+    if (legal.rules_markdown === '' && legal.rules_url === null) {
+      return reply.status(404).send({ error: 'The rules for this market are not published yet' });
+    }
+    return {
+      market_id: market.id,
+      market_name: market.name,
+      season: currentSeason(market, new Date()),
+      rules_version: legal.rules_version,
+      rules_markdown: legal.rules_markdown,
+      rules_url: legal.rules_url,
+      updated_at: toDateOrEpoch(market.updated_at),
+    };
   });
 
   // ─── GET /api/markets ───
@@ -191,6 +225,58 @@ export async function marketRoutes(app: FastifyInstance) {
     }
     if (input.website !== undefined) update.website = input.website;
     if (input.mailchimp !== undefined) update.mailchimp = input.mailchimp;
+
+    // ── Phase 4 (contract §2.1): each is written as a whole top-level field, never a dotted path into it. ──
+    if (input.season !== undefined) {
+      const versionId = input.season?.schedule_version_id ?? null;
+      if (versionId !== null && !market.schedule.versions.some((v) => v.id === versionId)) {
+        return reply.status(400).send({ error: 'season.schedule_version_id does not name a schedule version of this market' });
+      }
+      before.season = market.season ?? null;
+      after.season = input.season;
+      update.season = input.season;
+    }
+    if (input.fees !== undefined) {
+      const merged = { ...marketFees(market), ...input.fees };
+      before.fees = marketFees(market);
+      after.fees = merged;
+      update.fees = merged;
+    }
+    if (input.payment_links !== undefined) {
+      const merged = { ...marketPaymentLinks(market), ...input.payment_links };
+      before.payment_links = marketPaymentLinks(market);
+      after.payment_links = merged;
+      update.payment_links = merged;
+    }
+    if (input.legal !== undefined) {
+      const current = marketLegal(market);
+      const merged = { ...current, ...input.legal };
+      before.legal = legalAuditView(current);
+      after.legal = legalAuditView(merged);
+      update.legal = merged;
+    }
+    if (input.booth_map_url !== undefined) {
+      before.booth_map_url = market.booth_map_url ?? null;
+      after.booth_map_url = input.booth_map_url;
+      update.booth_map_url = input.booth_map_url;
+    }
+    if (input.categories !== undefined) {
+      before.categories = (market.categories ?? []).map((c) => c.key);
+      after.categories = input.categories.map((c) => c.key);
+      update.categories = input.categories;
+    }
+    if (input.product_types !== undefined) {
+      before.product_types = (market.product_types ?? []).map((t) => t.key);
+      after.product_types = input.product_types.map((t) => t.key);
+      update.product_types = input.product_types;
+    }
+    if (input.categories !== undefined || input.product_types !== undefined) {
+      const categoryKeys = new Set(marketCategories({ categories: input.categories ?? market.categories }).map((c) => c.key));
+      const types = input.product_types ?? marketProductTypes(market);
+      const bad = types.find((t) => t.category_keys.some((k) => !categoryKeys.has(k)));
+      if (bad) return reply.status(400).send({ error: `product type '${bad.key}' names a category that does not exist` });
+    }
+
     if (input.active !== undefined) {
       before.active = market.active;
       after.active = input.active;
@@ -357,6 +443,58 @@ export async function marketRoutes(app: FastifyInstance) {
     });
 
     return { generation };
+  });
+
+  // ─── POST /api/markets/:id/invite-reapply (Phase 4 §3.3: invite every returning vendor to apply) ───
+  app.post('/:id/invite-reapply', { preHandler: adminOnly }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const user = request.authUser!;
+    const market = await loadMarket(app.db, id);
+    if (!market) return reply.status(404).send({ error: 'Market not found' });
+
+    const input = z
+      .object({
+        season: z.string().regex(SEASON_LABEL_RE).optional(),
+        force: z.boolean().default(false),
+        dry_run: z.boolean().default(false),
+      })
+      .parse(request.body ?? {});
+
+    // Applications are taken for the market's configured season only, so that is the season an invite can be for.
+    const label = market.season?.label;
+    if (!label) return reply.status(409).send({ error: 'Applications are not open: set the season for this market first' });
+    const season = input.season ?? label;
+    if (season !== label) return reply.status(409).send({ error: `Applications are open for ${label}, not ${season}` });
+
+    const result = await inviteReapply({
+      db: app.db,
+      env: app.env,
+      market,
+      season,
+      actor: user.id,
+      force: input.force,
+      dryRun: input.dry_run,
+      now: new Date(),
+    });
+
+    if (!input.dry_run) {
+      await writeAudit(app.db, {
+        actor_id: user.id,
+        actor_role: user.role,
+        action: 'market.invite_reapply',
+        target: { collection: 'farmers_markets', id },
+        after: {
+          season,
+          force: input.force,
+          candidates: result.candidates,
+          invited: result.invited,
+          skipped_already: result.skipped_already,
+          skipped_applied: result.skipped_applied,
+          skipped_no_contact: result.skipped_no_contact,
+        },
+      });
+    }
+    return result;
   });
 
   // ─── GET /api/markets/:id/dates ───

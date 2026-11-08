@@ -5,8 +5,9 @@
 // cases that used to live here were archived with the Telnyx channel
 // (archive/v1-channels/).
 //
-// Stopgap (SPEC §7.4): every inbound is logged to `messages`; STOP/START/HELP
-// are honoured; anything else gets one courtesy reply per 24 h, never a loop.
+// Stopgap (SPEC §7.4, D29): every inbound is logged to `messages`; STOP/START/HELP
+// are honoured; anything else from a number that matches no producer is logged
+// and never answered. A known producer gets one courtesy reply per 24 h.
 //
 // Replies go out through `trySendSms` (SPEC §7.2/§7.3): under the console
 // env of these tests each reply is a `simulated` row in `messages`; the
@@ -115,7 +116,7 @@ describe('GET /voipms/inbound — shared secret', () => {
     expect(logged).toHaveLength(1);
     expect(logged[0]).toMatchObject({ body: 'hello', from: USER_PHONE, to: DID, status: 'received', kind: 'inbound', segments: 1 });
     expect(logged[0].status_at).toBeInstanceOf(Date);
-    expect(outbound(db)).toHaveLength(1);
+    expect(outbound(db)).toHaveLength(0); // D29: a plain text from a number matching no producer is logged, never answered
   });
 
   it('rejects a wrong secret', async () => {
@@ -139,7 +140,8 @@ describe('GET /voipms/inbound — shared secret', () => {
     const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hello')}` });
 
     expect(res.statusCode).toBe(200);
-    expect(outbound(db)).toHaveLength(1);
+    expect(inboundRows(db)).toHaveLength(1);
+    expect(outbound(db)).toHaveLength(0);
   });
 
   it('accepts the same payload as a form POST', async () => {
@@ -152,7 +154,8 @@ describe('GET /voipms/inbound — shared secret', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(outbound(db)).toHaveLength(1);
+    expect(inboundRows(db)).toHaveLength(1);
+    expect(outbound(db)).toHaveLength(0);
   });
 });
 
@@ -198,26 +201,27 @@ describe('stopgap inbound handler', () => {
     expect(outbound(db)[0]).toMatchObject({ body: REPLIES.help, kind: 'help' });
   });
 
-  it('unknown text gets the "service has closed" reply once', async () => {
+  it('unknown text is logged and gets no reply (D29)', async () => {
     const { app, db } = await buildApp({});
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('sold 10 lbs tomatoes')}` });
 
-    expect(outbound(db)).toHaveLength(1);
-    expect(outbound(db)[0]).toMatchObject({ to: USER_PHONE, body: REPLIES.closed, kind: 'auto_reply' });
+    expect(inboundRows(db)).toHaveLength(1);
+    expect(outbound(db)).toHaveLength(0);
   });
 
-  it('a second unknown text within 24 h does not get another reply', async () => {
+  it('a second unknown text within 24 h is logged and still gets no reply (D29)', async () => {
     const { app, db } = await buildApp({});
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('first')}` });
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('second')}` });
 
-    expect(outbound(db)).toHaveLength(1);
+    expect(outbound(db)).toHaveLength(0);
     expect(inboundRows(db)).toHaveLength(2);
   });
 
   it('a recent simulated reply counts the same as a sent one for the 24 h rule', async () => {
     const recent = new Date(Date.now() - 60 * 60 * 1000);
     const db = seededDb({
+      producers: { p1: { business_name: 'Test Farm', phone: USER_PHONE } },
       messages: { prev: { direction: 'outbound', to: USER_PHONE, status: 'simulated', kind: 'auto_reply', created_at: recent } },
     });
     const { app } = await buildApp({}, db);
@@ -229,6 +233,7 @@ describe('stopgap inbound handler', () => {
   it('replies again once the last reply is older than 24 h', async () => {
     const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
     const db = seededDb({
+      producers: { p1: { business_name: 'Test Farm', phone: USER_PHONE } },
       messages: { old: { direction: 'outbound', to: USER_PHONE, status: 'sent', kind: 'auto_reply', created_at: stale } },
     });
     const { app } = await buildApp({}, db);
@@ -238,13 +243,15 @@ describe('stopgap inbound handler', () => {
     expect(outbound(db).filter((m) => m.status === 'simulated')).toHaveLength(1);
   });
 
-  it('an unknown number still gets STOP confirmation and the one-time reply', async () => {
+  it('an unknown number gets nothing for a plain text, one STOP confirmation and one HELP reply (D29)', async () => {
     const { app, db } = await buildApp({});
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hi', '5015559999')}` });
+    expect(outbound(db)).toHaveLength(0);
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('STOP', '5015559999')}` });
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP', '5015559999')}` });
 
     expect(outbound(db)).toHaveLength(2);
-    expect(outbound(db).map((m) => m.kind).sort()).toEqual(['auto_reply', 'opt_out_confirm']);
+    expect(outbound(db).map((m) => m.kind).sort()).toEqual(['help', 'opt_out_confirm']);
     expect(outbound(db).every((m) => m.user_id === null)).toBe(true);
     expect(Object.keys(db.dump('users'))).toEqual(['u1']);
   });
@@ -259,17 +266,17 @@ describe('stopgap inbound handler', () => {
 
   it('the real provider path reaches voip.ms only with production + ALLOW_REAL_SENDS=true', async () => {
     const { app, db } = await buildApp(REAL);
-    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hello')}` });
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP')}` });
 
     expect(res.statusCode).toBe(200);
     expect(voipms).toHaveBeenCalledTimes(1);
-    expect(voipms.mock.calls[0][0]).toMatchObject({ to: USER_PHONE, body: REPLIES.closed });
-    expect(outbound(db)[0]).toMatchObject({ from: DID, provider: 'voipms', provider_message_id: 'msg-id', status: 'sent', kind: 'auto_reply' });
+    expect(voipms.mock.calls[0][0]).toMatchObject({ to: USER_PHONE, body: REPLIES.help });
+    expect(outbound(db)[0]).toMatchObject({ from: DID, provider: 'voipms', provider_message_id: 'msg-id', status: 'sent', kind: 'help' });
   });
 
   it('a real provider without the flag never sends, logs nothing outbound and still returns 200', async () => {
     const { app, db } = await buildApp({ SMS_PROVIDER: 'voipms' });
-    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hello')}` });
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP')}` });
 
     expect(res.statusCode).toBe(200);
     expect(voipms).not.toHaveBeenCalled();
@@ -282,7 +289,7 @@ describe('stopgap inbound handler', () => {
       throw new Error('voip.ms sendSMS failed: sms_toolong');
     });
     const { app, db } = await buildApp(REAL);
-    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hello')}` });
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP')}` });
 
     expect(res.statusCode).toBe(200);
     expect(outbound(db)).toHaveLength(1);
@@ -290,31 +297,28 @@ describe('stopgap inbound handler', () => {
     expect(String(outbound(db)[0].error)).toContain('sms_toolong');
   });
 
-  it('a text that sent but whose first status update failed is recorded as sent and not re-sent within 24 h', async () => {
+  it('a text that sent but whose first status update failed is recorded as sent', async () => {
     const db = withFlakyOutboundLog(seededDb(), 1);
     const { app } = await buildApp(REAL, db);
-    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('first')}` });
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP')}` });
 
     expect(res.statusCode).toBe(200);
     expect(outbound(db)).toHaveLength(1);
-    expect(outbound(db)[0]).toMatchObject({ status: 'sent', provider_message_id: 'msg-id', kind: 'auto_reply' });
-
-    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('second')}` });
+    expect(outbound(db)[0]).toMatchObject({ status: 'sent', provider_message_id: 'msg-id', kind: 'help' });
     expect(voipms).toHaveBeenCalledTimes(1);
-    expect(outbound(db)).toHaveLength(1);
   });
 
   it('a text that sent but could not be marked after a retry is never recorded as failed and still returns 200', async () => {
     const db = withFlakyOutboundLog(seededDb(), 2);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { app } = await buildApp(REAL, db);
-    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hello')}` });
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP')}` });
 
     expect(res.statusCode).toBe(200);
     expect(voipms).toHaveBeenCalledTimes(1);
     // The queued row from before the send is all that remains: never 'failed'.
     expect(outbound(db)).toHaveLength(1);
-    expect(outbound(db)[0]).toMatchObject({ status: 'queued', provider_message_id: null, kind: 'auto_reply' });
+    expect(outbound(db)[0]).toMatchObject({ status: 'queued', provider_message_id: null, kind: 'help' });
     expect(consoleError).toHaveBeenCalledTimes(1);
     expect(String(consoleError.mock.calls[0][0])).toContain('provider_message_id=msg-id');
   });

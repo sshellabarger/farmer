@@ -40,7 +40,10 @@ export type SmsKind =
   | 'checkin_link'
   | 'checkin_reminder'
   | 'deadline_summary'
-  | 'forwarded_inbound';
+  | 'forwarded_inbound'
+  // Phase 4 (contract §2.12): the application invite and the acceptance text.
+  | 'application_invite'
+  | 'acceptance';
 
 export interface SendSmsArgs {
   env: Env;
