@@ -27,8 +27,7 @@ contain — and scopes the build (SPEC §8 Phase 4, revised).
 | §7 Sales tax handled independently | — | Notice only |
 
 Not in the rules but in the 2026 form and worth keeping: agricultural practices
-(certified organic / CNG / no chemicals / conventional / n-a), "another vendor brings my
-products" (co-marketing, no booth), payment methods accepted (cash, card, check, WIC,
+(certified organic / CNG / no chemicals / conventional / n-a), payment methods accepted (cash, card, check, WIC,
 SNAP), the per-category practice checklists and descriptions (produce; meat/eggs/dairy;
 honey incl. hives, inspection, facility, flavoured; value-added facility, certifications,
 permits, batch records), description and years in operation, other outlets, website and
@@ -52,7 +51,7 @@ no login), submitting to `POST /api/applications`:
    Prohibited items stated.
 3. **Your booth** — the map; rate (seasonal / daily + frequency); spaces (1 / 2);
    electricity; payment-in-full intent; computed season total; stall preference;
-   co-marketing option; payment methods accepted.
+   payment methods accepted; the one-vendor-one-booth statement (D32).
 4. **Insurance and agreements** — coverage status and optional certificate; the five
    acknowledgements (rules & regulations with version/date, weekly report, farm visits,
    marketing consent, products-listed-only); typed signature.
@@ -105,6 +104,8 @@ from Breckenridge, set up, then park in vendor parking.
 - **D28** — Daily-rate vendors give a frequency (and optional months), not specific Saturdays. Default: yes.
 - **D29** — Stop auto-replying to unknown numbers (STOP/HELP still honoured; known producers unchanged). Default: yes.
 - **D30** — Returning vendors get an emailed/texted link that prefills the application from their producer record. Default: yes.
+- **D32 (owner, 2026-11-08)** — Cooperative / shared retail booths are no longer allowed. The "another vendor brings my products" question and the no-booth applicant path are dropped; the form states that each vendor sells only what they grow, raise or produce, from their own booth.
+- **D33 (owner, 2026-11-08)** — Every producer re-applies every season. Memberships are per season (`season` field; the 39 Phase 2 memberships read as 2026); only the market's current season counts for check-in texts, booths and the dashboard; approving a 2027 application creates the 2027 membership; previous seasons remain visible as history.
 - **D31** — Fee plan vocabulary becomes `seasonal | daily`; season total shown on the form uses the §4 amounts as market-level configuration (editable per season, never hard-coded). Default: yes.
 
 ## 5a. Owner-supplied values (2026-11-08) — seed these as WLRFM settings at the Phase 4 deploy
@@ -128,8 +129,8 @@ from Breckenridge, set up, then park in vendor parking.
 - Source of the links: the 2026 rules Google Doc ("WLRFM 2026 Rules and Regs"), which also
   carried a Cooperative Retail Booth clause (each producer applies and is approved
   individually; products labelled per producer; one point person may sell) that the 2027
-  draft no longer spells out — the form keeps the co-marketing question and the review
-  queue shows it.
+  draft no longer spells out — and the owner has since ruled (D32) that cooperative or
+  shared booths are not allowed at all.
 - Still pending from the owner: the Hold Harmless text (`legal.hold_harmless_markdown`)
   and the adopted 2027 rules for `/rules` (`legal.rules_markdown`, `rules_version`).
 
