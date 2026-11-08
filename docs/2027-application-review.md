@@ -107,6 +107,32 @@ from Breckenridge, set up, then park in vendor parking.
 - **D30** — Returning vendors get an emailed/texted link that prefills the application from their producer record. Default: yes.
 - **D31** — Fee plan vocabulary becomes `seasonal | daily`; season total shown on the form uses the §4 amounts as market-level configuration (editable per season, never hard-coded). Default: yes.
 
+## 5a. Owner-supplied values (2026-11-08) — seed these as WLRFM settings at the Phase 4 deploy
+
+- **D25 payment link** (`payment_links.application_fee_url`, also the booth-fee link until a
+  separate form exists): https://www.zeffy.com/en-US/organizations/arkansas-local-food-network
+- **D27 insurance guidance** (`legal.insurance_help_url`): the WLRFM Insurance Information
+  Sheet, https://drive.google.com/file/d/1-2v-fWv0ByvmBaah2brOmCY3ZBvwC8KI/view?usp=sharing —
+  it tells uninsured applicants to answer "no", apply, then secure \$1,000,000 general
+  liability for the market season once approved (financial assistance of up to \$100 was
+  offered for 2026, first come first served); insured applicants answer "yes" and obtain a
+  Certificate of Insurance naming **KBK-Breck, LLC c/o Kelley Commercial Partners** and
+  **ALFN/West Little Rock Farmers Market** as additional insureds; FLIP and Campbell Risk
+  Management are listed as resources. The form's insurance section copy and the
+  acceptance email should link to it; the 2027 draft adds "The WLRFM" as a third named
+  insured — owner to confirm the sheet is updated for 2027.
+- **D27 ADH Farmers Market Vendor Guidelines** (`legal.adh_guidelines_url`):
+  https://healthy.arkansas.gov/wp-content/uploads/FarmersMarketGuidelines-7-28-25.pdf
+- **D27 Food Freedom / Homemade Food Guide** (`legal.food_freedom_url`):
+  https://healthy.arkansas.gov/wp-content/uploads/Homemade-Food-Guide-2025-July.pdf
+- Source of the links: the 2026 rules Google Doc ("WLRFM 2026 Rules and Regs"), which also
+  carried a Cooperative Retail Booth clause (each producer applies and is approved
+  individually; products labelled per producer; one point person may sell) that the 2027
+  draft no longer spells out — the form keeps the co-marketing question and the review
+  queue shows it.
+- Still pending from the owner: the Hold Harmless text (`legal.hold_harmless_markdown`)
+  and the adopted 2027 rules for `/rules` (`legal.rules_markdown`, `rules_version`).
+
 ## 6. 2026 Jotform field inventory (for the record)
 
 Farm/business: full name; farm/business name; email; phone; website; social; address;

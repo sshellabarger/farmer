@@ -734,7 +734,7 @@ service has closed… A team member will follow up" — owner to supply new word
 | **D19** | Who receives `privacy@` / `support@farmlink.us` today? | Unknown; likely nobody. |
 | **D20** | Seed Phase 2 with the 2026 WLRFM weekly-survey history (≈335 responses, Apr 18–Sep 20) as test data? | **Yes** — real names, real dates, no phones. The export sits in the private bucket, never in git; Phase 7 re-runs the same importer against the authoritative Google export. |
 | **D15 (resolved 2026-11-08)** | Page-2 application-form fields. | The 2026 Jotform (`ALFNWLRFMVendorApp042026`) is the source, revised by the 2027 Rules & Regulations draft — inventory and gap analysis in `docs/2027-application-review.md`. |
-| **D24–D31** | 2027 application and booth assignment decisions (WLRFM-only form, \$15 fee via Zeffy link, power stalls, owner-supplied legal texts/links, daily-vendor frequency, no auto-reply to unknown numbers, returning-vendor prefill links, `seasonal \| daily` fee plans). | Defaults in `docs/2027-application-review.md` §5; apply unless the owner objects. |
+| **D24–D31** | 2027 application and booth assignment decisions (WLRFM-only form, \$15 fee via Zeffy link, power stalls, owner-supplied legal texts/links, daily-vendor frequency, no auto-reply to unknown numbers, returning-vendor prefill links, `seasonal \| daily` fee plans). | **Accepted by the owner 2026-11-08** (all defaults); the Zeffy link and the insurance/ADH/Food Freedom URLs are recorded in `docs/2027-application-review.md` §5a; Hold Harmless text and the adopted rules still to come. |
 
 ---
 
