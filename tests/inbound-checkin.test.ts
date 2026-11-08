@@ -329,15 +329,18 @@ describe('STOP / START on a producer', () => {
   });
 });
 
-describe('unknown numbers — unchanged from Phase 1', () => {
-  it('gets the closed reply once per 24h and STOP still confirms', async () => {
+describe('unknown numbers — D29: logged, never answered, except STOP and HELP', () => {
+  it('sends nothing for a plain text, one confirmation for STOP and one reply for HELP', async () => {
     const db = seededDb();
     const app = await buildApp({}, db);
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('hi', '+15015559999')}` });
+    expect(outbound(db)).toHaveLength(0);
+    expect(inboundRows(db)).toHaveLength(1);
     await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('STOP', '+15015559999')}` });
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('HELP', '+15015559999')}` });
 
     expect(outbound(db)).toHaveLength(2);
-    expect(outbound(db).map((m) => m.kind).sort()).toEqual(['auto_reply', 'opt_out_confirm']);
+    expect(outbound(db).map((m) => m.kind).sort()).toEqual(['help', 'opt_out_confirm']);
   });
 });
 
