@@ -4,6 +4,21 @@
  * as ISO strings (the API's preSerialization hook converts them).
  */
 
+import type {
+  AgriculturalPractice,
+  ApplicationAddress,
+  AssignmentSource,
+  BoothDoc,
+  BoothKind,
+  MarketCategory,
+  MarketFees,
+  MarketLegal,
+  MarketPaymentLinks,
+  MarketSeason,
+  ProductEntry,
+  ProductTypeConfig,
+} from './phase4-types';
+
 export type DayOfWeek = 'sunday' | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday';
 
 export const DAYS_OF_WEEK: readonly DayOfWeek[] = [
@@ -77,6 +92,14 @@ export interface Market {
   quiet_hours: QuietHours;
   website?: { duda_site_id: string; thisweek_page_id: string; vendor_collection_id: string } | null;
   mailchimp?: { audience_id: string; template_id: string } | null;
+  // Phase 4 (contract 2.1) - absent on markets written before Phase 4; the API applies defaults on read.
+  season?: MarketSeason | null;
+  fees?: MarketFees;
+  payment_links?: MarketPaymentLinks;
+  legal?: MarketLegal;
+  booth_map_url?: string | null;
+  categories?: MarketCategory[];
+  product_types?: ProductTypeConfig[];
   active: boolean;
   created_by: string;
   created_at: string;
@@ -118,6 +141,14 @@ export interface UpdateMarketInput {
   website: Market['website'];
   mailchimp: Market['mailchimp'];
   active: boolean;
+  // Phase 4 (contract 2.1)
+  season: MarketSeason | null;
+  fees: MarketFees;
+  payment_links: MarketPaymentLinks;
+  legal: MarketLegal;
+  booth_map_url: string | null;
+  categories: MarketCategory[];
+  product_types: ProductTypeConfig[];
 }
 
 export type MarketDateStatus = 'collecting' | 'lineup_final' | 'published' | 'cancelled';
@@ -152,7 +183,18 @@ export interface MarketDateActions {
   summary_sent_at?: string | null;
   summary_skipped?: 'no_recipients' | 'notify_false' | null;
   claims?: Record<string, string>;
+  // Phase 4 (contract 2.9)
+  assignments_draft_at?: string | null;
+  assignments_target_date_id?: string | null;
+  drafts_skipped?: DraftSkipReason | null;
+  approved_by?: string | null;
+  booth_summary?: { assigned: number; unassigned: number; booths_total: number; booths_free: number } | null;
+  booth_text_recipients?: number;
+  booth_text_failed?: number;
+  booth_text_excluded?: number;
 }
+
+export type DraftSkipReason = 'no_next_date' | 'no_booths' | 'no_attendees';
 
 export interface MarketDate {
   id: string;
@@ -215,7 +257,8 @@ export interface Producer {
   email: string | null;
   emails: string[];
   aliases: string[];
-  products: string[];
+  /** Phase 2 stored plain strings; Phase 4 stores structured entries. Readers accept both. */
+  products: (string | ProductEntry)[];
   category: string;
   documents: { name: string; url: string; uploaded_at: string }[];
   sms_consent: { status: SmsConsentStatus; at: string | null; source: string };
@@ -226,12 +269,25 @@ export interface Producer {
   notes?: string;
   source: 'application' | 'import' | 'admin';
   active: boolean;
+  // Phase 4 (contract 2.3) - optional on read.
+  website?: string;
+  social?: string;
+  address?: ApplicationAddress | null;
+  description_public?: string;
+  years_in_operation?: number | null;
+  outlets?: string;
+  agricultural_practices?: AgriculturalPractice | null;
+  categories?: string[];
+  payment_methods?: string[];
+  logo_upload_id?: string | null;
+  last_application_id?: string | null;
   created_at: string;
   updated_at: string;
 }
 
 export type MembershipStatus = 'applied' | 'under_review' | 'approved' | 'active' | 'inactive';
-export type FeePlan = 'weekly' | 'season' | 'both';
+/** Phase 4 vocabulary (D31). The API maps the Phase 2 values on read: weekly -> daily, season/both -> seasonal. */
+export type FeePlan = 'seasonal' | 'daily';
 
 /** Contract §4.3: allowed status transitions. */
 export const MEMBERSHIP_TRANSITIONS: Record<MembershipStatus, MembershipStatus[]> = {
@@ -261,8 +317,42 @@ export interface Membership {
   approved_by: string | null;
   history: MembershipHistoryEntry[];
   source: 'application' | 'import' | 'admin';
+  // Phase 4 (contract 2.6) - one membership per producer, market and season (D33).
+  season: string;
+  spaces: 1 | 2;
+  electric: boolean;
+  pay_in_full: boolean;
+  booth_kind: BoothKind;
+  trial_period: boolean;
+  insurance: MembershipInsurance;
+  hold_harmless: { signed_at: string; name: string; ip?: string; version: string; token?: string } | null;
+  approved_items: string[];
+  item_requests: ItemRequest[];
+  application_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export type InsuranceStatus = 'missing' | 'on_file' | 'expired' | 'waived';
+
+export interface MembershipInsurance {
+  status: InsuranceStatus;
+  expires_at: string | null;
+  upload_id: string | null;
+  verified_by: string | null;
+  verified_at: string | null;
+  note: string;
+}
+
+export interface ItemRequest {
+  id: string;
+  items: string[];
+  note: string;
+  requested_at: string;
+  source: 'application' | 'admin' | 'producer';
+  status: 'pending' | 'approved' | 'declined';
+  decided_by: string | null;
+  decided_at: string | null;
 }
 
 export interface MembershipWithProducer extends Membership {
@@ -270,7 +360,7 @@ export interface MembershipWithProducer extends Membership {
 }
 
 export interface ProducerListItem extends Producer {
-  memberships: { market_id: string; status: MembershipStatus }[];
+  memberships: { market_id: string; status: MembershipStatus; season?: string; fee_plan?: FeePlan; spaces?: 1 | 2; electric?: boolean }[];
 }
 
 export interface CreateProducerInput {
@@ -297,6 +387,11 @@ export interface UpdateProducerInput {
   category: string;
   notes: string;
   active: boolean;
+  // Phase 4 (contract 2.3)
+  website: string;
+  social: string;
+  address: ApplicationAddress | null;
+  description_public: string;
 }
 
 /* ── Applications ── */
@@ -405,6 +500,8 @@ export interface AuditEntry {
 
 export interface DashboardCard {
   market: { id: string; name: string; timezone: string; active: boolean };
+  /** Phase 4: the market's current season label. */
+  season?: string;
   next_date: MarketDate | null;
   collecting_date: MarketDate | null;
   progress: { active_memberships: number; checkins: number; percent: number } | null;
@@ -484,7 +581,7 @@ export interface MarketDateStatusView {
   date: MarketDate;
   market: { id: string; name: string; timezone: string; workflow: Workflow; quiet_hours: QuietHours };
   schedule: DateScheduleView;
-  next_due: { action: 'checkin' | 'reminder' | 'deadline' | 'summary' | 'none'; at: string | null; offset_min?: number };
+  next_due: { action: 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts' | 'booth_texts' | 'none'; at: string | null; offset_min?: number };
   in_window: boolean;
   recipients: {
     producer_id: string;
@@ -503,6 +600,8 @@ export interface MarketDateStatusView {
   excluded: { producer_id: string; business_name: string; reason: 'no_phone' | 'invalid_phone' | 'opted_out' | 'inactive_producer' }[];
   counts: { recipients: number; responded: number; non_responders: number; excluded: number };
   messages: { id: string; kind: string; to: string; producer_id: string | null; user_id: string | null; status: string; segments: number; created_at: string }[];
+  /** Phase 4 (contract 3.4). Absent from servers that predate booth assignment. */
+  assignments?: AssignmentsView;
 }
 
 /** Contract §4.2 `POST /:id/close` result shape. */
@@ -513,4 +612,107 @@ export interface CloseResult {
   responded: number;
   non_responders: string[];
   summary: 'sent' | 'skipped_no_recipients' | 'skipped_notify_false' | 'failed' | 'sent_by_engine' | 'already_processed' | 'in_progress';
+}
+
+/* ── Phase 4: applications, invites, insurance, booths (contract 3, 4.2) ── */
+
+/** PATCH /api/applications/:id body (contract 3.2). */
+export type ApplicationAction =
+  | { action: 'review' }
+  | { action: 'withdraw' }
+  | { action: 'note'; notes: string }
+  | { action: 'fee'; status: 'paid' | 'waived' | 'unpaid'; reference?: string }
+  | { action: 'decline'; reason: string }
+  | {
+      action: 'approve';
+      fee_plan: FeePlan;
+      spaces: 1 | 2;
+      electric: boolean;
+      pay_in_full: boolean;
+      booth_kind: BoothKind;
+      usual_booth_id: string | null;
+      trial_period: boolean;
+      note: string;
+      send: boolean;
+    };
+
+/** An `application_invites` document (contract 2.5). */
+export interface ApplicationInvite {
+  market_id: string;
+  season: string;
+  producer_id: string;
+  token?: string;
+  email: string | null;
+  email_status: 'sent' | 'skipped_no_email' | 'failed' | 'simulated';
+  phone: string | null;
+  sms_status: 'sent' | 'simulated' | 'skipped_no_phone' | 'skipped_opted_out' | 'failed' | 'duplicate';
+  message_id: string | null;
+  sent_by: string;
+  sent_at: string;
+  resends: { at: string; by: string; token?: string; email_status: string; sms_status: string }[];
+}
+
+/** POST /api/markets/:id/invite-reapply result (contract 3.3). */
+export interface InviteBatchResult {
+  season: string;
+  candidates: number;
+  invited: number;
+  skipped_already: number;
+  skipped_applied: number;
+  skipped_no_contact: number;
+  results: { producer_id: string; business_name: string; email_status: string; sms_status: string }[];
+}
+
+/** PATCH /api/memberships/:id/insurance body (contract 3.4). */
+export interface InsuranceUpdateInput {
+  status: InsuranceStatus;
+  expires_at: string | null;
+  upload_id: string | null;
+  note: string;
+}
+
+export interface BoothInput {
+  label: string;
+  row: string;
+  order: number;
+  kind?: BoothKind;
+  power?: boolean;
+  size?: string;
+  notes?: string;
+}
+
+export interface BoothSeedInput {
+  rows: { row: string; labels: string[] }[];
+  food_truck?: { label: string; row: string; order: number } | null;
+}
+
+/** The assignments view of GET /api/market-dates/:id/status (contract 3.4), with instants as ISO strings. */
+export interface AssignmentsView {
+  target_date: { id: string; date: string; date_label: string } | null;
+  season: string;
+  drafted_at: string | null;
+  assignments_draft_at: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  booth_texts_sent_at: string | null;
+  booth_texts_due_at: string | null;
+  drafts_skipped: DraftSkipReason | null;
+  booths: {
+    booth: BoothDoc;
+    assignment: { id: string; producer_id: string; business_name: string; source: AssignmentSource; assigned_by: string; assigned_at: string } | null;
+  }[];
+  attending: {
+    producer_id: string;
+    business_name: string;
+    spaces: 1 | 2;
+    electric: boolean;
+    booth_kind: BoothKind;
+    usual_booth_id: string | null;
+    booth_ids: string[];
+  }[];
+  unassigned: { producer_id: string; business_name: string; reason: 'no_power_stall' | 'no_pair' | 'full' | 'no_food_truck_slot' }[];
+  not_attending: { producer_id: string; business_name: string }[];
+  no_answer: { producer_id: string; business_name: string }[];
+  summary: { assigned: number; unassigned: number; booths_total: number; booths_free: number; conflicts: number };
+  messages: { id: string; producer_id: string | null; to: string; status: string; created_at: string }[];
 }

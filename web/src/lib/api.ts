@@ -1,7 +1,13 @@
+import type { ApplicationDoc, ApplicationListItem, BoothDoc, UploadMeta } from './phase4-types';
 import type {
   Application,
+  ApplicationAction,
   ApplicationInput,
+  ApplicationInvite,
+  AssignmentsView,
   AuditEntry,
+  BoothInput,
+  BoothSeedInput,
   Checkin,
   CheckinFormValues,
   CheckinSubmitInput,
@@ -12,6 +18,8 @@ import type {
   DashboardCard,
   FeePlan,
   GenerateResult,
+  InsuranceUpdateInput,
+  InviteBatchResult,
   Market,
   MarketDate,
   MarketDateStatusView,
@@ -169,19 +177,50 @@ export const api = {
     request<{ date: MarketDate }>(`/markets/${id}/dates/${dateId}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   // Producers / memberships / check-ins
-  getProducers: (params?: { market_id?: string; status?: string; q?: string; include_inactive?: 'true' }) =>
+  getProducers: (params?: { market_id?: string; status?: string; season?: string; q?: string; include_inactive?: 'true' }) =>
     request<{ producers: ProducerListItem[] }>(`/producers${qs(params)}`),
   getProducer: (id: string) =>
-    request<{ producer: Producer; memberships: Membership[]; checkins_summary: { count: number; last_submitted_at: string | null } }>(`/producers/${id}`),
+    request<{
+      producer: Producer;
+      memberships: Membership[];
+      checkins_summary: { count: number; last_submitted_at: string | null };
+      /** Phase 4 (contract 3.3). Absent from servers that predate it. */
+      current_season_by_market?: Record<string, string>;
+      invite?: { token_url: string; sent_at: string } | null;
+    }>(`/producers/${id}`),
   createProducer: (data: CreateProducerInput) =>
     request<{ producer: Producer; memberships: Membership[] }>('/producers', { method: 'POST', body: JSON.stringify(data) }),
   updateProducer: (id: string, data: Partial<UpdateProducerInput>) =>
     request<{ producer: Producer }>(`/producers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getMemberships: (params: { market_id: string } | { producer_id: string }) =>
     request<{ memberships: MembershipWithProducer[] }>(`/memberships${qs(params)}`),
-  createMembership: (data: { producer_id: string; market_id: string; status?: MembershipStatus; fee_plan?: FeePlan }) =>
+  createMembership: (data: {
+    producer_id: string;
+    market_id: string;
+    season?: string;
+    status?: MembershipStatus;
+    fee_plan?: FeePlan;
+    spaces?: 1 | 2;
+    electric?: boolean;
+    pay_in_full?: boolean;
+    booth_kind?: 'stall' | 'food_truck';
+    usual_booth_id?: string | null;
+  }) =>
     request<{ membership: Membership }>('/memberships', { method: 'POST', body: JSON.stringify(data) }),
-  updateMembership: (id: string, data: { status?: MembershipStatus; fee_plan?: FeePlan; usual_booth_id?: string | null; note?: string }) =>
+  updateMembership: (
+    id: string,
+    data: {
+      status?: MembershipStatus;
+      fee_plan?: FeePlan;
+      usual_booth_id?: string | null;
+      note?: string;
+      spaces?: 1 | 2;
+      electric?: boolean;
+      pay_in_full?: boolean;
+      booth_kind?: 'stall' | 'food_truck';
+      trial_period?: boolean;
+    },
+  ) =>
     request<{ membership: Membership }>(`/memberships/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getCheckins: (params: { market_date_id: string } | { producer_id: string }) =>
     request<{ checkins: Checkin[] }>(`/checkins${qs(params)}`),
@@ -231,4 +270,42 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // ── Phase 4 (contract 4.2) ──
+  getApplicationsV2: (p?: { market_id?: string; season?: string; status?: string; fee?: string; category?: string; returning?: 'true' | 'false'; q?: string }) =>
+    request<{ applications: ApplicationListItem[] }>(`/applications${qs(p)}`),
+  getApplicationV2: (id: string) =>
+    request<{ application: ApplicationDoc; uploads: UploadMeta[]; producer: { id: string; business_name: string } | null; prior_memberships: Membership[] }>(`/applications/${id}`),
+  getApplicationUploadUrl: (id: string, uploadId: string) =>
+    request<{ url: string; expires_at: string }>(`/applications/${id}/uploads/${uploadId}/url`),
+  patchApplication: (id: string, data: ApplicationAction) =>
+    request<{ application: ApplicationDoc; producer?: Producer; membership?: Membership; sends?: { sms: string; email: boolean } }>(`/applications/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  inviteProducer: (id: string, market_id: string, force = false) =>
+    request<{ invite: ApplicationInvite; url: string }>(`/producers/${id}/invite${qs({ market_id, force: force ? 'true' : undefined })}`, { method: 'POST' }),
+  inviteMarket: (id: string, data: { season?: string; force?: boolean; dry_run?: boolean }) =>
+    request<InviteBatchResult>(`/markets/${id}/invite-reapply`, { method: 'POST', body: JSON.stringify(data) }),
+  membershipItems: (id: string, data: { action: 'approve' | 'decline'; request_id: string } | { action: 'add'; items: string[] }) =>
+    request<{ membership: Membership }>(`/memberships/${id}/items`, { method: 'POST', body: JSON.stringify(data) }),
+  updateInsurance: (id: string, data: InsuranceUpdateInput) =>
+    request<{ membership: Membership }>(`/memberships/${id}/insurance`, { method: 'PATCH', body: JSON.stringify(data) }),
+  sendAgreementLink: (id: string, send = true) =>
+    request<{ url: string; expires_at: string; sms: string }>(`/memberships/${id}/agreement-link`, { method: 'POST', body: JSON.stringify({ send }) }),
+  getBooths: (marketId: string, includeInactive = false) =>
+    request<{ booths: BoothDoc[] }>(`/markets/${marketId}/booths${qs({ include_inactive: includeInactive ? 'true' : undefined })}`),
+  createBooth: (marketId: string, data: BoothInput) =>
+    request<{ booth: BoothDoc }>(`/markets/${marketId}/booths`, { method: 'POST', body: JSON.stringify(data) }),
+  seedBooths: (marketId: string, data: BoothSeedInput) =>
+    request<{ created: number; existing: number }>(`/markets/${marketId}/booths/seed`, { method: 'POST', body: JSON.stringify(data) }),
+  updateBooth: (marketId: string, boothId: string, data: Partial<BoothInput> & { active?: boolean }) =>
+    request<{ booth: BoothDoc }>(`/markets/${marketId}/booths/${boothId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  retireBooth: (marketId: string, boothId: string) =>
+    request<{ booth: BoothDoc }>(`/markets/${marketId}/booths/${boothId}`, { method: 'DELETE' }),
+  reorderBooths: (marketId: string, rows: { row: string; booth_ids: string[] }[]) =>
+    request<{ booths: BoothDoc[] }>(`/markets/${marketId}/booths/reorder`, { method: 'PUT', body: JSON.stringify({ rows }) }),
+  draftAssignments: (dateId: string, redraft = false) =>
+    request<{ draft: unknown; assignments: AssignmentsView }>(`/market-dates/${dateId}/assignments/draft`, { method: 'POST', body: JSON.stringify({ redraft }) }),
+  updateAssignments: (dateId: string, changes: { producer_id: string; booth_ids: string[] }[]) =>
+    request<{ assignments: AssignmentsView; warning?: string }>(`/market-dates/${dateId}/assignments`, { method: 'PATCH', body: JSON.stringify({ changes }) }),
+  approveAssignments: (dateId: string) =>
+    request<{ assignments: AssignmentsView; texts: { attempted: boolean; sent: number; failed: number; excluded: number; deferred_until: string | null } }>(`/market-dates/${dateId}/assignments/approve`, { method: 'POST', body: '{}' }),
 };

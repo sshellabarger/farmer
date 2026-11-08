@@ -38,6 +38,21 @@ const COLORS: Record<string, { bg: string; text: string }> = {
   done: { bg: '#D1FAE5', text: '#065F46' },
   superseded: { bg: '#F3F4F6', text: '#6B7280' },
   unreachable: { bg: '#F3F4F6', text: '#6B7280' },
+  // Phase 4: applications, fees, insurance, agreements, assignments, fee plans (contract 4.2)
+  withdrawn: { bg: '#F3F4F6', text: '#6B7280' },
+  paid: { bg: '#D1FAE5', text: '#065F46' },
+  unpaid: { bg: '#FEF3C7', text: '#92400E' },
+  waived: { bg: '#DBEAFE', text: '#1E40AF' },
+  on_file: { bg: '#D1FAE5', text: '#065F46' },
+  missing: { bg: '#FEF3C7', text: '#92400E' },
+  expired: { bg: '#FEE2E2', text: '#991B1B' },
+  signed: { bg: '#D1FAE5', text: '#065F46' },
+  unsigned: { bg: '#FEF3C7', text: '#92400E' },
+  usual: { bg: '#E0E7FF', text: '#3730A3' },
+  suggested: { bg: '#DBEAFE', text: '#1E40AF' },
+  manual: { bg: '#EDE9FE', text: '#5B21B6' },
+  seasonal: { bg: '#D1FAE5', text: '#065F46' },
+  daily: { bg: '#F3F4F6', text: '#6B7280' },
 };
 
 export function StatusChip({ status, title }: { status: string; title?: string }) {
