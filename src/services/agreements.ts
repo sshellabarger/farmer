@@ -3,7 +3,6 @@ import type { Env } from '../config/env.js';
 import { isAlreadyExists } from '../db/firestore.js';
 import { toDate } from '../utils/dates.js';
 import { trySendSms } from './sms.js';
-import type { SmsKind } from './sms.js';
 import { mintPurposeToken, purposeTokenUrl } from './purpose-tokens.js';
 import type { PurposeTokenDoc } from './purpose-tokens.js';
 import { membershipFromData } from './seasons.js';
@@ -21,12 +20,6 @@ import { CLAIM_TTL_MS } from './checkin-workflow.js';
 /** Agreement tokens live 60 days (contract §2.11). */
 export const AGREEMENT_TOKEN_TTL_DAYS = 60;
 const E164_RE = /^\+[1-9]\d{6,14}$/;
-
-/**
- * 'acceptance' is added to SmsKind by executor A1's sms.ts hunk (contract §1.6);
- * A2 may not edit that file, so the kind is widened here. Redundant after the merge.
- */
-const ACCEPTANCE_KIND = 'acceptance' as unknown as SmsKind;
 
 export const AGREEMENT_TEMPLATES = {
   agreement_link(args: { season: string; market_name: string; first_name: string; link: string }): string {
@@ -226,7 +219,7 @@ export async function issueAgreementLink(
           first_name: firstNameOf(producer.contact_name),
           link: url,
         }),
-        kind: ACCEPTANCE_KIND,
+        kind: 'acceptance',
         producer_id: membership.producer_id,
         sent_by: opts.user_id,
         extra: { membership_id: membership.id, token: doc.token, market_id: membership.market_id, season: membership.season },
