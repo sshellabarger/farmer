@@ -35,7 +35,7 @@ import type {
 const API_BASE = '/api';
 
 /** Query string from an object; '' when nothing is defined. */
-function qs(params?: Record<string, string | number | boolean | undefined | null>): string {
+export function qs(params?: Record<string, string | number | boolean | undefined | null>): string {
   if (!params) return '';
   const entries = Object.entries(params).filter(
     (e): e is [string, string | number | boolean] => e[1] !== undefined && e[1] !== null && e[1] !== '',
@@ -59,7 +59,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {};
   // Only set a JSON content type when there is actually a body. Fastify
