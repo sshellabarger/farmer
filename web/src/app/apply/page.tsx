@@ -1,157 +1,352 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Header } from '@/components/header';
-import { Icon } from '@/components/icons';
-import { CheckboxField, Field, Notice, PrimaryButton } from '@/components/form';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { ApiError } from '@/lib/api';
+import { applyApi, firstActiveMarketId } from '@/lib/api-apply';
+import {
+  applyPrefill,
+  buildSubmitInput,
+  clearDraft,
+  emptyValues,
+  loadDraft,
+  newDraftId,
+  saveDraft,
+  sectionReachable,
+  SECTION_TITLES,
+  validateSection,
+  type ApplyValues,
+} from '@/lib/apply-draft';
+import { describeTotal, formatMoney } from '@/lib/fees';
+import type { ApplicationConfig, ApplicationSubmitResult } from '@/lib/phase4-types';
 import { formatDateLabel, formatTime12h } from '@/components/admin-shell';
-import { FARMLINK_NUMBER_DISPLAY, smsHref } from '@/lib/constants';
-import { api } from '@/lib/api';
-import type { PublicMarket } from '@/lib/types';
+import { Notice, PrimaryButton, SecondaryButton } from '@/components/form';
+import { Card, ErrorList, ExternalLink, LoadingCard, PublicShell } from '@/components/apply/kit';
+import { ProgressNav } from '@/components/apply/progress-nav';
+import { SectionBusiness } from '@/components/apply/section-business';
+import { SectionProducts } from '@/components/apply/section-products';
+import { SectionBooth } from '@/components/apply/section-booth';
+import { SectionAgreements } from '@/components/apply/section-agreements';
+import { SectionReview } from '@/components/apply/section-review';
 
-/** Public vendor application (contract §8.3): page 1 (identity + markets), page 2 (placeholder). */
+/** Public vendor application (Phase 4 contract section 4.1): five sections, a saved draft, an optional prefill link. */
 export default function ApplyPage() {
-  const [markets, setMarkets] = useState<PublicMarket[]>([]);
-  const [loadingMarkets, setLoadingMarkets] = useState(true);
-  const [marketsError, setMarketsError] = useState('');
+  return (
+    <Suspense
+      fallback={
+        <PublicShell>
+          <LoadingCard />
+        </PublicShell>
+      }
+    >
+      <ApplyRoute />
+    </Suspense>
+  );
+}
 
-  const [page, setPage] = useState<1 | 2>(1);
-  const [email, setEmail] = useState('');
-  const [businessName, setBusinessName] = useState('');
-  const [contactPerson, setContactPerson] = useState('');
-  const [phone, setPhone] = useState('');
-  const [marketIds, setMarketIds] = useState<string[]>([]);
+function ApplyRoute() {
+  const params = useSearchParams();
+  return <ApplyInner marketParam={params.get('market') || ''} token={params.get('t') || ''} />;
+}
 
+type Phase =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready' }
+  | { kind: 'done'; result: ApplicationSubmitResult; mobile: string };
+
+function seasonLine(config: ApplicationConfig): string {
+  const s = config.season;
+  const parts: string[] = [`${s.label} season`];
+  if (s.start && s.end) parts.push(`${formatDateLabel(s.start)} to ${formatDateLabel(s.end)}`);
+  if (s.market_count > 0) parts.push(`${s.market_count} markets`);
+  const days = s.days_of_week.map((d) => d.charAt(0).toUpperCase() + d.slice(1) + 's').join(' and ');
+  if (days) parts.push(s.start_time && s.end_time ? `${days}, ${formatTime12h(s.start_time)} to ${formatTime12h(s.end_time)}` : days);
+  return parts.join(' | ');
+}
+
+function ApplyInner({ marketParam, token }: { marketParam: string; token: string }) {
+  const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
+  const [config, setConfig] = useState<ApplicationConfig | null>(null);
+  const [values, setValues] = useState<ApplyValues>(emptyValues);
+  const [draftId, setDraftId] = useState('');
+  const [section, setSection] = useState(0);
+  const [notice, setNotice] = useState('');
+  const [welcome, setWelcome] = useState('');
+  const [errors, setErrors] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [done, setDone] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const topRef = useRef<HTMLDivElement>(null);
 
+  /* Load the prefill (if any), the market config and the saved draft. */
   useEffect(() => {
-    api
-      .getPublicMarkets()
-      .then((d) => setMarkets((d.markets || []).filter((m) => m.active)))
-      .catch((err: any) => setMarketsError(err?.message || 'Could not load markets'))
-      .finally(() => setLoadingMarkets(false));
-  }, []);
+    let cancelled = false;
+    (async () => {
+      setPhase({ kind: 'loading' });
+      let prefill: Awaited<ReturnType<typeof applyApi.getPrefill>> | null = null;
+      let prefillNotice = '';
+      if (token) {
+        try {
+          prefill = await applyApi.getPrefill(token);
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 410) prefillNotice = 'This link has expired. You can still apply below.';
+          else if (err instanceof ApiError && err.status === 404) prefillNotice = 'We do not recognise this link. You can still apply below.';
+          else prefillNotice = 'We could not load your saved details. You can still apply below.';
+        }
+      }
+      const market = prefill?.market_id || marketParam || (await firstActiveMarketId());
+      if (cancelled) return;
+      if (!market) {
+        setPhase({ kind: 'error', message: 'No markets are accepting applications right now.' });
+        return;
+      }
+      let cfg: ApplicationConfig;
+      try {
+        cfg = await applyApi.getConfig(market);
+      } catch (err) {
+        if (cancelled) return;
+        setPhase({
+          kind: 'error',
+          message:
+            err instanceof ApiError && err.status === 404
+              ? 'We could not find that market. Check the link and try again.'
+              : err instanceof Error
+                ? err.message
+                : 'Something went wrong loading the application.',
+        });
+        return;
+      }
+      if (cancelled) return;
 
-  const toggleMarket = (id: string) => setMarketIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+      const draft = loadDraft(cfg.market.id);
+      let nextValues: ApplyValues;
+      let nextSection = 0;
+      if (prefill) {
+        if (draft && draft.values.prefill_token === token) {
+          nextValues = draft.values;
+          nextSection = draft.section;
+        } else {
+          nextValues = applyPrefill(emptyValues(), prefill, cfg, token);
+        }
+        setWelcome(prefill.producer.business_name);
+      } else if (draft) {
+        nextValues = { ...draft.values, prefill_token: null };
+        nextSection = draft.section;
+      } else {
+        nextValues = emptyValues();
+      }
+      setConfig(cfg);
+      setValues(nextValues);
+      setSection(nextSection);
+      setDraftId(draft?.draft_id ?? newDraftId());
+      setNotice(prefillNotice);
+      setPhase({ kind: 'ready' });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [marketParam, token]);
 
-  const page1Valid = email.trim() && businessName.trim() && contactPerson.trim() && phone.trim() && marketIds.length > 0;
+  /* Save the draft shortly after every change. */
+  useEffect(() => {
+    if (phase.kind !== 'ready' || !config || !draftId) return;
+    const t = setTimeout(() => saveDraft(config.market.id, { draft_id: draftId, section, values }), 400);
+    return () => clearTimeout(t);
+  }, [phase.kind, config, draftId, section, values]);
 
-  const goPage2 = () => {
-    if (!page1Valid) { setError('Fill in every field and choose at least one market.'); return; }
-    setError('');
-    setPage(2);
+  /* Bring the error summary into view when it appears. */
+  useEffect(() => {
+    if (errors.length > 0) document.getElementById('apply-errors')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [errors]);
+
+  const update = useCallback((fn: (v: ApplyValues) => ApplyValues) => setValues((v) => fn(v)), []);
+
+  const scrollTop = () => topRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+
+  const go = (i: number) => {
+    setErrors([]);
+    setSubmitError('');
+    setSection(i);
+    scrollTop();
+  };
+
+  if (phase.kind === 'loading') {
+    return (
+      <PublicShell>
+        <LoadingCard label="Loading the application..." />
+      </PublicShell>
+    );
+  }
+
+  if (phase.kind === 'error' || !config) {
+    return (
+      <PublicShell>
+        <Card>
+          <Notice kind="error">{phase.kind === 'error' ? phase.message : 'Something went wrong loading the application.'}</Notice>
+        </Card>
+      </PublicShell>
+    );
+  }
+
+  const rulesHref = config.legal.has_rules_text ? `/rules?market=${encodeURIComponent(config.market.id)}` : config.legal.rules_url;
+
+  if (!config.season.open_now) {
+    return (
+      <PublicShell>
+        <Card>
+          <div className="kicker mb-2">St. Joseph Center of Arkansas</div>
+          <h1 className="h-display mb-3" style={{ fontSize: 'clamp(24px, 4.5vw, 32px)' }}>
+            Applications for {config.market.name} are not open right now.
+          </h1>
+          <p className="text-[15px] leading-relaxed text-text-soft m-0">
+            {config.season.application_open
+              ? `Applications open ${formatDateLabel(config.season.application_open)}.`
+              : 'Check back soon, or text us and we will let you know when they open.'}
+          </p>
+          {rulesHref && (
+            <p className="text-[15px] mt-3 mb-0">
+              In the meantime you can read the <ExternalLink href={rulesHref}>market rules</ExternalLink>.
+            </p>
+          )}
+        </Card>
+      </PublicShell>
+    );
+  }
+
+  if (phase.kind === 'done') {
+    const { result, mobile } = phase;
+    return (
+      <PublicShell>
+        <Card>
+          <h1 className="h-display mb-3" style={{ fontSize: 'clamp(24px, 4.5vw, 32px)' }}>
+            Thank you, your application is in.
+          </h1>
+          {result.fee.url ? (
+            <>
+              <p className="text-[15px] leading-relaxed text-text m-0 mb-4">
+                Pay the {formatMoney(result.fee.amount, result.fee.currency)} non-refundable application fee here:
+              </p>
+              <a
+                href={result.fee.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center px-5 rounded-xl font-semibold text-white no-underline text-[15px]"
+                style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)', minHeight: 48 }}
+              >
+                Pay the application fee
+              </a>
+            </>
+          ) : (
+            <p className="text-[15px] leading-relaxed text-text m-0">
+              The application fee is {formatMoney(result.fee.amount, result.fee.currency)} (non-refundable). SJCA will send you payment instructions.
+            </p>
+          )}
+          <p className="text-[15px] leading-relaxed text-text-soft mt-4 mb-0">
+            SJCA will review your application and text you at {mobile}.
+          </p>
+          <p className="text-sm text-earth-600 mt-3 mb-0">Your booth fee if accepted: {describeTotal(result.season_total)}. It is collected after acceptance.</p>
+        </Card>
+      </PublicShell>
+    );
+  }
+
+  const reachable = SECTION_TITLES.map((_, i) => sectionReachable(i, values, config));
+
+  const next = () => {
+    const errs = validateSection(section, values, config);
+    if (errs.length > 0) {
+      setErrors(errs);
+      return;
+    }
+    go(section + 1);
   };
 
   const submit = async () => {
+    const errs = validateSection(4, values, config);
+    if (errs.length > 0) {
+      setErrors(errs);
+      return;
+    }
+    setErrors([]);
+    setSubmitError('');
     setSubmitting(true);
-    setError('');
     try {
-      await api.submitApplication({
-        email: email.trim(),
-        business_name: businessName.trim(),
-        contact_person: contactPerson.trim(),
-        phone: phone.trim(),
-        markets_applied: marketIds,
-        extra: {},
-      });
-      setDone(true);
-    } catch (err: any) {
-      const msg: string = err?.message || 'Could not submit the application';
-      setError(/duplicate|already have a recent/i.test(msg) ? 'We already have a recent application for this email.' : msg);
+      const result = await applyApi.submit(buildSubmitInput(values, config, draftId));
+      clearDraft(config.market.id);
+      setPhase({ kind: 'done', result, mobile: values.business.mobile });
+      window.scrollTo({ top: 0 });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 410) {
+        setValues((v) => ({ ...v, prefill_token: null }));
+        setSubmitError('This link has expired. You can still apply: please submit again.');
+      } else {
+        setSubmitError(err instanceof Error ? err.message : 'We could not submit your application. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
   };
 
+  const last = section === SECTION_TITLES.length - 1;
+  const common = { values, update, config };
+
   return (
-    <div className="min-h-screen bg-bg font-sans flex flex-col">
-      <Header />
-      <main className="flex-1 px-4 md:px-6 py-12 md:py-16">
-        <div className="max-w-[560px] mx-auto" style={{ animation: 'fadeUp 0.6s ease both' }}>
-          <div className="kicker mb-3">St. Joseph Center of Arkansas</div>
-          <h1 className="h-display mb-3" style={{ fontSize: 'clamp(26px, 4.5vw, 36px)' }}>Apply to sell at our markets</h1>
-          <p className="text-[15px] leading-relaxed text-text-soft mb-8">
-            Tell us about your business and which SJCA farmers markets you&apos;d like to sell at. We&apos;ll text you with next steps.
-          </p>
-
-          {done ? (
-            <div className="bg-white rounded-2xl border border-earth-100 shadow-sm p-6 text-center">
-              <div className="text-3xl mb-2">🌾</div>
-              <p className="text-[15px] text-text m-0">
-                Thanks — St. Joseph Center of Arkansas will review your application and text you.
-              </p>
-            </div>
-          ) : (
-            <div className="bg-white rounded-2xl border border-earth-100 shadow-sm p-4 sm:p-6 space-y-4">
-              {error && <Notice kind="error">{error}</Notice>}
-
-              {page === 1 && (
-                <>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Field label="Email" type="email" value={email} onChange={setEmail} placeholder="you@example.com" />
-                    <Field label="Business name" value={businessName} onChange={setBusinessName} />
-                    <Field label="Contact person" value={contactPerson} onChange={setContactPerson} />
-                    <Field label="Phone" type="tel" value={phone} onChange={setPhone} placeholder="(501) 555-0100" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-earth-500 mb-2">Which markets?</label>
-                    {loadingMarkets ? (
-                      <p className="text-sm text-earth-400 m-0">Loading markets…</p>
-                    ) : marketsError ? (
-                      <Notice kind="error">{marketsError}</Notice>
-                    ) : markets.length === 0 ? (
-                      <p className="text-sm text-earth-400 m-0">No markets are open for applications right now.</p>
-                    ) : (
-                      <div className="flex flex-col gap-2">
-                        {markets.map((m) => (
-                          <CheckboxField
-                            key={m.id}
-                            checked={marketIds.includes(m.id)}
-                            onChange={() => toggleMarket(m.id)}
-                            label={<span className="font-semibold">{m.location?.name ? `${m.name} — ${m.location.name}` : m.name}</span>}
-                            hint={m.next ? `Next: ${formatDateLabel(m.next.date)}, ${formatTime12h(m.next.start_time)}–${formatTime12h(m.next.end_time)}` : undefined}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex justify-end pt-2">
-                    <PrimaryButton onClick={goPage2} disabled={!page1Valid}>Continue</PrimaryButton>
-                  </div>
-                </>
-              )}
-
-              {page === 2 && (
-                <>
-                  <div className="rounded-xl border border-earth-100 bg-earth-50/60 p-4 text-sm text-earth-700">
-                    More questions coming — SJCA is finalising the application; you can submit now.
-                  </div>
-                  <div className="flex justify-between pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setPage(1)}
-                      className="px-4 py-2 rounded-xl font-semibold text-sm border border-earth-200 bg-white text-earth-700 cursor-pointer"
-                    >
-                      Back
-                    </button>
-                    <PrimaryButton onClick={submit} disabled={submitting}>{submitting ? 'Submitting…' : 'Submit application'}</PrimaryButton>
-                  </div>
-                </>
-              )}
-            </div>
+    <PublicShell>
+      <div ref={topRef} style={{ scrollMarginTop: 12 }}>
+        <div className="kicker mb-2">St. Joseph Center of Arkansas</div>
+        <h1 className="h-display mb-2" style={{ fontSize: 'clamp(26px, 4.5vw, 36px)' }}>
+          Apply to sell at {config.market.name}
+        </h1>
+        <p className="text-[14px] leading-relaxed text-text-soft m-0">{seasonLine(config)}</p>
+        <p className="text-[14px] leading-relaxed text-text-soft mt-1 mb-0">
+          Every vendor applies each season, including returning vendors.
+          {rulesHref && (
+            <>
+              {' '}
+              <ExternalLink href={rulesHref}>Read the market rules</ExternalLink>.
+            </>
           )}
+        </p>
+      </div>
 
-          <a
-            href={smsHref('Hi SJCA Markets!')}
-            className="mt-6 flex items-center justify-center gap-2 px-4 py-3 rounded-2xl no-underline bg-green-50/70 border border-green-100 text-green-700 text-[13.5px] font-semibold"
-          >
-            <Icon name="msg" size={15} />
-            Prefer to text? {FARMLINK_NUMBER_DISPLAY}
-          </a>
+      {welcome && values.prefill_token && (
+        <Notice kind="success">
+          Welcome back, {welcome}. We filled in what we have from before. Please check each section and update anything that has changed.
+        </Notice>
+      )}
+      {notice && <Notice kind="warning">{notice}</Notice>}
+
+      <Card>
+        <ProgressNav current={section} reachable={reachable} onGo={go} />
+
+        {section === 0 && <SectionBusiness {...common} />}
+        {section === 1 && <SectionProducts {...common} draftId={draftId} />}
+        {section === 2 && <SectionBooth {...common} />}
+        {section === 3 && <SectionAgreements {...common} draftId={draftId} />}
+        {section === 4 && <SectionReview values={values} config={config} onEdit={go} />}
+
+        <div className="mt-6 space-y-3">
+          <ErrorList errors={errors} />
+          {submitError && <Notice kind="error">{submitError}</Notice>}
+          <div className="flex items-center justify-between gap-3">
+            {section > 0 ? (
+              <SecondaryButton onClick={() => go(section - 1)} disabled={submitting}>
+                Back
+              </SecondaryButton>
+            ) : (
+              <span />
+            )}
+            {last ? (
+              <PrimaryButton onClick={submit} disabled={submitting}>
+                {submitting ? 'Submitting...' : 'Submit application'}
+              </PrimaryButton>
+            ) : (
+              <PrimaryButton onClick={next}>Continue</PrimaryButton>
+            )}
+          </div>
+          <p className="text-xs text-earth-500 text-center m-0">Your answers are saved on this device as you go.</p>
         </div>
-      </main>
-    </div>
+      </Card>
+    </PublicShell>
   );
 }
