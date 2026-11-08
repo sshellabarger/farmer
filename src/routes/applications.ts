@@ -621,7 +621,7 @@ export async function applicationRoutes(app: FastifyInstance) {
 
     // ── approve ──
     if (isLegacyApplication(before)) {
-      return reply.status(409).send({ error: 'This application was submitted before the 2027 form; ask the applicant to apply again' });
+      return reply.status(409).send({ error: 'This application was submitted on the earlier application form; ask the applicant to apply again' });
     }
     const market = await loadMarket(app.db, String(before.market_id));
     if (!market) return reply.status(404).send({ error: 'Market not found' });

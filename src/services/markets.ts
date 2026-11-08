@@ -286,7 +286,7 @@ const uniqueKeys = (items: { key: string }[]) => new Set(items.map((i) => i.key)
 
 export const marketSeasonSchema = z
   .object({
-    label: z.string().regex(SEASON_LABEL_RE, "season label must look like '2027' or '2027-winter'"),
+    label: z.string().regex(SEASON_LABEL_RE, "season label must be a year such as '2030', optionally with a suffix such as '2030-winter'"),
     application_open: dateString.nullable().default(null),
     application_close: dateString.nullable().default(null),
     schedule_version_id: z.string().min(1).nullable().default(null),

@@ -37,7 +37,11 @@ export const productEntrySchema = z.object({
   items: z.array(str(80)).min(1).max(100),
   practices: z.array(z.string().regex(KEY)).max(40).default([]),
   description: str(2000).default(''),
-  details: z.record(z.union([str(500), z.number().finite(), z.boolean()])).default({}),
+  // Keys are the product type's detail-field keys (lower_snake): a free-form key could collide with Firestore's reserved field names.
+  details: z
+    .record(z.string().regex(KEY), z.union([str(500), z.number().finite(), z.boolean()]))
+    .refine((d) => Object.keys(d).length <= 20, 'at most 20 details')
+    .default({}),
 });
 export type ProductEntry = z.infer<typeof productEntrySchema>;
 
@@ -90,30 +94,6 @@ export const updateProducerSchema = z.object({
   logo_upload_id: z.string().uuid().nullable().optional(),
 });
 export type UpdateProducerInput = z.infer<typeof updateProducerSchema>;
-
-/**
- * Phase 2's public application shape (`POST /api/applications` before Phase
- * 4). Kept only so old documents and the survey importer's vocabulary keep
- * compiling; the live submission schema is `applicationSubmitSchema` in
- * applications.ts.
- */
-const EXTRA_KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
-
-export const applicationSchema = z.object({
-  email: z.string().email(),
-  business_name: z.string().min(1).max(200),
-  contact_person: z.string().min(1).max(200),
-  phone: z.string().min(10),
-  markets_applied: z.array(z.string()).min(1),
-  extra: z
-    .record(z.union([z.string().max(2000), z.boolean(), z.array(z.string().max(500)).max(50)]))
-    .default({})
-    .refine((extra) => Object.keys(extra).length <= 50, { message: 'extra: at most 50 keys' })
-    .refine((extra) => Object.keys(extra).every((k) => EXTRA_KEY_RE.test(k)), {
-      message: 'extra: keys must match /^[a-z][a-z0-9_]{0,63}$/',
-    }),
-});
-export type ApplicationInput = z.infer<typeof applicationSchema>;
 
 /** Allowed forward transitions for a producer's membership at a market (SPEC §4.3). */
 export const MEMBERSHIP_TRANSITIONS: Record<MembershipStatus, MembershipStatus[]> = {
