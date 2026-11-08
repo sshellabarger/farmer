@@ -25,8 +25,8 @@ export type FeedbackPriority = 'low' | 'medium' | 'high' | 'critical';
 
 // Phase 3 (contract §2.7): check-in workflow.
 export type CheckinSource = 'form' | 'import' | 'sms';
-export type LinkTokenPurpose = 'checkin';
-export type WorkflowActionKey = 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts';
+export type LinkTokenPurpose = 'checkin' | 'application' | 'agreement';
+export type WorkflowActionKey = 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts' | 'approve' | 'booth_texts';
 
 export interface AddressJson {
   street: string;
@@ -42,3 +42,8 @@ export interface ContactJson {
   phone?: string;
   email?: string;
 }
+
+// Phase 4 (contract §2.7–2.8): booths and assignments.
+export type BoothKind = 'stall' | 'food_truck';
+export type AssignmentSource = 'usual' | 'suggested' | 'manual';
+export type DraftSkipReason = 'no_next_date' | 'no_booths' | 'no_attendees';

@@ -8,6 +8,9 @@ import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from './config/env.js';
 import { serializeTimestamps } from './utils/serialize.js';
 import { createErrorHandler } from './utils/http-error-handler.js';
+import { boothRoutes } from './routes/booths.js';
+import { agreementRoutes } from './routes/agreements.js';
+import { insuranceRoutes } from './routes/insurance.js';
 import { smsRoutes } from './routes/sms.js';
 import { authRoutes } from './routes/auth.js';
 import { uploadRoutes } from './routes/uploads.js';
@@ -105,6 +108,9 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
   await app.register(adminUserRoutes, { prefix: '/api/admin/users' });
   await app.register(auditLogRoutes, { prefix: '/api/audit-log' });
   await app.register(dashboardRoutes, { prefix: '/api/dashboard' });
+  await app.register(boothRoutes, { prefix: '/api/markets' });
+  await app.register(agreementRoutes, { prefix: '/api/agreements' });
+  await app.register(insuranceRoutes, { prefix: '/api/memberships' });
 
   // v1 texted "view" links (/api/view/<token> → dashboard with a minted JWT)
   // are retired. The route stays registered so old texts land on an

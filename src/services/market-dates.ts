@@ -3,7 +3,7 @@ import { addDays, eachDate, localToUtc, utcToLocalDate, weekdayOf } from '../uti
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
 import { isAlreadyExists } from '../db/firestore.js';
 import type { FarmersMarket, ScheduleVersion } from './markets.js';
-import type { MarketDateStatus } from '../types/schema.js';
+import type { DraftSkipReason, MarketDateStatus } from '../types/schema.js';
 
 /**
  * The market-date generator (Phase 2 contract §3). Idempotent: running the
@@ -59,8 +59,19 @@ export interface MarketDateActions {
   checkin_failed?: number;
   summary_sent_at?: Date | null;
   summary_skipped?: 'no_recipients' | 'notify_false' | null;
-  /** keys: 'checkin' | `reminder_${offset_min}` | 'deadline' | 'summary' — never count toward isDateDecided. */
+  /** keys: 'checkin' | `reminder_${offset_min}` | 'deadline' | 'summary' | 'drafts' | 'approve' | 'booth_texts' | `redraft_<n>` — never count toward isDateDecided. */
   claims?: Record<string, Date>;
+  // Phase 4 (contract §2.9) — booth drafts, approval and booth texts. Absent on every doc written before Phase 4.
+  /** Latest draft or redraft of the booth assignments. */
+  assignments_draft_at?: Date | null;
+  /** The market date the draft assigns booths for (the next date after this one). */
+  assignments_target_date_id?: string | null;
+  drafts_skipped?: DraftSkipReason | null;
+  approved_by?: string | null;
+  booth_summary?: { assigned: number; unassigned: number; booths_total: number; booths_free: number } | null;
+  booth_text_recipients?: number;
+  booth_text_failed?: number;
+  booth_text_excluded?: number;
 }
 
 export interface MarketDateDoc {
@@ -233,6 +244,13 @@ function claimsFromData(raw: unknown): Record<string, Date> | undefined {
   return out;
 }
 
+function boothSummaryFromData(raw: unknown): MarketDateActions['booth_summary'] {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const n = (v: unknown) => (typeof v === 'number' ? v : 0);
+  return { assigned: n(r.assigned), unassigned: n(r.unassigned), booths_total: n(r.booths_total), booths_free: n(r.booths_free) };
+}
+
 export function marketDateFromData(id: string, data: Record<string, unknown>): MarketDateDoc {
   const a = (data.actions ?? {}) as Record<string, unknown>;
   const actions: MarketDateActions = {
@@ -251,6 +269,15 @@ export function marketDateFromData(id: string, data: Record<string, unknown>): M
     summary_sent_at: 'summary_sent_at' in a ? toDate(a.summary_sent_at) : undefined,
     summary_skipped: a.summary_skipped === 'no_recipients' || a.summary_skipped === 'notify_false' ? a.summary_skipped : undefined,
     claims: claimsFromData(a.claims),
+    assignments_draft_at: toDate(a.assignments_draft_at),
+    assignments_target_date_id: typeof a.assignments_target_date_id === 'string' ? a.assignments_target_date_id : null,
+    drafts_skipped:
+      a.drafts_skipped === 'no_next_date' || a.drafts_skipped === 'no_booths' || a.drafts_skipped === 'no_attendees' ? a.drafts_skipped : null,
+    approved_by: typeof a.approved_by === 'string' ? a.approved_by : null,
+    booth_summary: boothSummaryFromData(a.booth_summary),
+    booth_text_recipients: typeof a.booth_text_recipients === 'number' ? a.booth_text_recipients : undefined,
+    booth_text_failed: typeof a.booth_text_failed === 'number' ? a.booth_text_failed : undefined,
+    booth_text_excluded: typeof a.booth_text_excluded === 'number' ? a.booth_text_excluded : undefined,
   };
   return {
     ...(data as Omit<MarketDateDoc, 'id'>),

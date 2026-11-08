@@ -58,6 +58,10 @@ export const collections = {
   link_tokens: 'link_tokens',
   // Phase 3 fix. Doc id = `${market_date_id}__${step}` (checkin | reminder_<offset> | deadline | summary); created atomically by the engine's claim(), never cleared.
   workflow_locks: 'workflow_locks',
+  // Phase 4 (A2). Doc id = `${market_id}_<label slug>`; created atomically so a label is unique per market.
+  booths: 'booths',
+  // Phase 4 (A2). Doc id = uuid; append-only (superseded_by), keyed by the TARGET market date.
+  booth_assignments: 'booth_assignments',
 } as const;
 
 /**

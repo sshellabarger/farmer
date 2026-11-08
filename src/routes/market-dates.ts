@@ -6,9 +6,23 @@ import { writeAudit } from '../services/audit.js';
 import { marketDateFromData } from '../services/market-dates.js';
 import type { MarketDateDoc } from '../services/market-dates.js';
 import type { FarmersMarket } from '../services/markets.js';
-import { computeSchedule, listRecipients, sendCheckinLink, processDeadline, SCAN_WINDOW_MS } from '../services/checkin-workflow.js';
+import {
+  computeSchedule,
+  listRecipients,
+  sendCheckinLink,
+  processDeadline,
+  draftNow,
+  approveAssignments,
+  SCAN_WINDOW_MS,
+} from '../services/checkin-workflow.js';
+import { applyAssignmentChanges, buildAssignmentsView } from '../services/booth-assignments.js';
+import { currentSeason, findMembership } from '../services/seasons.js';
+import { listBooths } from '../services/booths.js';
 import { LINK_TOKEN_GRACE_MIN } from '../services/link-tokens.js';
 import { toDate } from '../utils/dates.js';
+import type { DraftSkipReason } from '../types/schema.js';
+import { nextAllowedInstant } from '../utils/quiet-hours.js';
+import { DEFAULT_QUIET_HOURS } from '../services/markets.js';
 import { byDateDesc } from '../utils/sort.js';
 
 /** Staff market-date routes (contract §4.2): status, resend, close. */
@@ -33,7 +47,9 @@ function computeNextDue(
   date: MarketDateDoc,
   schedule: ReturnType<typeof computeSchedule>,
   now: Date,
-): { action: 'checkin' | 'reminder' | 'deadline' | 'summary' | 'none'; at: Date | null; offset_min?: number } {
+  market: FarmersMarket,
+  hasBooths: boolean,
+): { action: 'checkin' | 'reminder' | 'deadline' | 'summary' | 'drafts' | 'booth_texts' | 'none'; at: Date | null; offset_min?: number } {
   if (!date.actions.checkin_sent_at && schedule.deadline_at.getTime() > now.getTime()) {
     return { action: 'checkin', at: schedule.checkin_effective_at };
   }
@@ -48,11 +64,31 @@ function computeNextDue(
   if (date.actions.summary_sent_at == null && date.actions.summary_skipped == null) {
     return { action: 'summary', at: schedule.summary_effective_at };
   }
+  // A market with no booths set up has nothing to draft (the engine would only record `no_booths`),
+  // so it is not announced as a pending step; this also keeps Phase 3 markets reading `none`.
+  if (!date.actions.drafts_generated_at && hasBooths) {
+    return { action: 'drafts', at: schedule.drafts_at };
+  }
+  if (date.actions.approved_at && !date.actions.booth_texts_sent_at) {
+    return { action: 'booth_texts', at: nextAllowedInstant(date.actions.approved_at, market.quiet_hours ?? DEFAULT_QUIET_HOURS, market.timezone) };
+  }
   return { action: 'none', at: null };
 }
 
 const resendQuerySchema = z.object({ producer_id: z.string().min(1) });
 const closeBodySchema = z.object({ notify: z.boolean().default(false) });
+const draftBodySchema = z.object({ redraft: z.boolean().default(false) });
+const changesBodySchema = z.object({
+  changes: z
+    .array(z.object({ producer_id: z.string().min(1), booth_ids: z.array(z.string().min(1)).max(2) }))
+    .min(1, 'changes is required')
+    .max(100),
+});
+const SKIP_MESSAGES: Record<DraftSkipReason, string> = {
+  no_next_date: 'No upcoming market date to assign',
+  no_booths: 'No booths are set up for this market',
+  no_attendees: 'No vendors have said they are attending the next market',
+};
 
 export async function marketDateRoutes(app: FastifyInstance) {
   // GET /api/market-dates/:id/status
@@ -66,7 +102,7 @@ export async function marketDateRoutes(app: FastifyInstance) {
 
     const now = new Date();
     const schedule = computeSchedule(market, date);
-    const { recipients, excluded } = await listRecipients(app.db, market.id);
+    const { recipients, excluded } = await listRecipients(app.db, market.id, { now });
 
     const [checkinsSnap, messagesSnap, tokensSnap] = await Promise.all([
       app.db.collection('checkins').where('market_date_id', '==', date.id).get(),
@@ -120,7 +156,7 @@ export async function marketDateRoutes(app: FastifyInstance) {
       };
     });
 
-    const nextDue = computeNextDue(date, schedule, now);
+    const nextDue = computeNextDue(date, schedule, now, market, (await listBooths(app.db, market.id)).length > 0);
     const inWindow = now.getTime() - date.end_at.getTime() <= SCAN_WINDOW_MS;
     const respondedCount = recipientRows.filter((r) => r.responded).length;
 
@@ -138,6 +174,7 @@ export async function marketDateRoutes(app: FastifyInstance) {
         non_responders: recipients.length - respondedCount,
         excluded: excluded.length,
       },
+      assignments: await buildAssignmentsView(app.db, market, date, now),
       messages: byDateDesc(
         messages.filter((m) => m.kind === 'checkin_link' || m.kind === 'checkin_reminder' || m.kind === 'deadline_summary'),
         'created_at',
@@ -184,8 +221,8 @@ export async function marketDateRoutes(app: FastifyInstance) {
         return reply.status(409).send({ error: 'The check-in window for this date has closed', reason: 'past_grace' });
       }
 
-      const membershipDoc = await app.db.collection('producer_memberships').doc(`${producer_id}_${market.id}`).get();
-      const membership = membershipDoc.exists ? (membershipDoc.data() as Record<string, unknown>) : null;
+      // Only the market's current season counts (decision D33): a 2026 membership does not open a 2027 check-in.
+      const membership = await findMembership(app.db, producer_id, market.id, currentSeason(market, now));
       if (!membership || membership.status !== 'active') {
         return reply.status(409).send({ error: 'This producer has no active membership at this market', reason: 'no_active_membership' });
       }
@@ -261,5 +298,133 @@ export async function marketDateRoutes(app: FastifyInstance) {
 
     const updated = await loadDate(app.db, date.id);
     return { result, date: updated };
+  });
+
+  // ── Phase 4: booth assignments (contract §3.4) ───────────────────────────
+
+  // POST /api/market-dates/:id/assignments/draft
+  app.post<{ Params: { id: string } }>('/:id/assignments/draft', { preHandler: [authenticate(app), requireStaff()] }, async (request, reply) => {
+    const scoped = request.authUser! as unknown as ScopedUser;
+    const user = request.authUser!;
+    const date = await loadDate(app.db, request.params.id);
+    if (!date) return reply.status(404).send({ error: 'Market date not found' });
+    const market = await loadMarket(app.db, date.market_id);
+    if (!market) return reply.status(404).send({ error: 'Market not found' });
+    if (!canAccessMarket(scoped, market.id)) return reply.status(403).send({ error: 'Forbidden: market not assigned' });
+
+    const parsed = draftBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    if (date.status === 'cancelled') return reply.status(409).send({ error: 'This date was cancelled' });
+
+    const now = new Date();
+    const outcome = await draftNow(app.db, market, date, { now, actor: user.id, redraft: parsed.data.redraft });
+    switch (outcome.status) {
+      case 'approved':
+        return reply.status(409).send({ error: 'Assignments are approved; redraft is closed', reason: 'approved' });
+      case 'already_drafted':
+        return reply.status(409).send({ error: 'Already drafted', reason: 'already_drafted' });
+      case 'in_progress':
+        return reply.status(409).send({ error: 'The engine is drafting this date right now; refresh the page', reason: 'in_progress' });
+      case 'skipped':
+        return reply.status(409).send({ error: SKIP_MESSAGES[outcome.reason], reason: outcome.reason });
+      default:
+        break;
+    }
+
+    await writeAudit(app.db, {
+      actor_id: user.id,
+      actor_role: user.role,
+      action: 'market_date.assignments.draft',
+      target: { collection: 'market_dates', id: date.id },
+      after: {
+        redraft: parsed.data.redraft,
+        target_date_id: outcome.draft.target_date_id,
+        vendors_placed: outcome.draft.vendors_placed,
+        vendors_unassigned: outcome.draft.vendors_unassigned,
+        superseded: outcome.draft.superseded,
+      },
+    });
+
+    const fresh = (await loadDate(app.db, date.id)) ?? date;
+    return { draft: outcome.draft, assignments: await buildAssignmentsView(app.db, market, fresh, now) };
+  });
+
+  // PATCH /api/market-dates/:id/assignments
+  app.patch<{ Params: { id: string } }>('/:id/assignments', { preHandler: [authenticate(app), requireStaff()] }, async (request, reply) => {
+    const scoped = request.authUser! as unknown as ScopedUser;
+    const user = request.authUser!;
+    const date = await loadDate(app.db, request.params.id);
+    if (!date) return reply.status(404).send({ error: 'Market date not found' });
+    const market = await loadMarket(app.db, date.market_id);
+    if (!market) return reply.status(404).send({ error: 'Market not found' });
+    if (!canAccessMarket(scoped, market.id)) return reply.status(403).send({ error: 'Forbidden: market not assigned' });
+
+    const parsed = changesBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    if (date.actions.booth_texts_sent_at) {
+      return reply.status(409).send({ error: 'Booth texts have already gone out; assignments can no longer be changed', reason: 'texts_sent' });
+    }
+
+    const now = new Date();
+    const result = await applyAssignmentChanges(app.db, market, date, parsed.data.changes, user.id, now);
+    if (!result.ok) return reply.status(result.status).send({ error: result.error });
+
+    await writeAudit(app.db, {
+      actor_id: user.id,
+      actor_role: user.role,
+      action: 'market_date.assignments.update',
+      target: { collection: 'market_dates', id: date.id },
+      after: { target_date_id: result.target_date_id, changes: parsed.data.changes, changed: result.changed },
+    });
+
+    const fresh = (await loadDate(app.db, date.id)) ?? date;
+    const assignments = await buildAssignmentsView(app.db, market, fresh, now);
+    return date.actions.approved_at ? { assignments, warning: 'approved' } : { assignments };
+  });
+
+  // POST /api/market-dates/:id/assignments/approve
+  app.post<{ Params: { id: string } }>('/:id/assignments/approve', { preHandler: [authenticate(app), requireStaff()] }, async (request, reply) => {
+    const scoped = request.authUser! as unknown as ScopedUser;
+    const user = request.authUser!;
+    const date = await loadDate(app.db, request.params.id);
+    if (!date) return reply.status(404).send({ error: 'Market date not found' });
+    const market = await loadMarket(app.db, date.market_id);
+    if (!market) return reply.status(404).send({ error: 'Market not found' });
+    if (!canAccessMarket(scoped, market.id)) return reply.status(403).send({ error: 'Forbidden: market not assigned' });
+    if (date.status === 'cancelled') return reply.status(409).send({ error: 'This date was cancelled' });
+
+    const now = new Date();
+    const outcome = await approveAssignments(app.db, app.env, market, date, { now, user_id: user.id });
+    switch (outcome.status) {
+      case 'no_draft':
+        return reply.status(409).send({ error: 'There is no draft to approve yet', reason: 'no_draft' });
+      case 'conflicts':
+        return reply.status(409).send({ error: 'Two vendors share a booth; resolve it before approving', reason: 'conflicts' });
+      case 'already_approved':
+        return reply.status(409).send({ error: 'Assignments are already approved', reason: 'already_approved' });
+      case 'in_progress':
+        return reply.status(409).send({ error: 'Another approval is in progress; refresh the page', reason: 'in_progress' });
+      default:
+        break;
+    }
+
+    const t = outcome.texts;
+    const texts = {
+      attempted: t.status === 'sent',
+      sent: t.status === 'sent' ? t.sent : 0,
+      failed: t.status === 'sent' ? t.failed : 0,
+      excluded: t.status === 'sent' ? t.excluded : 0,
+      deferred_until: t.status === 'deferred' ? t.deferred_until : null,
+    };
+    await writeAudit(app.db, {
+      actor_id: user.id,
+      actor_role: user.role,
+      action: 'market_date.assignments.approve',
+      target: { collection: 'market_dates', id: date.id },
+      after: { texts },
+    });
+
+    const fresh = (await loadDate(app.db, date.id)) ?? date;
+    return { assignments: await buildAssignmentsView(app.db, market, fresh, now), texts };
   });
 }
