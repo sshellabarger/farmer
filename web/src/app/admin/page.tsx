@@ -97,7 +97,7 @@ function MarketCard({ card }: { card: DashboardCard }) {
         <div>
           <h2 className="font-display text-lg font-bold m-0" style={{ color: '#1B3F24' }}>{market.name}</h2>
           <div className="text-[12px] text-text-muted mt-0.5">
-            {market.timezone} · {upcoming_count} upcoming date{upcoming_count === 1 ? '' : 's'}
+            {card.season ? `Season ${card.season} · ` : ''}{market.timezone} · {upcoming_count} upcoming date{upcoming_count === 1 ? '' : 's'}
           </div>
         </div>
         {!market.active && <StatusChip status="inactive" />}

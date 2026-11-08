@@ -4,11 +4,13 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import type { BoothDoc } from '@/lib/phase4-types';
 import {
   DAYS_OF_WEEK,
   type DayOfWeek,
   type ExtraQuestion,
   type GenerateResult,
+  type InviteBatchResult,
   type Market,
   type MarketDate,
   type ScheduleVersionInput,
@@ -32,6 +34,7 @@ import {
 } from '@/components/form';
 import { AdminShell, EmptyRow, LoadingScreen, TableCard, Td, Th, formatDateLabel, formatStamp, formatTime12h, weekdayLabel } from '@/components/admin-shell';
 import { GenerationSummary, TIMEZONE_OPTIONS, WeekdayPicker } from '@/components/market-bits';
+import { BoothEditGrid } from '@/components/booth-grid';
 
 export default function MarketDetailPage() {
   return (
@@ -133,6 +136,9 @@ function MarketDetail() {
         <SettingsSection market={market} readOnly={!isAdmin} onSave={(data) => runWrite(() => api.updateMarket(market.id, data), 'Settings saved')} />
         <WorkflowSection market={market} readOnly={!isAdmin} onSave={(data) => runWrite(() => api.updateMarket(market.id, data), 'Workflow saved')} />
         <QuietHoursSection market={market} readOnly={!isAdmin} onSave={(data) => runWrite(() => api.updateMarket(market.id, data), 'Quiet hours saved')} />
+        <SeasonFeesSection market={market} readOnly={!isAdmin} onSave={(data) => runWrite(() => api.updateMarket(market.id, data), 'Season and fees saved')} />
+        {isAdmin && <LegalSection market={market} readOnly={false} onSave={(data) => runWrite(() => api.updateMarket(market.id, data), 'Legal texts saved')} />}
+        <BoothsSection market={market} isAdmin={isAdmin} />
         <VersionsSection
           market={market}
           readOnly={!isAdmin}
@@ -821,5 +827,459 @@ function ExtraQuestionsEditor({
         </div>
       )}
     </div>
+  );
+}
+
+/* ─── Phase 4: season & fees, legal texts, booths ─── */
+
+const SEASON_LABEL_RE = /^\d{4}(-[a-z0-9]{1,16})?$/;
+
+type MarketPatch = Parameters<typeof api.updateMarket>[1];
+
+function numberOrNull(v: string): number | null {
+  if (v.trim() === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+function SeasonFeesSection({ market, readOnly, onSave }: { market: Market; readOnly: boolean; onSave: (d: MarketPatch) => Promise<boolean> }) {
+  const fromMarket = () => ({
+    label: market.season?.label || '',
+    open: market.season?.application_open || '',
+    close: market.season?.application_close || '',
+    version: market.season?.schedule_version_id || '',
+    application_fee: market.fees ? String(market.fees.application_fee) : '',
+    seasonal_total: market.fees ? String(market.fees.seasonal_total) : '',
+    seasonal_paid_in_full: market.fees ? String(market.fees.seasonal_paid_in_full) : '',
+    seasonal_installments: market.fees ? String(market.fees.seasonal_installments) : '',
+    daily: market.fees ? String(market.fees.daily) : '',
+    electric_seasonal: market.fees ? String(market.fees.electric_seasonal) : '',
+    electric_daily: market.fees ? String(market.fees.electric_daily) : '',
+    currency: market.fees?.currency || 'USD',
+    application_fee_url: market.payment_links?.application_fee_url || '',
+    booth_fee_url: market.payment_links?.booth_fee_url || '',
+    booth_map_url: market.booth_map_url || '',
+  });
+  const [v, setV] = useState(fromMarket);
+  const [saving, setSaving] = useState(false);
+  const [localError, setLocalError] = useState('');
+
+  useEffect(() => {
+    setV(fromMarket());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [market]);
+
+  const set = (key: keyof typeof v) => (value: string) => setV((prev) => ({ ...prev, [key]: value }));
+
+  const versions = [...market.schedule.versions].sort((a, b) => a.effective_from.localeCompare(b.effective_from));
+
+  const save = async () => {
+    setLocalError('');
+    const patch: MarketPatch = {};
+
+    const label = v.label.trim();
+    if (label) {
+      if (!SEASON_LABEL_RE.test(label)) {
+        setLocalError('The season label looks like 2027, or 2027-winter (lower case).');
+        return;
+      }
+      if (v.open && v.close && v.close < v.open) {
+        setLocalError('Applications close before they open.');
+        return;
+      }
+      patch.season = { label, application_open: v.open || null, application_close: v.close || null, schedule_version_id: v.version || null };
+    } else if (market.season) {
+      patch.season = null;
+    }
+
+    const feeKeys = ['application_fee', 'seasonal_total', 'seasonal_paid_in_full', 'seasonal_installments', 'daily', 'electric_seasonal', 'electric_daily'] as const;
+    const filled = feeKeys.filter((k) => v[k].trim() !== '');
+    if (filled.length > 0) {
+      const nums = feeKeys.map((k) => numberOrNull(v[k]));
+      if (nums.some((n) => n === null)) {
+        setLocalError('Every fee is a whole number of dollars (0 or more). Fill all seven, or clear them all.');
+        return;
+      }
+      if (!/^[A-Za-z]{3}$/.test(v.currency.trim())) {
+        setLocalError('The currency is a three-letter code such as USD.');
+        return;
+      }
+      patch.fees = {
+        application_fee: nums[0]!,
+        seasonal_total: nums[1]!,
+        seasonal_paid_in_full: nums[2]!,
+        seasonal_installments: nums[3]!,
+        daily: nums[4]!,
+        electric_seasonal: nums[5]!,
+        electric_daily: nums[6]!,
+        currency: v.currency.trim().toUpperCase(),
+      };
+    }
+
+    patch.payment_links = { application_fee_url: v.application_fee_url.trim() || null, booth_fee_url: v.booth_fee_url.trim() || null };
+    patch.booth_map_url = v.booth_map_url.trim() || null;
+
+    setSaving(true);
+    await onSave(patch);
+    setSaving(false);
+  };
+
+  return (
+    <Card title="Season & fees">
+      {localError && <div className="mb-3"><Notice kind="error">{localError}</Notice></div>}
+      <p className="text-xs text-earth-500 mt-0 mb-3">
+        Applications are open only while a season label is set and today is inside the application window. Setting the label also switches the
+        dashboard, check-in texts and booth drafts to that season&apos;s memberships.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+        <Field label="Season label" value={v.label} onChange={set('label')} disabled={readOnly} placeholder="2027" />
+        <DateField label="Applications open" value={v.open} onChange={set('open')} disabled={readOnly} />
+        <DateField label="Applications close" value={v.close} onChange={set('close')} disabled={readOnly} />
+        <SelectField
+          label="Schedule version"
+          value={v.version}
+          onChange={set('version')}
+          options={[
+            { value: '', label: 'Latest season' },
+            ...versions.map((ver) => ({ value: ver.id, label: `${ver.season_start} to ${ver.season_end}` })),
+          ]}
+        />
+      </div>
+
+      <div className="text-xs font-semibold text-earth-500 mt-5 mb-2">Fees (whole dollars)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Field label="Application fee" type="number" value={v.application_fee} onChange={set('application_fee')} disabled={readOnly} />
+        <Field label="Seasonal booth, per space" type="number" value={v.seasonal_total} onChange={set('seasonal_total')} disabled={readOnly} />
+        <Field label="Seasonal, paid in full" type="number" value={v.seasonal_paid_in_full} onChange={set('seasonal_paid_in_full')} disabled={readOnly} />
+        <Field label="Seasonal installments" type="number" value={v.seasonal_installments} onChange={set('seasonal_installments')} disabled={readOnly} />
+        <Field label="Daily booth, per space" type="number" value={v.daily} onChange={set('daily')} disabled={readOnly} />
+        <Field label="Electricity, seasonal" type="number" value={v.electric_seasonal} onChange={set('electric_seasonal')} disabled={readOnly} />
+        <Field label="Electricity, daily" type="number" value={v.electric_daily} onChange={set('electric_daily')} disabled={readOnly} />
+        <Field label="Currency" value={v.currency} onChange={set('currency')} disabled={readOnly} />
+      </div>
+
+      <div className="text-xs font-semibold text-earth-500 mt-5 mb-2">Links</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Application fee payment link" value={v.application_fee_url} onChange={set('application_fee_url')} disabled={readOnly} placeholder="https://" />
+        <Field label="Booth fee payment link" value={v.booth_fee_url} onChange={set('booth_fee_url')} disabled={readOnly} placeholder="https://" />
+        <Field label="Booth map image (URL or /path)" value={v.booth_map_url} onChange={set('booth_map_url')} disabled={readOnly} placeholder="/wlrfm-vendor-map.jpg" />
+      </div>
+      <p className="text-xs text-earth-500 mt-2 mb-0">A payment link may contain {'{email}'}, which is replaced with the applicant&apos;s email.</p>
+
+      {!readOnly && <SaveBar saving={saving} onSave={save} />}
+      {!readOnly && <InviteReturning market={market} />}
+    </Card>
+  );
+}
+
+function tally(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const x of values) counts.set(x, (counts.get(x) ?? 0) + 1);
+  if (counts.size === 0) return 'none';
+  return Array.from(counts.entries()).map(([k, n]) => `${n} ${k.replace(/_/g, ' ')}`).join(', ');
+}
+
+/** Invite every producer from another season to re-apply: dry run first, then confirm. */
+function InviteReturning({ market }: { market: Market }) {
+  const [open, setOpen] = useState(false);
+  const [force, setForce] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [preview, setPreview] = useState<InviteBatchResult | null>(null);
+  const [result, setResult] = useState<InviteBatchResult | null>(null);
+
+  const label = market.season?.label || '';
+
+  const run = async (dry_run: boolean) => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api.inviteMarket(market.id, { force, dry_run });
+      if (dry_run) {
+        setPreview(r);
+        setResult(null);
+      } else {
+        setResult(r);
+        setPreview(null);
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Could not invite returning vendors');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <div className="pt-4 mt-2 border-t border-earth-100">
+        <SecondaryButton small onClick={() => { setOpen(true); setPreview(null); setResult(null); setError(''); }} disabled={!label}>
+          Invite returning vendors...
+        </SecondaryButton>
+        {!label && <span className="text-xs text-earth-500 ml-3">Save a season label first.</span>}
+      </div>
+    );
+  }
+
+  const shown = result || preview;
+
+  return (
+    <div className="pt-4 mt-2 border-t border-earth-100 space-y-3">
+      <div className="text-sm font-semibold text-earth-800">Invite returning vendors to apply for {label}</div>
+      <p className="text-xs text-earth-500 m-0">
+        Every producer with a membership in another season gets a link to a prefilled application, by email and by text when they have a phone and have not opted out.
+        Preview first; nothing is sent until you confirm.
+      </p>
+      {error && <Notice kind="error">{error}</Notice>}
+      <CheckboxField label="Also resend to producers who were already invited" checked={force} onChange={(c) => { setForce(c); setPreview(null); }} />
+      <div className="flex flex-wrap gap-2">
+        <SecondaryButton small onClick={() => run(true)} disabled={busy}>{busy && !preview ? 'Checking...' : 'Preview (dry run)'}</SecondaryButton>
+        {preview && (
+          <ConfirmButton
+            label={`Send ${preview.invited} invitation${preview.invited === 1 ? '' : 's'}`}
+            confirmLabel="Yes, send them"
+            danger={false}
+            busy={busy}
+            disabled={preview.invited === 0}
+            onConfirm={() => run(false)}
+          />
+        )}
+        <SecondaryButton small onClick={() => setOpen(false)} disabled={busy}>Close</SecondaryButton>
+      </div>
+      {shown && (
+        <div className="rounded-xl border border-earth-100 bg-earth-15 p-3 text-sm space-y-1">
+          <div className="font-semibold text-earth-800">
+            {result ? 'Sent' : 'Dry run'} for season {shown.season}
+          </div>
+          <div>Candidates: {shown.candidates}</div>
+          <div>{result ? 'Invited' : 'Would be invited'}: {shown.invited}</div>
+          <div>Already invited: {shown.skipped_already} - already applied: {shown.skipped_applied} - no contact on file: {shown.skipped_no_contact}</div>
+          <div className="text-xs text-earth-500">Email: {tally(shown.results.map((r) => r.email_status))}</div>
+          <div className="text-xs text-earth-500">Text: {tally(shown.results.map((r) => r.sms_status))}</div>
+          {shown.skipped_no_contact > 0 && <div className="text-xs text-earth-500">Producers with no email or phone are not contacted; invite them by hand from their producer page.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BigTextArea({ label, value, onChange, rows = 10, disabled }: { label: string; value: string; onChange: (v: string) => void; rows?: number; disabled?: boolean }) {
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-earth-500 mb-1">{label}</label>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        disabled={disabled}
+        className="w-full px-3 py-2 border border-earth-200 rounded-xl text-sm font-mono focus:outline-none focus:border-farm-500 focus:ring-2 focus:ring-farm-100 disabled:bg-earth-50 disabled:text-earth-400"
+      />
+    </div>
+  );
+}
+
+function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: boolean; onSave: (d: MarketPatch) => Promise<boolean> }) {
+  const fromMarket = () => ({
+    rules_markdown: market.legal?.rules_markdown || '',
+    rules_version: market.legal?.rules_version || '',
+    rules_url: market.legal?.rules_url || '',
+    hold_harmless_markdown: market.legal?.hold_harmless_markdown || '',
+    hold_harmless_version: market.legal?.hold_harmless_version || '',
+    insurance_help_url: market.legal?.insurance_help_url || '',
+    adh_guidelines_url: market.legal?.adh_guidelines_url || '',
+    food_freedom_url: market.legal?.food_freedom_url || '',
+    sms_consent_text: market.legal?.sms_consent_text || '',
+    sms_consent_version: market.legal?.sms_consent_version || '',
+  });
+  const [v, setV] = useState(fromMarket);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setV(fromMarket());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [market]);
+
+  const set = (key: keyof typeof v) => (value: string) => setV((prev) => ({ ...prev, [key]: value }));
+
+  const save = async () => {
+    setSaving(true);
+    await onSave({
+      legal: {
+        rules_markdown: v.rules_markdown,
+        rules_version: v.rules_version.trim(),
+        rules_url: v.rules_url.trim() || null,
+        hold_harmless_markdown: v.hold_harmless_markdown,
+        hold_harmless_version: v.hold_harmless_version.trim(),
+        insurance_help_url: v.insurance_help_url.trim() || null,
+        adh_guidelines_url: v.adh_guidelines_url.trim() || null,
+        food_freedom_url: v.food_freedom_url.trim() || null,
+        sms_consent_text: v.sms_consent_text,
+        sms_consent_version: v.sms_consent_version.trim(),
+      },
+    });
+    setSaving(false);
+  };
+
+  return (
+    <Card title="Legal texts">
+      <p className="text-xs text-earth-500 mt-0 mb-3">
+        Markdown: # headings, - bullets, 1. lists, **bold** and [text](https://...) links. Change the version whenever the wording changes; applicants must have read the
+        current rules version, and each signature records the version it was given.
+      </p>
+      <BigTextArea label="Rules and regulations (markdown)" value={v.rules_markdown} onChange={set('rules_markdown')} rows={14} disabled={readOnly} />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+        <Field label="Rules version" value={v.rules_version} onChange={set('rules_version')} disabled={readOnly} placeholder="2027-1" />
+        <Field label="Rules link (optional, shown instead of the text)" value={v.rules_url} onChange={set('rules_url')} disabled={readOnly} placeholder="https://" />
+      </div>
+      <div className="mt-5">
+        <BigTextArea label="Hold Harmless agreement (markdown)" value={v.hold_harmless_markdown} onChange={set('hold_harmless_markdown')} rows={10} disabled={readOnly} />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+        <Field label="Hold Harmless version" value={v.hold_harmless_version} onChange={set('hold_harmless_version')} disabled={readOnly} placeholder="2027-1" />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-5">
+        <Field label="Insurance information sheet" value={v.insurance_help_url} onChange={set('insurance_help_url')} disabled={readOnly} placeholder="https://" />
+        <Field label="ADH farmers market guidelines" value={v.adh_guidelines_url} onChange={set('adh_guidelines_url')} disabled={readOnly} placeholder="https://" />
+        <Field label="Food Freedom guide" value={v.food_freedom_url} onChange={set('food_freedom_url')} disabled={readOnly} placeholder="https://" />
+      </div>
+      <div className="mt-5">
+        <BigTextArea label="Text message consent wording" value={v.sms_consent_text} onChange={set('sms_consent_text')} rows={4} disabled={readOnly} />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+        <Field label="Consent wording version" value={v.sms_consent_version} onChange={set('sms_consent_version')} disabled={readOnly} />
+      </div>
+      {!readOnly && <SaveBar saving={saving} onSave={save} />}
+    </Card>
+  );
+}
+
+function BoothsSection({ market, isAdmin }: { market: Market; isAdmin: boolean }) {
+  const [booths, setBooths] = useState<BoothDoc[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [flash, setFlash] = useState('');
+
+  // New booth form
+  const [label, setLabel] = useState('');
+  const [row, setRow] = useState('');
+  const [kind, setKind] = useState<'stall' | 'food_truck'>('stall');
+  const [power, setPower] = useState(false);
+  const [size, setSize] = useState('12x12');
+  const [adding, setAdding] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api.getBooths(market.id, true);
+      setBooths(d.booths || []);
+    } catch (err: any) {
+      setError(err?.message || 'Could not load booths');
+    } finally {
+      setLoading(false);
+    }
+  }, [market.id]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const flashMsg = (msg: string) => {
+    setFlash(msg);
+    setTimeout(() => setFlash(''), 3000);
+  };
+
+  const run = async (id: string, fn: () => Promise<unknown>, okMsg: string) => {
+    setBusyId(id);
+    setError('');
+    try {
+      const res = await fn();
+      await load();
+      flashMsg(typeof res === 'string' ? res : okMsg);
+    } catch (err: any) {
+      setError(err?.message || 'The change did not save');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const rows = Array.from(new Set(booths.map((b) => b.row)));
+
+  const add = async () => {
+    const l = label.trim();
+    const r = row.trim() || rows[0] || '';
+    if (!l || !r) {
+      setError('A booth needs a label and a row.');
+      return;
+    }
+    const order = booths.filter((b) => b.row === r).reduce((max, b) => Math.max(max, b.order), 0) + 1;
+    setAdding(true);
+    await run('add', () => api.createBooth(market.id, { label: l, row: r, order, kind, power, size: size.trim() || '12x12' }), `Added ${l}`);
+    setAdding(false);
+    setLabel('');
+    setPower(false);
+  };
+
+  const seed = () =>
+    run(
+      'seed',
+      async () => {
+        const west = Array.from({ length: 11 }, (_, i) => `V${i + 1}`);
+        const east = Array.from({ length: 11 }, (_, i) => `V${i + 12}`);
+        const res = await api.seedBooths(market.id, {
+          rows: [
+            { row: 'west', labels: west },
+            { row: 'east', labels: east },
+          ],
+          food_truck: { label: 'Food truck', row: 'center', order: 8 },
+        });
+        return `Seeded: ${res.created} created, ${res.existing} already there`;
+      },
+      'Booths seeded',
+    );
+
+  return (
+    <Card
+      title="Booths"
+      aside={
+        isAdmin ? (
+          <ConfirmButton label="Seed V1-V22 from the WLRFM map" confirmLabel="Seed the map" danger={false} busy={busyId === 'seed'} onConfirm={seed} />
+        ) : undefined
+      }
+    >
+      {error && <div className="mb-3"><Notice kind="error">{error}</Notice></div>}
+      {flash && <div className="mb-3"><Notice kind="success">{flash}</Notice></div>}
+      <p className="text-xs text-earth-500 mt-0 mb-3">
+        One column per row, north at the top. Mark the stalls that reach power; electric vendors are only placed there. A two-space vendor needs two neighbouring booths in the same row.
+        After seeding, flag power on the right stalls and mark the food truck slot active only if a truck is expected.
+      </p>
+      {loading ? (
+        <p className="text-sm text-earth-400 m-0">Loading booths...</p>
+      ) : (
+        <BoothEditGrid
+          booths={booths}
+          canEdit={isAdmin}
+          busyId={busyId}
+          onPatch={(b, data) => run(b.id, () => api.updateBooth(market.id, b.id, data), `${b.label} saved`)}
+          onRetire={(b) => run(b.id, () => api.retireBooth(market.id, b.id), `${b.label} retired`)}
+          onReorderRow={(r, ids) => run(ids[0], () => api.reorderBooths(market.id, [{ row: r, booth_ids: ids }]), 'Order saved')}
+        />
+      )}
+
+      {isAdmin && (
+        <div className="mt-5 pt-4 border-t border-earth-100">
+          <div className="text-xs font-semibold text-earth-500 mb-2">Add a booth</div>
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 items-end">
+            <Field label="Label" value={label} onChange={setLabel} placeholder="V23" />
+            <div>
+              <Field label="Row" value={row} onChange={setRow} placeholder={rows[0] || 'west'} />
+            </div>
+            <SelectField label="Kind" value={kind} onChange={(x) => setKind(x === 'food_truck' ? 'food_truck' : 'stall')} options={[{ value: 'stall', label: 'Stall' }, { value: 'food_truck', label: 'Food truck' }]} />
+            <Field label="Size" value={size} onChange={setSize} />
+            <div className="pb-2"><CheckboxField label="Power" checked={power} onChange={setPower} /></div>
+            <PrimaryButton onClick={add} disabled={adding || !label.trim()}>{adding ? 'Adding...' : 'Add booth'}</PrimaryButton>
+          </div>
+          {rows.length > 0 && <p className="text-xs text-earth-500 mt-2 mb-0">Existing rows: {rows.join(', ')}. The new booth goes at the south end of its row.</p>}
+        </div>
+      )}
+    </Card>
   );
 }

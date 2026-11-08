@@ -4,10 +4,12 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import type { BoothDoc } from '@/lib/phase4-types';
 import type { MarketDateStatusView, ReminderSent } from '@/lib/types';
 import { canAccessMarket, useStaffGuard } from '@/components/staff-guard';
 import { StatusChip } from '@/components/status-chip';
 import { CheckboxField, ConfirmButton, Notice } from '@/components/form';
+import { AssignGrid, type AssignOption } from '@/components/booth-grid';
 import { AdminShell, EmptyRow, LoadingScreen, TableCard, Td, Th, formatDateLabel, weekdayLabel } from '@/components/admin-shell';
 
 /**
@@ -113,6 +115,13 @@ function MarketDateStatusRoute() {
         />
         <ExcludedCard status={status} />
         <DeadlineCard status={status} />
+        <AssignmentsCard
+          status={status}
+          canEdit={canEdit}
+          onReload={reload}
+          onError={setError}
+          onFlash={flashMsg}
+        />
         <MessagesCard status={status} />
         {canClose && (
           <CloseCard
@@ -438,6 +447,350 @@ function DeadlineCard({ status }: { status: MarketDateStatusView }) {
             </ul>
           )}
         </div>
+      </div>
+    </Card>
+  );
+}
+
+/* ─── Assignments (Phase 4: booth drafts and approval) ─── */
+
+const UNASSIGNED_REASON: Record<string, string> = {
+  no_power_stall: 'no powered stall is free',
+  no_pair: 'no two neighbouring free booths (second space not available)',
+  full: 'every booth is taken',
+  no_food_truck_slot: 'no food truck slot',
+};
+
+const SKIPPED_REASON: Record<string, string> = {
+  no_next_date: 'there is no later market date to assign',
+  no_booths: 'the market has no active booths yet',
+  no_attendees: 'nobody checked in as attending',
+};
+
+function AssignmentsCard({
+  status,
+  canEdit,
+  onReload,
+  onError,
+  onFlash,
+}: {
+  status: MarketDateStatusView;
+  canEdit: boolean;
+  onReload: () => Promise<void>;
+  onError: (msg: string) => void;
+  onFlash: (msg: string) => void;
+}) {
+  const a = status.assignments;
+  const tz = status.market.timezone;
+  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<{ boothId: string; producerId: string; secondId: string } | null>(null);
+
+  if (!a) {
+    return (
+      <Card title="Assignments">
+        <p className="text-sm text-earth-400 m-0">Booth assignments are not available from the server yet.</p>
+      </Card>
+    );
+  }
+
+  const actions = status.date.actions;
+  const boothById = new Map(a.booths.map((b) => [b.booth.id, b]));
+  const heldBy = (producerId: string): string[] => a.booths.filter((b) => b.assignment?.producer_id === producerId).map((b) => b.booth.id);
+  const labelOf = (id: string) => boothById.get(id)?.booth.label || id;
+  const vendors = new Map(a.attending.map((v) => [v.producer_id, v]));
+
+  const assignedVendors = new Set(a.booths.filter((b) => b.assignment).map((b) => b.assignment!.producer_id));
+  const approved = !!a.approved_at;
+  const textsSent = !!a.booth_texts_sent_at;
+  const drafted = !!a.drafted_at;
+  const hasDraft = !!a.assignments_draft_at;
+  const editsLocked = textsSent || !canEdit;
+  const canDraft = canEdit && !approved && a.target_date !== null;
+
+  const options: AssignOption[] = a.attending.map((v) => ({
+    producer_id: v.producer_id,
+    business_name: v.business_name,
+    spaces: v.spaces,
+    held: heldBy(v.producer_id).map(labelOf),
+  }));
+
+  const fail = (err: any, fallback: string) => onError(err?.message || fallback);
+
+  const draft = async () => {
+    setBusy(true);
+    try {
+      await api.draftAssignments(status.date.id, drafted);
+      await onReload();
+      onFlash(drafted ? 'Assignments redrafted' : 'Assignments drafted');
+    } catch (err: any) {
+      fail(err, 'Could not draft assignments');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Turn "these producers should now hold exactly these booths" into the PATCH changes. */
+  const send = async (moves: Map<string, string[]>) => {
+    const changes = Array.from(moves.entries())
+      .filter(([pid, ids]) => {
+        const before = heldBy(pid);
+        return before.length !== ids.length || before.some((id) => !ids.includes(id));
+      })
+      .map(([producer_id, booth_ids]) => ({ producer_id, booth_ids }));
+    if (changes.length === 0) return;
+    setBusy(true);
+    try {
+      const res = await api.updateAssignments(status.date.id, changes);
+      await onReload();
+      onFlash(res.warning === 'approved' ? 'Saved. These assignments were already approved; booth texts are not re-sent for changes.' : 'Assignments saved');
+    } catch (err: any) {
+      fail(err, 'Could not save the change');
+      await onReload();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Place `producerId` ('' to empty the booth) on `boothId`, plus an optional second booth. */
+  const place = async (boothId: string, producerId: string, secondId?: string) => {
+    const moves = new Map<string, string[]>();
+    const take = (id: string) => {
+      // Whoever holds the booth now loses it.
+      const holder = boothById.get(id)?.assignment?.producer_id;
+      if (holder && holder !== producerId) {
+        const current = moves.get(holder) ?? heldBy(holder);
+        moves.set(holder, current.filter((x) => x !== id));
+      }
+    };
+    take(boothId);
+    if (secondId) take(secondId);
+    if (producerId) moves.set(producerId, secondId ? [boothId, secondId] : [boothId]);
+    await send(moves);
+  };
+
+  const onSelect = (booth: BoothDoc, producerId: string) => {
+    if (!producerId) {
+      void place(booth.id, '');
+      return;
+    }
+    const v = vendors.get(producerId);
+    if (v && v.spaces === 2) {
+      // A two-space vendor needs a second booth: default to the free neighbour in the row.
+      const row = a.booths.filter((b) => b.booth.row === booth.row && b.booth.id !== booth.id && b.booth.active).sort((x, y) => x.booth.order - y.booth.order);
+      const neighbours = row.filter((b) => Math.abs(b.booth.order - booth.order) === 1);
+      const free = neighbours.find((b) => !b.assignment || b.assignment.producer_id === producerId) ?? neighbours[0] ?? row[0];
+      setPending({ boothId: booth.id, producerId, secondId: free?.booth.id ?? '' });
+      return;
+    }
+    void place(booth.id, producerId);
+  };
+
+  const approve = async () => {
+    setBusy(true);
+    try {
+      const res = await api.approveAssignments(status.date.id);
+      await onReload();
+      const t = res.texts;
+      if (t.deferred_until) onFlash(`Approved. Booth texts wait for quiet hours to end: ${formatInstant(t.deferred_until, tz)}.`);
+      else if (t.attempted) onFlash(`Approved. Texts: ${t.sent} sent, ${t.failed} failed, ${t.excluded} not texted.`);
+      else onFlash('Approved.');
+    } catch (err: any) {
+      fail(err, 'Could not approve the assignments');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const textStatus = (): string => {
+    if (textsSent) {
+      return `Booth texts sent ${formatInstant(a.booth_texts_sent_at, tz)}: ${actions.booth_text_recipients ?? 0} sent, ${actions.booth_text_failed ?? 0} failed, ${actions.booth_text_excluded ?? 0} not texted.`;
+    }
+    if (approved && a.booth_texts_due_at) return `Approved. Booth texts are deferred by quiet hours until ${formatInstant(a.booth_texts_due_at, tz)}.`;
+    if (approved) return 'Approved. Booth texts go out on the next engine tick.';
+    return 'Not approved. No booth texts have gone out.';
+  };
+
+  const secondChoices = pending
+    ? a.booths.filter((b) => b.booth.active && b.booth.id !== pending.boothId && boothById.get(pending.boothId)?.booth.row === b.booth.row)
+    : [];
+
+  return (
+    <Card title="Assignments">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+        <div>
+          <div className="text-sm font-semibold text-earth-800">
+            {a.target_date ? <>Booths for {a.target_date.date_label}</> : 'No later market date to assign'}
+            <span className="text-text-muted font-normal"> - season {a.season}</span>
+          </div>
+          <div className="text-xs text-earth-500 mt-0.5">
+            Built from the vendors who said they are attending next. {a.assignments_draft_at ? `Drafted ${formatInstant(a.assignments_draft_at, tz)}.` : drafted ? 'Drafting ran but placed no one.' : 'Not drafted yet.'}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {approved && <StatusChip status="approved" />}
+          {textsSent && <StatusChip status="sent" />}
+          {canDraft &&
+            (hasDraft ? (
+              <ConfirmButton
+                label="Redraft"
+                confirmLabel="Redraft (keeps manual moves)"
+                danger={false}
+                busy={busy}
+                onConfirm={draft}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={draft}
+                disabled={busy}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border disabled:opacity-40"
+                style={{ borderColor: '#E4DFD3', color: '#21512C', background: '#fff' }}
+              >
+                {busy ? 'Working...' : 'Draft assignments'}
+              </button>
+            ))}
+          {canEdit && !approved && hasDraft && (
+            <ConfirmButton
+              label="Approve..."
+              confirmLabel={`Approve and text ${assignedVendors.size} vendor${assignedVendors.size === 1 ? '' : 's'} their booth?`}
+              danger={false}
+              busy={busy}
+              disabled={a.summary.conflicts > 0 || assignedVendors.size === 0}
+              onConfirm={approve}
+            />
+          )}
+        </div>
+      </div>
+
+      {a.drafts_skipped && !hasDraft && (
+        <div className="mb-3"><Notice kind="warning">Drafting was skipped: {SKIPPED_REASON[a.drafts_skipped] || a.drafts_skipped.replace(/_/g, ' ')}.</Notice></div>
+      )}
+      {!status.in_window && !textsSent && (
+        <div className="mb-3">
+          <Notice kind="warning">This date is outside the automatic window. Approving sends the booth texts right away; the engine will not retry them later.</Notice>
+        </div>
+      )}
+      {a.summary.conflicts > 0 && (
+        <div className="mb-3"><Notice kind="error">{a.summary.conflicts} booth{a.summary.conflicts === 1 ? ' is' : 's are'} double booked. Fix them before approving.</Notice></div>
+      )}
+      {textsSent && (
+        <div className="mb-3"><Notice kind="info">Booth texts have gone out, so assignments are locked. Changes after texts are a separate feature.</Notice></div>
+      )}
+
+      <div className="flex flex-wrap gap-2 mb-4 text-xs">
+        <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{assignedVendors.size} vendor{assignedVendors.size === 1 ? '' : 's'} placed</span>
+        <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{a.summary.unassigned} unplaced</span>
+        <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{a.summary.booths_free} of {a.summary.booths_total} booths free</span>
+      </div>
+
+      {pending && (
+        <div className="mb-4 p-3 rounded-xl border border-earth-100 bg-earth-15 max-w-xl space-y-3">
+          <div className="text-sm font-semibold text-earth-800">
+            {vendors.get(pending.producerId)?.business_name} has two spaces. Second space next to {labelOf(pending.boothId)}:
+          </div>
+          <select
+            value={pending.secondId}
+            onChange={(e) => setPending({ ...pending, secondId: e.target.value })}
+            className="w-full px-3 py-2 border border-earth-200 rounded-xl text-sm bg-white"
+            aria-label="Second space"
+          >
+            {secondChoices.map((b) => (
+              <option key={b.booth.id} value={b.booth.id}>
+                {b.booth.label}
+                {b.assignment && b.assignment.producer_id !== pending.producerId ? ` - now ${b.assignment.business_name}` : ''}
+              </option>
+            ))}
+          </select>
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={() => setPending(null)} className="px-3 py-1.5 rounded-xl text-xs font-semibold border border-earth-200 bg-white text-earth-700 cursor-pointer">Cancel</button>
+            <button
+              type="button"
+              disabled={!pending.secondId || busy}
+              onClick={async () => {
+                const p = pending;
+                setPending(null);
+                await place(p.boothId, p.producerId, p.secondId);
+              }}
+              className="px-3 py-1.5 rounded-xl text-xs font-semibold text-white border-none cursor-pointer disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
+            >
+              Place both spaces
+            </button>
+          </div>
+        </div>
+      )}
+
+      <AssignGrid booths={a.booths} options={options} disabled={editsLocked || busy} onSelect={onSelect} />
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-5">
+        <div>
+          <div className="text-xs font-semibold text-earth-500 mb-1.5">Not placed ({a.unassigned.length})</div>
+          {a.unassigned.length === 0 ? (
+            <p className="text-sm text-earth-400 m-0">Everyone attending has a booth.</p>
+          ) : (
+            <ul className="m-0 p-0 list-none space-y-1">
+              {a.unassigned.map((u, i) => (
+                <li key={`${u.producer_id}-${i}`} className="text-sm">
+                  <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="font-semibold text-green-700 no-underline hover:underline">{u.business_name}</Link>
+                  <span className="text-text-muted text-xs"> - {UNASSIGNED_REASON[u.reason] || u.reason.replace(/_/g, ' ')}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-earth-500 mb-1.5">Not attending ({a.not_attending.length})</div>
+          {a.not_attending.length === 0 ? (
+            <p className="text-sm text-earth-400 m-0">Nobody.</p>
+          ) : (
+            <ul className="m-0 p-0 list-none space-y-1">
+              {a.not_attending.map((u) => (
+                <li key={u.producer_id} className="text-sm">
+                  <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-earth-500 mb-1.5">No answer ({a.no_answer.length})</div>
+          {a.no_answer.length === 0 ? (
+            <p className="text-sm text-earth-400 m-0">Everyone answered.</p>
+          ) : (
+            <ul className="m-0 p-0 list-none space-y-1">
+              {a.no_answer.map((u) => (
+                <li key={u.producer_id} className="text-sm">
+                  <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-5 pt-4 border-t border-earth-100">
+        <div className="text-xs font-semibold text-earth-500 mb-1.5">Booth texts</div>
+        <p className="text-sm text-earth-700 m-0 mb-3">{textStatus()}</p>
+        {a.messages.length > 0 && (
+          <TableCard minWidth={480}>
+            <thead>
+              <tr className="border-b border-border-light">
+                <Th>To</Th>
+                <Th>Status</Th>
+                <Th>When</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {a.messages.map((m) => (
+                <tr key={m.id} className="border-b border-border-light last:border-none">
+                  <Td><span className="font-mono text-[12px]">{m.to}</span></Td>
+                  <Td><StatusChip status={m.status} /></Td>
+                  <Td><span className="text-[12px]">{formatInstant(m.created_at, tz)}</span></Td>
+                </tr>
+              ))}
+            </tbody>
+          </TableCard>
+        )}
       </div>
     </Card>
   );
