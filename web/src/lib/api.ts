@@ -1,8 +1,6 @@
 import type { ApplicationDoc, ApplicationListItem, BoothDoc, UploadMeta } from './phase4-types';
 import type {
-  Application,
   ApplicationAction,
-  ApplicationInput,
   ApplicationInvite,
   AssignmentsView,
   AuditEntry,
@@ -224,18 +222,6 @@ export const api = {
     request<{ membership: Membership }>(`/memberships/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getCheckins: (params: { market_date_id: string } | { producer_id: string }) =>
     request<{ checkins: Checkin[] }>(`/checkins${qs(params)}`),
-
-  // Applications
-  submitApplication: (data: ApplicationInput) =>
-    request<{ id: string; status: 'new' }>('/applications', { method: 'POST', body: JSON.stringify(data) }),
-  getApplications: (params?: { status?: string }) =>
-    request<{ applications: Application[] }>(`/applications${qs(params)}`),
-  getApplication: (id: string) => request<{ application: Application }>(`/applications/${id}`),
-  reviewApplication: (
-    id: string,
-    data: { action: 'review' } | { action: 'decline'; note?: string } | { action: 'approve'; market_ids: string[]; note?: string },
-  ) =>
-    request<{ application: Application; producer?: Producer; memberships?: Membership[] }>(`/applications/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   // Staff users, audit, dashboard, providers
   getStaffUsers: () => request<{ users: StaffUser[] }>('/admin/users'),

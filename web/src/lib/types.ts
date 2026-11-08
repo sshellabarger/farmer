@@ -394,41 +394,6 @@ export interface UpdateProducerInput {
   description_public: string;
 }
 
-/* ── Applications ── */
-
-export type ApplicationStatus = 'new' | 'under_review' | 'approved' | 'declined';
-
-export type ApplicationExtra = Record<string, string | boolean | string[]>;
-
-export interface Application {
-  id: string;
-  email: string;
-  business_name: string;
-  contact_person: string;
-  phone: string;
-  markets_applied: string[];
-  extra: ApplicationExtra;
-  status: ApplicationStatus;
-  reviewed_by: string | null;
-  reviewed_at: string | null;
-  decision_note: string | null;
-  producer_id: string | null;
-  membership_ids: string[];
-  submitted_at: string;
-  source: 'web';
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ApplicationInput {
-  email: string;
-  business_name: string;
-  contact_person: string;
-  phone: string;
-  markets_applied: string[];
-  extra: ApplicationExtra;
-}
-
 /* ── Check-ins ── */
 
 export type CheckinSource = 'form' | 'import' | 'sms';
