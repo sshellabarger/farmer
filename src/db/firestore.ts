@@ -52,6 +52,10 @@ export const collections = {
   producer_memberships: 'producer_memberships',
   // Phase 2. Doc id = uuid.
   applications: 'applications',
+  // Phase 4 (A1). Doc id = uuid. Metadata of a public application upload; the bytes live in Storage at `storage_path`.
+  application_uploads: 'application_uploads',
+  // Phase 4 (A1). Doc id = `${market_id}_${season}_${producer_id}`; created atomically — the invite-to-reapply lock.
+  application_invites: 'application_invites',
   // Phase 2/3. Doc id = `${market_date_id}_${producer_id}`.
   checkins: 'checkins',
   // Phase 3 (contract §2.1). Doc id = the token itself.

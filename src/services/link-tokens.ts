@@ -104,7 +104,10 @@ export async function resolveCheckinToken(db: Firestore, token: string, now: Dat
   if (!TOKEN_RE.test(token)) return { status: 'unknown' };
   const doc = await db.collection('link_tokens').doc(token).get();
   if (!doc.exists) return { status: 'unknown' };
-  const t = linkTokenFromData(doc.id, doc.data() as Record<string, unknown>);
+  const data = doc.data() as Record<string, unknown>;
+  // Phase 4: application / agreement tokens share this collection; one presented here is not a check-in link.
+  if (data.purpose && data.purpose !== 'checkin') return { status: 'unknown' };
+  const t = linkTokenFromData(doc.id, data);
   if (t.expires_at.getTime() <= now.getTime()) return { status: 'expired', reason: 'expired', token: t };
   if (t.uses >= t.max_uses) return { status: 'expired', reason: 'exhausted', token: t };
   const dateDoc = await db.collection('market_dates').doc(t.market_date_id).get();
