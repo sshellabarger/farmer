@@ -8,6 +8,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from './config/env.js';
 import { serializeTimestamps } from './utils/serialize.js';
 import { createErrorHandler } from './utils/http-error-handler.js';
+import { TRUSTED_PROXIES } from './utils/trusted-proxies.js';
 import { boothRoutes } from './routes/booths.js';
 import { agreementRoutes } from './routes/agreements.js';
 import { insuranceRoutes } from './routes/insurance.js';
@@ -57,9 +58,13 @@ export interface BuildAppOptions {
  * `listen()`) themselves.
  */
 export async function buildApp({ db, env, logLevel = 'info', notifyOnError = true, storage }: BuildAppOptions): Promise<FastifyInstance> {
-  // trustProxy: req.ip (the rate-limit key) must be the client behind Firebase
-  // Hosting, not the always-127.0.0.1 socket address the function sees.
-  const app = Fastify({ logger: { level: logLevel }, trustProxy: true });
+  // trustProxy: req.ip (the rate-limit key, and the address stored as consent
+  // and signature evidence) must be the client behind Firebase Hosting, not
+  // the always-127.0.0.1 socket address the function sees. An explicit list,
+  // never `true`: with `true` the left-most X-Forwarded-For entry wins, and a
+  // caller of the direct function URL writes that entry itself. See
+  // src/utils/trusted-proxies.ts.
+  const app = Fastify({ logger: { level: logLevel }, trustProxy: TRUSTED_PROXIES });
 
   await app.register(cors, { origin: true });
   await app.register(formbody);
