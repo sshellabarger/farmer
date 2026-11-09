@@ -215,12 +215,14 @@ describe('POST /api/applications — validation', () => {
 });
 
 describe('POST /api/applications — one application per email and season', () => {
-  it('409s a second application for the same email, with the first one\'s id', async () => {
+  it('409s a second application for the same email, without naming the first one', async () => {
     const app = await boot(seed());
     const first = await submit(app);
     const second = await submit(app, { draft_id: '9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d' });
     expect(second.statusCode).toBe(409);
-    expect(second.json()).toEqual({ error: 'We already have an application for this email this season', application_id: first.json().id });
+    // The other application's id stays private: anyone can type an email address into the form.
+    expect(second.json()).toEqual({ error: 'We already have an application for this email this season' });
+    expect(second.body).not.toContain(first.json().id);
   });
 
   it('matches the email after normalisation', async () => {

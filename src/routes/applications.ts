@@ -24,17 +24,25 @@ import { applicationsOpen, marketCategories, marketFees, marketLegal, marketPaym
 import {
   MARKET_ID_RE,
   SUBMISSION_LIMITS,
+  acquireStaffLock,
   applicationSubmitSchema,
+  approvalLockId,
   buildApplicationConfig,
+  claimApplicationKey,
   computeSeasonTotal,
   fillPaymentUrl,
   firstSeasonDate,
   flattenItems,
   isLegacyApplication,
+  isLiveApplication,
+  producerIdentityLockId,
   projectApplicationListItem,
+  releaseApplicationKey,
+  releaseStaffLock,
   summarizeSeason,
   type ApplicationSubmitInput,
   type SeasonTotal,
+  type StaffLock,
 } from '../services/applications.js';
 import {
   DRAFT_ID_RE,
@@ -245,6 +253,15 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
     if (legal.rules_version !== '' && input.rules_version !== legal.rules_version) {
       return reply.status(400).send({ error: 'Please re-read the current rules' });
     }
+    // The consent that is stored as evidence must be consent to the wording the market
+    // publishes NOW: a version the client made up, or one from a form loaded before the
+    // text changed, is refused (fix X3c).
+    if (legal.sms_consent_version !== '' && input.sms_consent_version !== legal.sms_consent_version) {
+      return reply.status(409).send({
+        error: 'The text message consent wording has changed. Please reload the form, review it and submit again.',
+        code: 'sms_consent_changed',
+      });
+    }
 
     const email = normalizeEmail(input.contact.email);
     if (!email) return reply.status(400).send({ error: 'Invalid email' });
@@ -286,22 +303,33 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       if (unknown) return reply.status(400).send({ error: 'One of the stalls you picked is not available' });
     }
 
-    // Uploads: every referenced id must exist, belong to this draft and be unattached.
-    const uploadIds = new Set<string>();
-    for (const p of Object.values(permits)) if (p.upload_id) uploadIds.add(p.upload_id);
-    if (input.insurance.certificate_upload_id) uploadIds.add(input.insurance.certificate_upload_id);
-    for (const uploadId of uploadIds) {
-      const doc = await app.db.collection('application_uploads').doc(uploadId).get();
-      const data = doc.data() as Rec | undefined;
-      if (!doc.exists || !data || data.draft_id !== input.draft_id || data.application_id) {
-        return reply.status(400).send({ error: 'One of the uploaded files could not be found; please upload it again' });
-      }
-    }
-
-    // One live application per email, market and season; a repeat of the same draft is the same submission.
     const fees = marketFees(market);
     const links = marketPaymentLinks(market);
     const marketCount = summarizeSeason(market).summary.market_count;
+
+    /** What the first, accepted POST of a submission answered; a repeat of it gets the same body. */
+    const originalResult = (applicationId: string, a: Rec) => {
+      const fee = rec(a.fee);
+      return {
+        id: applicationId,
+        status: 'new' as const,
+        fee: {
+          amount: typeof fee.amount === 'number' ? fee.amount : fees.application_fee,
+          currency: typeof fee.currency === 'string' ? fee.currency : fees.currency,
+          url: fillPaymentUrl(links.application_fee_url, email),
+        },
+        season_total: a.season_total as SeasonTotal,
+      };
+    };
+    /** True when the stored application IS this submission: live, same season, same draft, same address. */
+    const isThisSubmission = (a: Rec) =>
+      isLiveApplication(a) && a.season === season && a.market_id === market.id && a.draft_id === input.draft_id && normalizeEmail(String(rec(a.contact).email ?? '')) === email;
+    const duplicate = () => reply.status(409).send({ error: 'We already have an application for this email this season' });
+
+    // One live application per email, market and season; a repeat of the same draft is the same
+    // submission and is answered BEFORE the uploads are looked at (they are attached by now, fix X3a).
+    // This scan is the friendly read-side answer and covers applications older than the key
+    // documents; the key claimed below is what makes it atomic.
     const existingSnap = await app.db.collection('applications').where('market_id', '==', market.id).get();
     const today = utcDay(now);
     let submittedToday = 0;
@@ -312,18 +340,11 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
     }
     for (const d of existingSnap.docs) {
       const a = d.data() as Rec;
-      if (a.season !== season || a.status === 'declined' || a.status === 'withdrawn') continue;
+      if (a.season !== season || !isLiveApplication(a)) continue;
       if (normalizeEmail(String(rec(a.contact).email ?? '')) !== email) continue;
-      if (a.draft_id === input.draft_id) {
-        const total = a.season_total as SeasonTotal;
-        return reply.status(201).send({
-          id: d.id,
-          status: 'new' as const,
-          fee: { amount: fees.application_fee, currency: fees.currency, url: fillPaymentUrl(links.application_fee_url, email) },
-          season_total: total,
-        });
-      }
-      return reply.status(409).send({ error: 'We already have an application for this email this season', application_id: d.id });
+      if (isThisSubmission(a)) return reply.status(201).send(originalResult(d.id, a));
+      // The other application's id is nobody else's business: anyone can type an email address here.
+      return duplicate();
     }
 
     // Flood backstop (fix X2): a market takes at most SUBMISSION_LIMITS.daily_per_market new
@@ -337,12 +358,42 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       return reply.status(503).send({ error: 'We cannot accept more applications today. Please try again tomorrow, or contact the market manager.' });
     }
 
+    // Uploads: every referenced id must exist, belong to this draft and be unattached. An upload
+    // that is attached to this very submission means a concurrent copy of this request won the
+    // race a moment ago: answer what it answered.
+    const uploadIds = new Set<string>();
+    for (const p of Object.values(permits)) if (p.upload_id) uploadIds.add(p.upload_id);
+    if (input.insurance.certificate_upload_id) uploadIds.add(input.insurance.certificate_upload_id);
+    const uploadNotFound = () => reply.status(400).send({ error: 'One of the uploaded files could not be found; please upload it again' });
+    for (const uploadId of uploadIds) {
+      const doc = await app.db.collection('application_uploads').doc(uploadId).get();
+      const data = doc.data() as Rec | undefined;
+      if (!doc.exists || !data || data.draft_id !== input.draft_id) return uploadNotFound();
+      if (data.application_id) {
+        const owner = typeof data.application_id === 'string' ? await app.db.collection('applications').doc(data.application_id).get() : null;
+        const ownerData = owner?.exists ? (owner.data() as Rec) : null;
+        if (owner && ownerData && isThisSubmission(ownerData)) return reply.status(201).send(originalResult(owner.id, ownerData));
+        return uploadNotFound();
+      }
+    }
+
     const season_total = computeSeasonTotal(
       fees,
       { rate: input.booth.rate, spaces: input.booth.spaces, electric: input.booth.electric, pay_in_full: input.booth.pay_in_full },
       marketCount,
     );
     const id = uuid();
+
+    // The atomic guard (fix X3d): the key of (market, season, email) is create()d before the
+    // application. Of two submissions for one address arriving together, one stops here.
+    const keyArgs = { market_id: market.id, season, email, application_id: id };
+    const claim = await claimApplicationKey(app.db, { ...keyArgs, now });
+    if (!claim.ok) {
+      if (claim.holder && isThisSubmission(claim.holder)) return reply.status(201).send(originalResult(claim.holder_id, claim.holder));
+      if (claim.holder) return duplicate();
+      return reply.status(409).send({ error: 'Your application is already being submitted. Please wait a moment and try again.' });
+    }
+
     const doc = {
       market_id: market.id,
       season,
@@ -385,6 +436,8 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
     try {
       await app.db.collection('applications').doc(id).create(doc);
     } catch (err) {
+      // The application was not written: let go of the key so the applicant can try again at once.
+      await releaseApplicationKey(app.db, keyArgs);
       if (isAlreadyExists(err)) return reply.status(409).send({ error: 'Please try again' });
       throw err;
     }
@@ -701,212 +754,250 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       });
     }
 
-    // Who is this? A prefilled application names its producer; otherwise match by email (never by name).
-    let knownProducerId: string | null = null;
-    if (typeof before.prefill_producer_id === 'string') {
-      const d = await app.db.collection('producers').doc(before.prefill_producer_id).get();
-      if (d.exists) knownProducerId = d.id;
-    }
-    if (!knownProducerId) knownProducerId = await findProducerByEmail(app.db, contactEmail);
+    // One approval of this application at a time, and one producer per address (fix X3e).
+    // Both locks are `workflow_locks` documents taken with create(): of two approvals arriving
+    // together exactly one gets past each. Without them both requests read status 'new', both
+    // scan `producers`, find nobody, and each creates a producer for the same applicant.
+    //   - `application_approve__<id>` guards this application. It is released when the approval
+    //     is refused or fails (so it can be retried at once) and kept once it succeeds.
+    //   - `producer_identity__<sha256(email)>` guards "resolve or create the producer of this
+    //     address" across applications (the same new applicant applying to two markets) and is
+    //     released as soon as the producer exists.
+    // A lock whose holder died is taken over after the engine's CLAIM_TTL_MS.
+    const approvalLock = approvalLockId(doc.id);
+    const identityLock = producerIdentityLockId(contactEmail);
+    const inProgress = () => reply.status(409).send({ error: 'Approval already in progress', code: 'approval_in_progress' });
+    const heldApproval = await acquireStaffLock(app.db, approvalLock, user.id, now);
+    if (!heldApproval.acquired) return inProgress();
+    let heldIdentity: StaffLock = { acquired: false };
+    let approved = false;
+    try {
+      // Decided on a fresh read under the lock: another approval may have finished since this request loaded the application.
+      const fresh = (await ref.get()).data() as Rec | undefined;
+      const freshStatus = String(fresh?.status ?? 'new');
+      if (!fresh || (freshStatus !== 'new' && freshStatus !== 'under_review')) {
+        return reply.status(409).send({ error: `Application already ${freshStatus}` });
+      }
 
-    // Nothing is written before these two refusals.
-    const phoneHolder = await findProducerByPhone(app.db, contactMobile);
-    if (phoneHolder && phoneHolder !== knownProducerId) {
-      return reply.status(409).send({ error: 'Another producer already uses this mobile number', producer_id: phoneHolder });
-    }
-    const existingMembership = knownProducerId ? await findMembership(app.db, knownProducerId, market.id, season) : null;
-    if (existingMembership && existingMembership.status !== 'inactive') {
-      return reply.status(409).send({ error: `This producer already has a ${season} membership`, membership_id: existingMembership.id });
-    }
+      heldIdentity = await acquireStaffLock(app.db, identityLock, user.id, now);
+      if (!heldIdentity.acquired) return inProgress();
 
-    const consent = rec(before.sms_consent);
-    const products = (Array.isArray(before.products) ? before.products : []).map((p) => {
-      const { category: _category, ...entry } = rec(p);
-      return entry as unknown as ProductEntry;
-    });
-    const address = rec(contact.address);
-    const upserted = await upsertProducerByEmail(app.db, {
-      email: contactEmail,
-      business_name: String(contact.business_name),
-      contact_name: String(contact.name),
-      phone: contactMobile,
-      source: 'application',
-      ...(knownProducerId ? { producer_id: knownProducerId } : {}),
-      profile: {
-        website: String(contact.website ?? ''),
-        social: String(contact.social ?? ''),
-        address: Object.keys(address).length > 0 ? { street: String(address.street ?? ''), city: String(address.city ?? ''), state: String(address.state ?? ''), zip: String(address.zip ?? '') } : null,
-        description_public: String(contact.description ?? ''),
-        years_in_operation: typeof contact.years_in_operation === 'number' ? contact.years_in_operation : null,
-        outlets: String(contact.outlets ?? ''),
-        agricultural_practices: (contact.agricultural_practices as never) ?? null,
-        categories: Array.isArray(before.categories) ? (before.categories as unknown[]).map(String) : [],
-        products,
-        payment_methods: Array.isArray(before.payment_methods) ? (before.payment_methods as unknown[]).map(String) : [],
-        last_application_id: doc.id,
-        sms_consent: {
-          status: 'opted_in',
-          at: toDate(consent.at) ?? now,
-          source: 'application',
-          text_version: String(consent.text_version ?? ''),
-          ip: String(consent.ip ?? ''),
-        },
-      },
-    });
-    const producerId = upserted.producer_id;
-    const producerDoc = await app.db.collection('producers').doc(producerId).get();
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: upserted.created ? 'producer.create' : 'producer.update',
-      target: { collection: 'producers', id: producerId },
-      after: producerDoc.data(),
-    });
+      // Who is this? A prefilled application names its producer; otherwise match by email (never by name).
+      let knownProducerId: string | null = null;
+      if (typeof before.prefill_producer_id === 'string') {
+        const d = await app.db.collection('producers').doc(before.prefill_producer_id).get();
+        if (d.exists) knownProducerId = d.id;
+      }
+      if (!knownProducerId) knownProducerId = await findProducerByEmail(app.db, contactEmail);
 
-    // The per-season membership (D33): created atomically, a 2026 row is never touched.
-    const insurance = rec(before.insurance);
-    const certificateId = typeof insurance.certificate_upload_id === 'string' ? insurance.certificate_upload_id : null;
-    const expiresOn = typeof insurance.expires_on === 'string' ? insurance.expires_on : null;
-    const newMembership = {
-      producer_id: producerId,
-      market_id: market.id,
-      season,
-      status: 'approved' as MembershipStatus,
-      fee_plan: input.fee_plan,
-      spaces: input.spaces,
-      electric: input.electric,
-      pay_in_full: input.pay_in_full,
-      booth_kind: input.booth_kind,
-      usual_booth_id: input.usual_booth_id,
-      trial_period: input.trial_period,
-      approved_items: flattenItems(before.products),
-      application_id: doc.id,
-      insurance: {
-        status: certificateId ? ('on_file' as const) : ('missing' as const),
-        expires_at: expiresOn ? localToUtc(expiresOn, '23:59', market.timezone) : null,
-        upload_id: certificateId,
-      },
-      source: 'application' as const,
-      actor: user.id,
-      note: input.note || null,
-    };
-
-    let membershipId: string;
-    if (existingMembership) {
-      // An inactive membership of this very season: bring it back rather than create a second document.
-      membershipId = existingMembership.id;
-      if (!canTransition(existingMembership.status, 'approved')) {
+      // No producer, membership, token or message is written before these two refusals.
+      const phoneHolder = await findProducerByPhone(app.db, contactMobile);
+      if (phoneHolder && phoneHolder !== knownProducerId) {
+        return reply.status(409).send({ error: 'Another producer already uses this mobile number', producer_id: phoneHolder });
+      }
+      const existingMembership = knownProducerId ? await findMembership(app.db, knownProducerId, market.id, season) : null;
+      if (existingMembership && existingMembership.status !== 'inactive') {
         return reply.status(409).send({ error: `This producer already has a ${season} membership`, membership_id: existingMembership.id });
       }
-      await app.db
-        .collection('producer_memberships')
-        .doc(membershipId)
-        .update({
-          status: 'approved',
-          fee_plan: newMembership.fee_plan,
-          spaces: newMembership.spaces,
-          electric: newMembership.electric,
-          pay_in_full: newMembership.pay_in_full,
-          booth_kind: newMembership.booth_kind,
-          usual_booth_id: newMembership.usual_booth_id,
-          trial_period: newMembership.trial_period,
-          approved_items: newMembership.approved_items,
-          application_id: doc.id,
-          insurance: { ...newMembership.insurance, verified_by: null, verified_at: null, note: '' },
-          hold_harmless: null,
-          approved_at: now,
-          approved_by: user.id,
-          history: [...existingMembership.history, { from: 'inactive', to: 'approved', at: now, by: user.id, note: input.note || null }],
-          updated_at: now,
-        });
-    } else {
-      const created = await createMembership(app.db, newMembership, now);
-      if (!created.created) {
-        return reply.status(409).send({ error: `This producer already has a ${season} membership`, membership_id: created.id });
+
+      const consent = rec(before.sms_consent);
+      const products = (Array.isArray(before.products) ? before.products : []).map((p) => {
+        const { category: _category, ...entry } = rec(p);
+        return entry as unknown as ProductEntry;
+      });
+      const address = rec(contact.address);
+      const upserted = await upsertProducerByEmail(app.db, {
+        email: contactEmail,
+        business_name: String(contact.business_name),
+        contact_name: String(contact.name),
+        phone: contactMobile,
+        source: 'application',
+        ...(knownProducerId ? { producer_id: knownProducerId } : {}),
+        profile: {
+          website: String(contact.website ?? ''),
+          social: String(contact.social ?? ''),
+          address: Object.keys(address).length > 0 ? { street: String(address.street ?? ''), city: String(address.city ?? ''), state: String(address.state ?? ''), zip: String(address.zip ?? '') } : null,
+          description_public: String(contact.description ?? ''),
+          years_in_operation: typeof contact.years_in_operation === 'number' ? contact.years_in_operation : null,
+          outlets: String(contact.outlets ?? ''),
+          agricultural_practices: (contact.agricultural_practices as never) ?? null,
+          categories: Array.isArray(before.categories) ? (before.categories as unknown[]).map(String) : [],
+          products,
+          payment_methods: Array.isArray(before.payment_methods) ? (before.payment_methods as unknown[]).map(String) : [],
+          last_application_id: doc.id,
+          sms_consent: {
+            status: 'opted_in',
+            at: toDate(consent.at) ?? now,
+            source: 'application',
+            text_version: String(consent.text_version ?? ''),
+            ip: String(consent.ip ?? ''),
+          },
+        },
+      });
+      const producerId = upserted.producer_id;
+      // The producer exists now: the next approval for this address will find it by email.
+      await releaseStaffLock(app.db, identityLock, heldIdentity);
+      heldIdentity = { acquired: false };
+
+      const producerDoc = await app.db.collection('producers').doc(producerId).get();
+      await writeAudit(app.db, {
+        actor_id: user.id,
+        actor_role: user.role,
+        action: upserted.created ? 'producer.create' : 'producer.update',
+        target: { collection: 'producers', id: producerId },
+        after: producerDoc.data(),
+      });
+
+      // The per-season membership (D33): created atomically, a 2026 row is never touched.
+      const insurance = rec(before.insurance);
+      const certificateId = typeof insurance.certificate_upload_id === 'string' ? insurance.certificate_upload_id : null;
+      const expiresOn = typeof insurance.expires_on === 'string' ? insurance.expires_on : null;
+      const newMembership = {
+        producer_id: producerId,
+        market_id: market.id,
+        season,
+        status: 'approved' as MembershipStatus,
+        fee_plan: input.fee_plan,
+        spaces: input.spaces,
+        electric: input.electric,
+        pay_in_full: input.pay_in_full,
+        booth_kind: input.booth_kind,
+        usual_booth_id: input.usual_booth_id,
+        trial_period: input.trial_period,
+        approved_items: flattenItems(before.products),
+        application_id: doc.id,
+        insurance: {
+          status: certificateId ? ('on_file' as const) : ('missing' as const),
+          expires_at: expiresOn ? localToUtc(expiresOn, '23:59', market.timezone) : null,
+          upload_id: certificateId,
+        },
+        source: 'application' as const,
+        actor: user.id,
+        note: input.note || null,
+      };
+
+      let membershipId: string;
+      if (existingMembership) {
+        // An inactive membership of this very season: bring it back rather than create a second document.
+        membershipId = existingMembership.id;
+        if (!canTransition(existingMembership.status, 'approved')) {
+          return reply.status(409).send({ error: `This producer already has a ${season} membership`, membership_id: existingMembership.id });
+        }
+        await app.db
+          .collection('producer_memberships')
+          .doc(membershipId)
+          .update({
+            status: 'approved',
+            fee_plan: newMembership.fee_plan,
+            spaces: newMembership.spaces,
+            electric: newMembership.electric,
+            pay_in_full: newMembership.pay_in_full,
+            booth_kind: newMembership.booth_kind,
+            usual_booth_id: newMembership.usual_booth_id,
+            trial_period: newMembership.trial_period,
+            approved_items: newMembership.approved_items,
+            application_id: doc.id,
+            insurance: { ...newMembership.insurance, verified_by: null, verified_at: null, note: '' },
+            hold_harmless: null,
+            approved_at: now,
+            approved_by: user.id,
+            history: [...existingMembership.history, { from: 'inactive', to: 'approved', at: now, by: user.id, note: input.note || null }],
+            updated_at: now,
+          });
+      } else {
+        const created = await createMembership(app.db, newMembership, now);
+        if (!created.created) {
+          return reply.status(409).send({ error: `This producer already has a ${season} membership`, membership_id: created.id });
+        }
+        membershipId = created.id;
       }
-      membershipId = created.id;
-    }
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'membership.create',
-      target: { collection: 'producer_memberships', id: membershipId },
-      after: { producer_id: producerId, market_id: market.id, season, status: 'approved', application_id: doc.id },
-    });
+      await writeAudit(app.db, {
+        actor_id: user.id,
+        actor_role: user.role,
+        action: 'membership.create',
+        target: { collection: 'producer_memberships', id: membershipId },
+        after: { producer_id: producerId, market_id: market.id, season, status: 'approved', application_id: doc.id },
+      });
 
-    // The Hold Harmless link: a 60-day, single-use agreement token for this membership.
-    const agreement = await mintPurposeToken(app.db, {
-      purpose: 'agreement',
-      producer_id: producerId,
-      market_id: market.id,
-      season,
-      membership_id: membershipId,
-      expires_at: new Date(now.getTime() + AGREEMENT_TOKEN_DAYS * DAY_MS),
-      now,
-      created_by: user.id,
-    });
+      // The Hold Harmless link: a 60-day, single-use agreement token for this membership.
+      const agreement = await mintPurposeToken(app.db, {
+        purpose: 'agreement',
+        producer_id: producerId,
+        market_id: market.id,
+        season,
+        membership_id: membershipId,
+        expires_at: new Date(now.getTime() + AGREEMENT_TOKEN_DAYS * DAY_MS),
+        now,
+        created_by: user.id,
+      });
 
-    await ref.update({
-      status: 'approved',
-      producer_id: producerId,
-      membership_id: membershipId,
-      'review.trial_period': input.trial_period,
-      'review.reviewed_by': user.id,
-      'review.reviewed_at': now,
-      updated_at: now,
-    });
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'application.approve',
-      target,
-      before: { status },
-      after: { status: 'approved', producer_id: producerId, membership_id: membershipId, season },
-    });
+      await ref.update({
+        status: 'approved',
+        producer_id: producerId,
+        membership_id: membershipId,
+        'review.trial_period': input.trial_period,
+        'review.reviewed_by': user.id,
+        'review.reviewed_at': now,
+        updated_at: now,
+      });
+      approved = true;
+      await writeAudit(app.db, {
+        actor_id: user.id,
+        actor_role: user.role,
+        action: 'application.approve',
+        target,
+        before: { status },
+        after: { status: 'approved', producer_id: producerId, membership_id: membershipId, season },
+      });
 
-    // Messages are best-effort: the approval stands whatever happens to them.
-    let sends: { sms: string; email: boolean } = { sms: 'skipped_not_requested', email: false };
-    if (input.send) {
-      const fees = marketFees(market);
-      const totals = computeSeasonTotal(
-        fees,
-        { rate: input.fee_plan, spaces: input.spaces, electric: input.electric, pay_in_full: input.pay_in_full },
-        summarizeSeason(market).summary.market_count,
-      );
-      try {
-        sends = await sendAcceptance({
-          db: app.db,
-          env: app.env,
-          market,
-          season,
-          applicationId: doc.id,
-          membershipId,
-          producerId,
-          producer: (producerDoc.data() ?? {}) as Rec,
-          contactName: String(contact.name),
-          contactEmail,
-          agreementToken: agreement.token,
-          agreementUrl: purposeTokenUrl(app.env.APP_URL, 'agreement', agreement.token),
-          totals,
-          boothFeeUrl: marketPaymentLinks(market).booth_fee_url,
-          insuranceHelpUrl: marketLegal(market).insurance_help_url,
-          firstDate: firstSeasonDate(market),
-          actor: user.id,
-        });
-        const sentMessageId = sends.sms === 'sent' || sends.sms === 'simulated' ? `acceptance:${doc.id}` : null;
-        if (sentMessageId) await app.db.collection('link_tokens').doc(agreement.token).update({ sent_message_id: sentMessageId });
-      } catch (err) {
-        app.log.error(err, 'Acceptance send failed');
-        sends = { sms: 'failed', email: false };
+      // Messages are best-effort: the approval stands whatever happens to them.
+      let sends: { sms: string; email: boolean } = { sms: 'skipped_not_requested', email: false };
+      if (input.send) {
+        const fees = marketFees(market);
+        const totals = computeSeasonTotal(
+          fees,
+          { rate: input.fee_plan, spaces: input.spaces, electric: input.electric, pay_in_full: input.pay_in_full },
+          summarizeSeason(market).summary.market_count,
+        );
+        try {
+          sends = await sendAcceptance({
+            db: app.db,
+            env: app.env,
+            market,
+            season,
+            applicationId: doc.id,
+            membershipId,
+            producerId,
+            producer: (producerDoc.data() ?? {}) as Rec,
+            contactName: String(contact.name),
+            contactEmail,
+            agreementToken: agreement.token,
+            agreementUrl: purposeTokenUrl(app.env.APP_URL, 'agreement', agreement.token),
+            totals,
+            boothFeeUrl: marketPaymentLinks(market).booth_fee_url,
+            insuranceHelpUrl: marketLegal(market).insurance_help_url,
+            firstDate: firstSeasonDate(market),
+            actor: user.id,
+          });
+          const sentMessageId = sends.sms === 'sent' || sends.sms === 'simulated' ? `acceptance:${doc.id}` : null;
+          if (sentMessageId) await app.db.collection('link_tokens').doc(agreement.token).update({ sent_message_id: sentMessageId });
+        } catch (err) {
+          app.log.error(err, 'Acceptance send failed');
+          sends = { sms: 'failed', email: false };
+        }
       }
-    }
 
-    const membershipDoc = await app.db.collection('producer_memberships').doc(membershipId).get();
-    return {
-      application: await reread(),
-      producer: { id: producerId, ...((await app.db.collection('producers').doc(producerId).get()).data() as Rec) },
-      membership: membershipFromData(membershipId, membershipDoc.data() as Rec),
-      sends,
-    };
+      const membershipDoc = await app.db.collection('producer_memberships').doc(membershipId).get();
+      return {
+        application: await reread(),
+        producer: { id: producerId, ...((await app.db.collection('producers').doc(producerId).get()).data() as Rec) },
+        membership: membershipFromData(membershipId, membershipDoc.data() as Rec),
+        sends,
+      };
+    } finally {
+      await releaseStaffLock(app.db, identityLock, heldIdentity);
+      // Refused or failed: free the application for another try. Approved: the lock stays, like every engine lock.
+      if (!approved) await releaseStaffLock(app.db, approvalLock, heldApproval);
+    }
   });
 }

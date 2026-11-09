@@ -1,6 +1,9 @@
+import crypto from 'node:crypto';
 import type { Firestore } from 'firebase-admin/firestore';
+import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
-import { toDateOrEpoch } from '../utils/dates.js';
+import { isAlreadyExists } from '../db/firestore.js';
+import { toDate, toDateOrEpoch } from '../utils/dates.js';
 import { addDays, eachDate, parseDate, weekdayOf } from '../utils/tz.js';
 import {
   applicationsOpen,
@@ -16,6 +19,7 @@ import {
 import { currentSeason, listCurrentMemberships } from './seasons.js';
 import { UPLOAD_LIMITS } from './application-uploads.js';
 import { addressSchema, productEntrySchema } from './producers.js';
+import { CLAIM_TTL_MS } from './checkin-workflow.js';
 
 /**
  * The 2027 producer application (Phase 4 contract §2.2, §3.1): the public
@@ -479,4 +483,167 @@ export function flattenItems(products: unknown): string[] {
 /** `YYYY-MM-DD` of the day after `date`. */
 export function dayAfter(date: string): string {
   return addDays(date, 1);
+}
+
+/* ── One live application per email, market and season (fix X3d) ── */
+
+/** True for an application that still counts: anything but declined or withdrawn. */
+export function isLiveApplication(data: ApplicationRecord): boolean {
+  return data.status !== 'declined' && data.status !== 'withdrawn';
+}
+
+/**
+ * How long a key may name an application that does not exist before it is
+ * presumed abandoned. The submission writes the key and then the application
+ * within one request; the API function times out at 120 s, so no live request
+ * can leave that gap open this long.
+ */
+export const APPLICATION_KEY_PENDING_MS = 3 * 60_000;
+
+/**
+ * `application_keys` doc id: market + season + sha256 of the lower-cased
+ * email. The address itself is never part of an id (ids show up in logs and
+ * in the console). A market slug has no '_' and a season label has none
+ * either (`MARKET_ID_RE`, `SEASON_LABEL_RE`), so the three parts cannot run
+ * into each other.
+ */
+export function applicationKeyId(marketId: string, season: string, email: string): string {
+  const hash = crypto.createHash('sha256').update(email.trim().toLowerCase(), 'utf8').digest('hex');
+  return `${marketId}_${season}_${hash}`;
+}
+
+export type ApplicationKeyClaim =
+  /** The key now names `application_id`: the caller may create that application. */
+  | { ok: true }
+  /** Another application holds the key. `holder` is its document, or null while its submission is still in flight. */
+  | { ok: false; holder_id: string; holder: ApplicationRecord | null };
+
+/**
+ * Claims the key of `(market, season, email)` for a new application, atomically.
+ *
+ * The key document is written with `create()` BEFORE the application, so of
+ * any number of submissions arriving together for one email exactly one gets
+ * past here; a read-then-write check of the `applications` collection cannot
+ * promise that. When the key already exists:
+ *
+ *   - its application is live                      -> refused (the caller answers 409, or
+ *                                                     the original result for a repeat);
+ *   - its application was declined or withdrawn    -> the new application takes the key;
+ *   - its application does not exist and the key is younger than
+ *     APPLICATION_KEY_PENDING_MS                   -> refused, that submission is in flight;
+ *   - its application does not exist and the key is older -> the earlier request died
+ *     between its two writes; the new application takes the key.
+ *
+ * Residual race, documented (the same one the engine's `claim()` accepts): a
+ * takeover is a read followed by a `set()`, so two submissions arriving
+ * together at a key that is already free to take can both proceed. The
+ * re-read after the write narrows that to requests interleaved between the
+ * write and the re-read; the worst outcome is two applications from one
+ * address in the queue, which the second approval then refuses.
+ */
+export async function claimApplicationKey(
+  db: Firestore,
+  args: { market_id: string; season: string; email: string; application_id: string; now: Date },
+): Promise<ApplicationKeyClaim> {
+  const { market_id, season, email, application_id, now } = args;
+  const id = applicationKeyId(market_id, season, email);
+  const ref = db.collection('application_keys').doc(id);
+  const mine = { market_id, season, email_sha256: id.slice(id.lastIndexOf('_') + 1), application_id, claimed_at: now, created_at: now };
+  try {
+    await ref.create(mine);
+    return { ok: true };
+  } catch (err) {
+    if (!isAlreadyExists(err)) throw err;
+  }
+
+  const key = ((await ref.get()).data() ?? {}) as Record<string, unknown>;
+  const holderId = typeof key.application_id === 'string' ? key.application_id : '';
+  const holderDoc = holderId ? await db.collection('applications').doc(holderId).get() : null;
+  if (holderDoc?.exists) {
+    const holder = holderDoc.data() as ApplicationRecord;
+    if (isLiveApplication(holder)) return { ok: false, holder_id: holderId, holder };
+  } else {
+    const claimedAt = toDate(key.claimed_at);
+    if (holderId && claimedAt && now.getTime() - claimedAt.getTime() < APPLICATION_KEY_PENDING_MS) {
+      return { ok: false, holder_id: holderId, holder: null };
+    }
+  }
+
+  // Free to take: the earlier application ended, or its submission never finished.
+  await ref.set({ ...mine, created_at: toDate(key.created_at) ?? now, previous_application_id: holderId || null });
+  const after = ((await ref.get()).data() ?? {}) as Record<string, unknown>;
+  if (after.application_id !== application_id) {
+    return { ok: false, holder_id: String(after.application_id ?? ''), holder: null };
+  }
+  return { ok: true };
+}
+
+/** Lets go of a key this submission claimed but could not use (its application was never written). Best effort. */
+export async function releaseApplicationKey(
+  db: Firestore,
+  args: { market_id: string; season: string; email: string; application_id: string },
+): Promise<void> {
+  const ref = db.collection('application_keys').doc(applicationKeyId(args.market_id, args.season, args.email));
+  try {
+    const key = (await ref.get()).data() as Record<string, unknown> | undefined;
+    if (key && key.application_id === args.application_id) await ref.delete();
+  } catch {
+    // The key goes stale by itself after APPLICATION_KEY_PENDING_MS.
+  }
+}
+
+/* ── A lock for one staff action at a time (fix X3e) ── */
+
+export type StaffLock = { acquired: true; run_id: string } | { acquired: false };
+
+/**
+ * Takes `workflow_locks/<id>` with the atomic `create()`: of any number of
+ * staff requests arriving together exactly one acquires it. A lock younger
+ * than the engine's CLAIM_TTL_MS that someone else holds is refused; an older
+ * one belongs to a request that died and is taken over (the takeover is a
+ * read then a `set()`, the engine's documented residual race).
+ */
+export async function acquireStaffLock(db: Firestore, id: string, actor: string, now: Date): Promise<StaffLock> {
+  const ref = db.collection('workflow_locks').doc(id);
+  const run_id = uuid();
+  try {
+    await ref.create({ key: id, claimed_at: now, claimed_by: actor, run_id, created_at: now });
+    return { acquired: true, run_id };
+  } catch (err) {
+    if (!isAlreadyExists(err)) throw err;
+  }
+  const lock = ((await ref.get()).data() ?? {}) as Record<string, unknown>;
+  const claimedAt = toDate(lock.claimed_at);
+  if (claimedAt && now.getTime() - claimedAt.getTime() < CLAIM_TTL_MS) return { acquired: false };
+  await ref.set({
+    key: id,
+    claimed_at: now,
+    claimed_by: actor,
+    run_id,
+    taken_over_from: typeof lock.run_id === 'string' ? lock.run_id : null,
+    created_at: toDate(lock.created_at) ?? now,
+  });
+  return { acquired: true, run_id };
+}
+
+/** Releases a lock this request still holds, so a refused or failed action can be retried at once. Best effort. */
+export async function releaseStaffLock(db: Firestore, id: string, lock: StaffLock): Promise<void> {
+  if (!lock.acquired) return;
+  const ref = db.collection('workflow_locks').doc(id);
+  try {
+    const current = (await ref.get()).data() as Record<string, unknown> | undefined;
+    if (current && current.run_id === lock.run_id) await ref.delete();
+  } catch {
+    // It goes stale by itself after CLAIM_TTL_MS.
+  }
+}
+
+/** `workflow_locks` id of the approval of one application. */
+export function approvalLockId(applicationId: string): string {
+  return `application_approve__${applicationId}`;
+}
+
+/** `workflow_locks` id of "a producer is being created or merged for this email": never two producers for one address. */
+export function producerIdentityLockId(email: string): string {
+  return `producer_identity__${crypto.createHash('sha256').update(email.trim().toLowerCase(), 'utf8').digest('hex')}`;
 }
