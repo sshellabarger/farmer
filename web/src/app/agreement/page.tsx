@@ -163,6 +163,7 @@ function AgreementInner({ token }: { token: string }) {
         )}
       </Card>
 
+      {v.can_sign && (
       <Card>
         <div className="space-y-4">
           <TextField
@@ -184,6 +185,7 @@ function AgreementInner({ token }: { token: string }) {
           </div>
         </div>
       </Card>
+      )}
     </PublicShell>
   );
 }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import { agreementRoutes } from '../src/routes/agreements.js';
 import { fakeDb } from './helpers/fake-db.js';
+import { agreementTextHash } from '../src/services/agreements.js';
 import { DEFAULT_WORKFLOW, DEFAULT_QUIET_HOURS } from '../src/services/markets.js';
 import { mintPurposeToken, resolvePurposeToken } from '../src/services/purpose-tokens.js';
 import { generateToken } from '../src/services/link-tokens.js';
@@ -76,7 +77,7 @@ describe('GET /api/agreements/:token', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       status: 'open', market_name: 'West Little Rock Farmers Market', season: '2027', business_name: 'Acme Farm', contact_name: 'Alice Apple',
-      hold_harmless_markdown: HH_TEXT, hold_harmless_version: '2027-1', insurance_help_url: 'https://example.test/insurance.pdf',
+      hold_harmless_markdown: HH_TEXT, hold_harmless_version: '2027-1', can_sign: true, insurance_help_url: 'https://example.test/insurance.pdf',
       signed: null, expires_at: new Date(NOW.getTime() + 60 * 86_400_000).toISOString(),
     });
     expect(res.headers['cache-control']).toBe('no-store');
@@ -122,7 +123,8 @@ describe('POST /api/agreements/:token', () => {
     expect(res.json()).toEqual({ ok: true, signed: { name: 'Alice Apple', signed_at: NOW.toISOString() }, membership_status: 'active' });
 
     const m = db.dump('producer_memberships').p1_wlrfm_2027 as any;
-    expect(m.hold_harmless).toEqual({ signed_at: NOW, name: 'Alice Apple', ip: expect.any(String), version: '2027-1', token: t.token });
+    expect(m.hold_harmless).toEqual({ signed_at: NOW, name: 'Alice Apple', ip: expect.any(String), version: '2027-1', text_sha256: agreementTextHash(HH_TEXT), token: t.token });
+    expect(m.hold_harmless.text_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(m.hold_harmless.ip).not.toBe('');
     expect(m.status).toBe('active');
     expect(m.history).toHaveLength(2);
@@ -140,6 +142,34 @@ describe('POST /api/agreements/:token', () => {
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ actor_id: 'producer:p1', actor_role: 'producer', target: { collection: 'producer_memberships', id: 'p1_wlrfm_2027' } });
     expect(JSON.stringify(audit[0])).not.toContain('Alice Apple');
+  });
+
+  it('refuses to sign while the market has not published its Hold Harmless text, and signs once it has', async () => {
+    const db = seed();
+    await db.collection('farmers_markets').doc('wlrfm').update({ 'legal.hold_harmless_markdown': '   ' });
+    const t = await mint(db);
+    const app = await buildApp(db);
+
+    const view = await get(app, t.token);
+    expect(view.statusCode).toBe(200);
+    expect(view.json()).toMatchObject({ status: 'open', can_sign: false, hold_harmless_markdown: '   ' });
+
+    const res = await sign(app, t.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/not available yet/);
+    const m = db.dump('producer_memberships').p1_wlrfm_2027 as any;
+    expect(m.hold_harmless ?? null).toBeNull();
+    expect(m.status).toBe('approved'); // an empty agreement never activates a membership
+    expect((db.dump('link_tokens')[t.token] as any).uses).toBe(0); // the link is not spent
+    expect(db.count('workflow_locks')).toBe(0); // refused before any lock
+
+    // The manager pastes the text: the same link now works.
+    await db.collection('farmers_markets').doc('wlrfm').update({ 'legal.hold_harmless_markdown': HH_TEXT });
+    expect((await get(app, t.token)).json().can_sign).toBe(true);
+    const ok = await sign(app, t.token);
+    expect(ok.statusCode).toBe(200);
+    expect((db.dump('producer_memberships').p1_wlrfm_2027 as any).status).toBe('active');
+    expect((await get(app, t.token)).json()).toMatchObject({ status: 'signed', can_sign: false });
   });
 
   it('a second signature is a 409 and changes nothing; the link then shows the signed state', async () => {

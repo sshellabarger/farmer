@@ -307,6 +307,8 @@ export interface AgreementView {
   contact_name: string;
   hold_harmless_markdown: string;
   hold_harmless_version: string;
+  /** False until the market publishes its Hold Harmless text (or once signed). */
+  can_sign: boolean;
   insurance_help_url: string | null;
   signed: { name: string; signed_at: string } | null;
   expires_at: string;

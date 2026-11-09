@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
 import { isAlreadyExists } from '../db/firestore.js';
@@ -85,9 +86,20 @@ export interface AgreementViewBody {
   contact_name: string;
   hold_harmless_markdown: string;
   hold_harmless_version: string;
+  /**
+   * False while the market has not published its Hold Harmless text: nobody
+   * can be asked to sign an empty agreement. The page shows a notice instead
+   * of the form and POST answers 409.
+   */
+  can_sign: boolean;
   insurance_help_url: string | null;
   signed: { name: string; signed_at: Date } | null;
   expires_at: Date;
+}
+
+/** sha256 of the exact agreement text a producer was shown — stored with the signature. */
+export function agreementTextHash(markdown: string): string {
+  return crypto.createHash('sha256').update(markdown, 'utf8').digest('hex');
 }
 
 export function buildAgreementView(ctx: AgreementContext, token: PurposeTokenDoc): AgreementViewBody {
@@ -102,6 +114,7 @@ export function buildAgreementView(ctx: AgreementContext, token: PurposeTokenDoc
     hold_harmless_markdown: legal.hold_harmless_markdown,
     // The version the producer signed, if any; otherwise the one they are being asked to sign.
     hold_harmless_version: hh?.version || legal.hold_harmless_version,
+    can_sign: !hh && legal.hold_harmless_markdown.trim().length > 0,
     insurance_help_url: legal.insurance_help_url,
     signed: hh ? { name: hh.name, signed_at: hh.signed_at } : null,
     expires_at: token.expires_at,
@@ -128,6 +141,11 @@ export async function signAgreement(
   const { membership } = ctx;
   if (membership.hold_harmless) return { ok: false, status: 409, error: 'Already signed' };
   if (membership.status === 'inactive') return { ok: false, status: 409, error: 'This membership is inactive' };
+  // An empty agreement cannot be signed: the signature would attest to nothing
+  // and would still activate the membership.
+  if (legalOf(ctx.market).hold_harmless_markdown.trim().length === 0) {
+    return { ok: false, status: 409, error: 'The agreement is not available yet. Please contact the market manager.' };
+  }
 
   const lockRef = db.collection('workflow_locks').doc(`agreement__${membership.id}`);
   try {
@@ -151,7 +169,15 @@ export async function signAgreement(
 
   const legal = legalOf(ctx.market);
   const update: Record<string, unknown> = {
-    hold_harmless: { signed_at: now, name: input.name, ip: input.ip, version: legal.hold_harmless_version, token: token.token },
+    hold_harmless: {
+      signed_at: now,
+      name: input.name,
+      ip: input.ip,
+      version: legal.hold_harmless_version,
+      // The version label is the market's to edit; the hash pins the exact text that was signed.
+      text_sha256: agreementTextHash(legal.hold_harmless_markdown),
+      token: token.token,
+    },
     updated_at: now,
   };
   let nextStatus = String(fresh.status ?? membership.status);

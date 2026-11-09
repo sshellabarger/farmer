@@ -49,6 +49,8 @@ export interface HoldHarmless {
   name: string;
   ip: string;
   version: string;
+  /** sha256 of the exact agreement text that was signed ('' on signatures recorded before this field existed). */
+  text_sha256: string;
   token: string;
 }
 
@@ -173,6 +175,7 @@ function holdHarmlessFromData(raw: unknown): HoldHarmless | null {
     name: typeof h.name === 'string' ? h.name : '',
     ip: typeof h.ip === 'string' ? h.ip : '',
     version: typeof h.version === 'string' ? h.version : '',
+    text_sha256: typeof h.text_sha256 === 'string' ? h.text_sha256 : '',
     token: typeof h.token === 'string' ? h.token : '',
   };
 }
