@@ -764,6 +764,27 @@ describe('PATCH /api/applications/:id approve', () => {
     expect(Object.values(db.dump('link_tokens')).filter((t) => t.purpose === 'agreement')).toHaveLength(1);
   });
 
+  it('refuses to send the acceptance while the Hold Harmless text is missing; approving without sending still works', async () => {
+    const db = seed();
+    await db.collection('farmers_markets').doc('wlrfm').update({ 'legal.hold_harmless_markdown': '' });
+    const app = await boot(db);
+    const id = (await submit(app)).json().id;
+
+    const refused = await approve(app, id);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ code: 'hold_harmless_missing' });
+    // Nothing was written or sent by the refusal.
+    expect((db.dump('applications')[id] as Record<string, unknown>).status).not.toBe('approved');
+    expect(Object.values(db.dump('link_tokens')).filter((t) => t.purpose === 'agreement')).toHaveLength(0);
+    expect(rowsOfKind(db, 'acceptance')).toHaveLength(0);
+    expect(emailPrints()).toHaveLength(0);
+
+    const quiet = await approve(app, id, { send: false });
+    expect(quiet.statusCode).toBe(200);
+    expect(quiet.json().sends).toEqual({ sms: 'skipped_not_requested', email: false });
+    expect((db.dump('applications')[id] as Record<string, unknown>).status).toBe('approved');
+  });
+
   it('does not text an opted-out producer', async () => {
     const db = seed({
       producers: { p1: { business_name: 'Testfield Farm', emails: ['owner@testfield.example'], phone: null, aliases: [], active: true, sms_opt_out_at: new Date('2026-10-01') } },

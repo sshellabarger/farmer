@@ -636,6 +636,16 @@ export async function applicationRoutes(app: FastifyInstance) {
       }
     }
 
+    // The acceptance message carries the Hold Harmless link. Until the market has
+    // published that text the link opens an agreement nobody can sign, so do not
+    // send it: add the text first, or approve without sending.
+    if (input.send && marketLegal(market).hold_harmless_markdown.trim().length === 0) {
+      return reply.status(409).send({
+        error: 'Add the Hold Harmless text under Legal texts before sending acceptance messages, or approve without sending.',
+        code: 'hold_harmless_missing',
+      });
+    }
+
     // Who is this? A prefilled application names its producer; otherwise match by email (never by name).
     let knownProducerId: string | null = null;
     if (typeof before.prefill_producer_id === 'string') {
