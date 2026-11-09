@@ -242,6 +242,7 @@ function ProductBlock({
                 id={`permit_file_${t.key}`}
                 label="Permit file"
                 kind="permit"
+                marketId={config.market.id}
                 draftId={draftId}
                 limits={config.limits}
                 value={permit.upload_id ? { upload_id: permit.upload_id, name: uploadedName } : null}

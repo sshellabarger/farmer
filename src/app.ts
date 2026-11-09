@@ -91,6 +91,19 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
   // that moment, so a handler set afterwards never applies to them.
   app.setErrorHandler(createErrorHandler({ env, notify: notifyOnError }));
 
+  // A flood cap being reached is not an error response, but staff must hear
+  // about it. Same channel and the same per-signature throttle as a 5xx, and
+  // silent wherever 5xx alerts are (local dev, tests).
+  const alertStaff = async (message: string, source: string): Promise<void> => {
+    if (!notifyOnError) return;
+    try {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err: new Error(message), source });
+    } catch (e) {
+      console.error('notifyError failed:', e);
+    }
+  };
+
   // Health check. Registered at both paths because the Firebase Hosting
   // rewrite only forwards /api/** to the function; /health alone is only
   // reachable on the raw function URL or the local dev server.
@@ -111,7 +124,7 @@ export async function buildApp({ db, env, logLevel = 'info', notifyOnError = tru
   await app.register(marketRoutes, { prefix: '/api/markets' });
   await app.register(producerRoutes, { prefix: '/api/producers' });
   await app.register(membershipRoutes, { prefix: '/api/memberships' });
-  await app.register(applicationRoutes, { prefix: '/api/applications' });
+  await app.register(applicationRoutes, { prefix: '/api/applications', alertStaff });
   await app.register(checkinRoutes, { prefix: '/api/checkins' });
   await app.register(checkinPublicRoutes, { prefix: '/api/checkin' });
   await app.register(marketDateRoutes, { prefix: '/api/market-dates' });

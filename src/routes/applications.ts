@@ -22,6 +22,8 @@ import { localToUtc } from '../utils/tz.js';
 import type { FarmersMarket, ProductTypeConfig } from '../services/markets.js';
 import { applicationsOpen, marketCategories, marketFees, marketLegal, marketPaymentLinks, marketProductTypes } from '../services/markets.js';
 import {
+  MARKET_ID_RE,
+  SUBMISSION_LIMITS,
   applicationSubmitSchema,
   buildApplicationConfig,
   computeSeasonTotal,
@@ -36,8 +38,10 @@ import {
 } from '../services/applications.js';
 import {
   DRAFT_ID_RE,
+  UPLOAD_LIMITS,
   UploadError,
   saveApplicationUpload,
+  utcDay,
   type UploadMeta,
 } from '../services/application-uploads.js';
 import { currentSeason, findMembership, listMembershipsForProducer, membershipFromData } from '../services/seasons.js';
@@ -119,8 +123,21 @@ function checkPermits(types: ProductTypeConfig[], selected: ProductEntry[], perm
   return null;
 }
 
-export async function applicationRoutes(app: FastifyInstance) {
+/**
+ * Tells staff about something that is not an error response but needs a human
+ * (a flood cap was reached). `buildApp()` supplies it; it is throttled per
+ * message by the alert pipeline and never throws. Absent (a route mounted on
+ * its own in a test, or `notifyOnError: false`) nothing is sent.
+ */
+export type AlertStaff = (message: string, source: string) => Promise<void>;
+
+export interface ApplicationRouteOptions {
+  alertStaff?: AlertStaff;
+}
+
+export async function applicationRoutes(app: FastifyInstance, opts: ApplicationRouteOptions = {}) {
   const adminOnly = [authenticate(app), requireRole('admin')];
+  const alertStaff: AlertStaff = opts.alertStaff ?? (async () => {});
 
   // ─────────────────────────── public ───────────────────────────
 
@@ -133,9 +150,15 @@ export async function applicationRoutes(app: FastifyInstance) {
     return buildApplicationConfig(app.db, market, new Date());
   });
 
-  // POST /api/applications/uploads (multipart: draft_id, kind, file)
+  // POST /api/applications/uploads (multipart: market, draft_id, kind, file)
+  //
+  // Fix X2: a file is only accepted for a market that exists, is active and is
+  // taking applications right now, so the endpoint is closed outside a season's
+  // window. The per-IP limit, the per-draft cap and the global daily cap
+  // (application-uploads.ts) bound what one caller, one draft and everyone
+  // together can store.
   app.post('/uploads', { config: { rateLimit: { max: 20, timeWindow: '1 hour' } } }, async (request, reply) => {
-    if (!request.isMultipart()) return reply.status(400).send({ error: 'Send multipart/form-data with draft_id, kind and file' });
+    if (!request.isMultipart()) return reply.status(400).send({ error: 'Send multipart/form-data with market, draft_id, kind and file' });
     const fields: Record<string, string> = {};
     let file: { filename: string; mimetype: string; buffer: Buffer } | null = null;
     let extraFiles = 0;
@@ -162,6 +185,12 @@ export async function applicationRoutes(app: FastifyInstance) {
     if (extraFiles > 0) return reply.status(400).send({ error: 'Send one file at a time' });
     if (!fields.draft_id || !DRAFT_ID_RE.test(fields.draft_id)) return reply.status(400).send({ error: 'draft_id must be a UUID' });
     if (!fields.kind) return reply.status(400).send({ error: 'kind is required' });
+    if (!fields.market || !MARKET_ID_RE.test(fields.market)) return reply.status(400).send({ error: 'market is required' });
+
+    const now = new Date();
+    const market = await loadMarket(app.db, fields.market);
+    if (!market || market.active !== true) return reply.status(404).send({ error: 'Market not found' });
+    if (!applicationsOpen(market, now)) return reply.status(409).send({ error: 'Applications are closed for this market' });
 
     try {
       const saved = await saveApplicationUpload({
@@ -173,11 +202,19 @@ export async function applicationRoutes(app: FastifyInstance) {
         mime: file.mimetype,
         buffer: file.buffer,
         ip: request.ip,
-        now: new Date(),
+        now,
       });
       return reply.status(201).send(saved);
     } catch (err) {
-      if (err instanceof UploadError) return reply.status(err.status).send({ error: err.message });
+      if (err instanceof UploadError) {
+        if (err.status === 503) {
+          await alertStaff(
+            `Application uploads reached the daily cap of ${UPLOAD_LIMITS.daily_global} files; more are refused until 00:00 UTC`,
+            'api:applications/uploads',
+          );
+        }
+        return reply.status(err.status).send({ error: err.message });
+      }
       throw err;
     }
   });
@@ -266,6 +303,13 @@ export async function applicationRoutes(app: FastifyInstance) {
     const links = marketPaymentLinks(market);
     const marketCount = summarizeSeason(market).summary.market_count;
     const existingSnap = await app.db.collection('applications').where('market_id', '==', market.id).get();
+    const today = utcDay(now);
+    let submittedToday = 0;
+    for (const d of existingSnap.docs) {
+      const a = d.data() as Rec;
+      const submittedAt = toDate(a.submitted_at);
+      if (submittedAt && utcDay(submittedAt) === today) submittedToday += 1;
+    }
     for (const d of existingSnap.docs) {
       const a = d.data() as Rec;
       if (a.season !== season || a.status === 'declined' || a.status === 'withdrawn') continue;
@@ -280,6 +324,17 @@ export async function applicationRoutes(app: FastifyInstance) {
         });
       }
       return reply.status(409).send({ error: 'We already have an application for this email this season', application_id: d.id });
+    }
+
+    // Flood backstop (fix X2): a market takes at most SUBMISSION_LIMITS.daily_per_market new
+    // applications per UTC day, whoever sends them. A repeat of an accepted submission and a
+    // duplicate were answered above and never count against it.
+    if (submittedToday >= SUBMISSION_LIMITS.daily_per_market) {
+      await alertStaff(
+        `Applications for market ${market.id} reached the daily cap of ${SUBMISSION_LIMITS.daily_per_market}; more are refused until 00:00 UTC`,
+        'api:applications',
+      );
+      return reply.status(503).send({ error: 'We cannot accept more applications today. Please try again tomorrow, or contact the market manager.' });
     }
 
     const season_total = computeSeasonTotal(

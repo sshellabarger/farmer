@@ -25,10 +25,13 @@ const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('j
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png'.repeat(30))]);
 const HEIC = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypheic'), Buffer.alloc(40)]);
 
-const send = (app: FastifyInstance, fields: Record<string, string>, file?: { name: string; type: string; data: Buffer }) => {
+/** Every upload names its market (fix X2); `sendRaw` sends exactly the fields it is given. */
+const sendRaw = (app: FastifyInstance, fields: Record<string, string>, file?: { name: string; type: string; data: Buffer }) => {
   const mp = multipart(fields, file);
   return app.inject({ method: 'POST', url: '/api/applications/uploads', headers: mp.headers, payload: mp.payload });
 };
+const send = (app: FastifyInstance, fields: Record<string, string>, file?: { name: string; type: string; data: Buffer }) =>
+  sendRaw(app, { market: 'wlrfm', ...fields }, file);
 
 describe('POST /api/applications/uploads', () => {
   it.each([
@@ -54,11 +57,13 @@ describe('POST /api/applications/uploads', () => {
       bytes: data.length,
       original_name: name,
       ip: '127.0.0.1',
+      day: '2026-12-15',
       attached_at: null,
       storage_path: `application-uploads/2026/${DRAFT_ID}/${body.upload_id}.${ext}`,
       sha256: crypto.createHash('sha256').update(data).digest('hex'),
     });
-    expect((doc.expires_at as Date).getTime() - (doc.uploaded_at as Date).getTime()).toBe(14 * 24 * 60 * 60 * 1000);
+    // An upload nobody attaches is purged after 48 hours (fix X2); `expires_at` says when.
+    expect((doc.expires_at as Date).getTime() - (doc.uploaded_at as Date).getTime()).toBe(48 * 60 * 60 * 1000);
     const stored = app.fake.dump().get(doc.storage_path as string)!;
     expect(stored.contentType).toBe(type);
     expect(stored.buffer.equals(data)).toBe(true);
@@ -112,8 +117,11 @@ describe('POST /api/applications/uploads', () => {
     expect((await send(app, { draft_id: DRAFT_ID, kind: 'selfie' }, file)).statusCode).toBe(400);
     expect((await send(app, { draft_id: DRAFT_ID, kind: 'permit' })).statusCode).toBe(400);
     expect((await send(app, { draft_id: DRAFT_ID, kind: 'permit' }, { name: 'a.pdf', type: 'application/pdf', data: Buffer.alloc(0) })).statusCode).toBe(400);
-    const json = await app.inject({ method: 'POST', url: '/api/applications/uploads', payload: { draft_id: DRAFT_ID, kind: 'permit' } });
+    const json = await app.inject({ method: 'POST', url: '/api/applications/uploads', payload: { market: 'wlrfm', draft_id: DRAFT_ID, kind: 'permit' } });
     expect(json.statusCode).toBe(400);
+    // The market is a required field too.
+    expect((await sendRaw(app, { draft_id: DRAFT_ID, kind: 'permit' }, file)).statusCode).toBe(400);
+    expect((await sendRaw(app, { market: 'Not A Slug', draft_id: DRAFT_ID, kind: 'permit' }, file)).statusCode).toBe(400);
   });
 
   it('keeps only the base name of the original file name', async () => {

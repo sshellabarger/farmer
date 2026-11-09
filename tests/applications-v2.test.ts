@@ -39,7 +39,7 @@ const smsPrints = () => log.mock.calls.filter((c) => String(c[0]).startsWith('[s
 
 /** Upload a PDF for a draft through the real route; returns its id. */
 async function upload(app: FastifyInstance, draft = DRAFT_ID, kind = 'permit') {
-  const mp = multipart({ draft_id: draft, kind }, { name: 'permit.pdf', type: 'application/pdf', data: PDF_BYTES });
+  const mp = multipart({ market: 'wlrfm', draft_id: draft, kind }, { name: 'permit.pdf', type: 'application/pdf', data: PDF_BYTES });
   const res = await app.inject({ method: 'POST', url: '/api/applications/uploads', headers: mp.headers, payload: mp.payload });
   expect(res.statusCode).toBe(201);
   return res.json().upload_id as string;

@@ -98,7 +98,7 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     expect(prefill.json().last_membership).toMatchObject({ season: '2026' });
 
     // ── A permit upload, then the application ──
-    const up = multipart({ draft_id: DRAFT_ID, kind: 'permit' }, { name: 'dairy-permit.pdf', type: 'application/pdf', data: PDF_BYTES });
+    const up = multipart({ market: 'wlrfm', draft_id: DRAFT_ID, kind: 'permit' }, { name: 'dairy-permit.pdf', type: 'application/pdf', data: PDF_BYTES });
     const upload = await app.inject({ method: 'POST', url: '/api/applications/uploads', payload: up.payload, headers: up.headers });
     expect(upload.statusCode).toBe(201);
     const uploadId = upload.json().upload_id as string;

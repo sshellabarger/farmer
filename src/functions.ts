@@ -95,6 +95,19 @@ export const rollMarketDates = onSchedule(
         cancelled += result.cancelled;
       }
       console.log(`rollMarketDates: ${snap.docs.length} markets, created=${created} updated=${updated} cancelled=${cancelled}`);
+
+      // Phase 4 fix X2: delete the application uploads nobody attached to an
+      // application within 48 hours. Its own try/catch: a purge failure is
+      // alerted, and the roll above has already succeeded and stays that way.
+      try {
+        const { purgeUnattachedUploads } = await import('./services/application-uploads.js');
+        const { firebaseStoragePort } = await import('./services/storage-port.js');
+        const purge = await purgeUnattachedUploads(db, firebaseStoragePort(env), new Date());
+        console.log(`purgeUnattachedUploads: scanned=${purge.scanned} deleted=${purge.deleted} kept=${purge.kept} failed=${purge.failed}`);
+      } catch (purgeErr) {
+        const { notifyError } = await import('./services/error-notify.js');
+        await notifyError({ env, err: purgeErr, source: 'scheduler:purgeUnattachedUploads' }).catch(() => {});
+      }
     } catch (err) {
       const { notifyError } = await import('./services/error-notify.js');
       await notifyError({ env, err, source: 'scheduler:rollMarketDates' }).catch(() => {});

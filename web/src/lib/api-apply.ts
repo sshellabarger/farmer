@@ -13,24 +13,32 @@ import type { PublicMarket } from './types';
 
 const UPLOAD_ERRORS: Record<number, string> = {
   400: 'The upload was missing something. Please try again.',
+  404: 'We could not find that market. Reload the page and try again.',
+  409: 'Applications are closed for this market, so files cannot be uploaded right now.',
   413: 'That file is too large. Please choose a smaller file.',
   415: 'That file type is not accepted. Please upload a PDF, JPG, PNG or HEIC file.',
   429: 'Too many uploads. Please wait a bit and try again.',
+  503: 'We cannot accept more uploads today. Please try again tomorrow, or contact the market manager.',
 };
 
 /** Public application, rules and agreement calls (Phase 4 contract section 4.1). No JWT is involved. */
 export const applyApi = {
   getConfig: (market: string) => request<ApplicationConfig>(`/applications/config${qs({ market })}`),
 
-  /** Multipart upload with progress events. `draft_id` and `kind` go before the file so the server sees them first. */
+  /**
+   * Multipart upload with progress events. `market`, `draft_id` and `kind` go before the file so the server sees them first.
+   * The server only takes a file for a market whose application window is open.
+   */
   upload: (
     file: File,
+    market: string,
     draft_id: string,
     kind: UploadResult['kind'],
     onProgress?: (pct: number) => void,
   ): Promise<UploadResult> =>
     new Promise<UploadResult>((resolve, reject) => {
       const form = new FormData();
+      form.append('market', market);
       form.append('draft_id', draft_id);
       form.append('kind', kind);
       form.append('file', file, file.name);

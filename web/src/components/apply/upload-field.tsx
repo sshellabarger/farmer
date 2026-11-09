@@ -28,6 +28,7 @@ export function UploadField({
   id,
   label,
   kind,
+  marketId,
   draftId,
   limits,
   value,
@@ -37,6 +38,8 @@ export function UploadField({
   id: string;
   label: string;
   kind: UploadResult['kind'];
+  /** The market the application is for: the server only takes files while that market's applications are open. */
+  marketId: string;
   draftId: string;
   limits: ApplicationConfig['limits'];
   value: UploadedFile | null;
@@ -66,7 +69,7 @@ export function UploadField({
     }
     setPct(0);
     try {
-      const res = await applyApi.upload(file, draftId, kind, setPct);
+      const res = await applyApi.upload(file, marketId, draftId, kind, setPct);
       onChange({ upload_id: res.upload_id, name: res.original_name || file.name });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The upload failed. Please try again.');
@@ -116,7 +119,10 @@ export function UploadField({
         onChange={(e) => choose(e.target.files?.[0])}
         className="block w-full text-sm text-earth-700 file:mr-3 file:px-4 file:py-2.5 file:rounded-xl file:border file:border-earth-200 file:bg-white file:text-earth-700 file:font-semibold file:cursor-pointer"
       />
-      <p className="text-xs text-earth-500 mt-1 mb-0">PDF, JPG, PNG or HEIC, up to {formatBytes(limits.upload_max_bytes)}.</p>
+      <p className="text-xs text-earth-500 mt-1 mb-0">
+        PDF, JPG, PNG or HEIC, up to {formatBytes(limits.upload_max_bytes)}.
+        {limits.upload_retention_hours ? ` Files are kept for ${limits.upload_retention_hours} hours while you finish; submit your application within that time.` : ''}
+      </p>
       {error && (
         <p className="text-sm mt-1.5 mb-0" style={{ color: '#B91C1C' }} role="alert">
           {error}

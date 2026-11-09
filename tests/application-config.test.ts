@@ -77,7 +77,7 @@ describe('GET /api/applications/config', () => {
     expect(body.legal.sms_consent_version).toBe('sjca-sms-1');
     expect(body.legal.rules_markdown).toBeUndefined();
     expect(body.legal.hold_harmless_markdown).toBeUndefined();
-    expect(body.limits).toEqual({ upload_max_bytes: 10 * 1024 * 1024, upload_mimes: ['application/pdf', 'image/jpeg', 'image/png', 'image/heic', 'image/heif'], stall_preference_max: 3 });
+    expect(body.limits).toEqual({ upload_max_bytes: 10 * 1024 * 1024, upload_mimes: ['application/pdf', 'image/jpeg', 'image/png', 'image/heic', 'image/heif'], stall_preference_max: 3, upload_retention_hours: 48 });
     expect(body.payment_links.application_fee_url).toContain('{email}'); // the template; the submit response fills it
   });
 

@@ -131,7 +131,8 @@ export interface ApplicationConfig {
   frequencies: OptionItem[];
   months: OptionItem[];
   agricultural_practices: OptionItem[];
-  limits: { upload_max_bytes: number; upload_mimes: string[]; stall_preference_max: number };
+  /** `upload_retention_hours`: how long a file nobody submitted is kept (absent from servers that predate the purge). */
+  limits: { upload_max_bytes: number; upload_mimes: string[]; stall_preference_max: number; upload_retention_hours?: number };
 }
 
 /* ── Submission ── */

@@ -50,6 +50,7 @@ export function SectionAgreements({ values, update, config, draftId }: SectionPr
               id="insurance_file"
               label="Certificate of insurance (optional now, required before your first market)"
               kind="insurance"
+              marketId={config.market.id}
               draftId={draftId}
               limits={config.limits}
               value={ins.certificate_upload_id ? { upload_id: ins.certificate_upload_id, name: ins.certificate_name || 'certificate' } : null}

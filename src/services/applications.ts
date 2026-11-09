@@ -30,6 +30,17 @@ export { addressSchema, productEntrySchema };
 
 export const STALL_PREFERENCE_MAX = 3;
 
+/** A market id is its slug (the same pattern `createMarketSchema` enforces). */
+export const MARKET_ID_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+
+/**
+ * Flood backstop for the public submission (Phase 4 fix X2), independent of
+ * the caller's address: at most this many NEW applications per market per UTC
+ * day. The next one is a 503 until 00:00 UTC and staff are alerted. A real
+ * market takes a few dozen applications in a whole season.
+ */
+export const SUBMISSION_LIMITS = { daily_per_market: 150 } as const;
+
 /* ── Option lists (not per market; contract §2.1) ── */
 
 export interface OptionItem {
@@ -88,7 +99,7 @@ export const permitEntrySchema = z
 const ack = (message: string) => z.literal(true, { errorMap: () => ({ message }) });
 
 export const applicationSubmitSchema = z.object({
-  market_id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,31}$/),
+  market_id: z.string().regex(MARKET_ID_RE),
   draft_id: z.string().uuid(),
   prefill_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).nullable().default(null),
   contact: z.object({
@@ -337,7 +348,12 @@ export async function buildApplicationConfig(db: Firestore, market: FarmersMarke
     frequencies: FREQUENCY_OPTIONS,
     months,
     agricultural_practices: AGRICULTURAL_PRACTICE_OPTIONS,
-    limits: { upload_max_bytes: UPLOAD_LIMITS.max_bytes, upload_mimes: [...UPLOAD_LIMITS.mimes], stall_preference_max: STALL_PREFERENCE_MAX },
+    limits: {
+      upload_max_bytes: UPLOAD_LIMITS.max_bytes,
+      upload_mimes: [...UPLOAD_LIMITS.mimes],
+      stall_preference_max: STALL_PREFERENCE_MAX,
+      upload_retention_hours: UPLOAD_LIMITS.unattached_ttl_hours,
+    },
   };
 }
 
