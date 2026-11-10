@@ -15,6 +15,7 @@ import {
   extraQuestionSchema,
   DEFAULT_WORKFLOW,
   DEFAULT_QUIET_HOURS,
+  MARKET_SLUG_RE,
   marketFees,
   marketPaymentLinks,
   marketLegal,
@@ -97,10 +98,14 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   // ─── GET /api/markets/:id/rules (public, Phase 4 §3.1) ───
+  // The id comes straight from a public URL: anything that is not a market slug is a 404
+  // before it reaches Firestore (an id with an encoded slash makes the admin SDK throw, which
+  // would be a 500 and an alert for a stranger's typo). An inactive market publishes nothing.
   app.get('/:id/rules', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
     const { id } = request.params as { id: string };
+    if (!MARKET_SLUG_RE.test(id)) return reply.status(404).send({ error: 'Market not found' });
     const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
+    if (!market || market.active !== true) return reply.status(404).send({ error: 'Market not found' });
     const legal = marketLegal(market);
     if (legal.rules_markdown === '' && legal.rules_url === null) {
       return reply.status(404).send({ error: 'The rules for this market are not published yet' });

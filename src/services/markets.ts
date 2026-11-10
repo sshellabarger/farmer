@@ -244,8 +244,16 @@ const websiteSchema = z.object({
 
 const mailchimpSchema = z.object({ audience_id: z.string(), template_id: z.string() });
 
+/**
+ * A market id is its slug. Public routes test an id against this BEFORE using
+ * it as a document id: the admin SDK throws (a 500 and an alert) on an id
+ * that contains a slash, is empty, or is `.`/`..`, and none of those can be a
+ * market.
+ */
+export const MARKET_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+
 export const createMarketSchema = z.object({
-  slug: z.string().regex(/^[a-z0-9][a-z0-9-]{1,31}$/),
+  slug: z.string().regex(MARKET_SLUG_RE),
   name: z.string().min(1),
   location: z.object({ name: z.string().min(1), address: z.string().optional().default('') }),
   timezone: timezoneString.default('America/Chicago'),

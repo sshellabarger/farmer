@@ -129,6 +129,41 @@ describe('GET /api/markets/:id/rules', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().rules_url).toBe('https://rules.test.example/2027.pdf');
   });
+
+  it('404s an inactive market even when it has rules', async () => {
+    const db = seed({ farmers_markets: { wlrfm: market(), gone: market({ slug: 'gone', active: false }) } });
+    expect((await get(db, '/api/markets/gone/rules')).statusCode).toBe(404);
+    expect((await get(db, '/api/markets/wlrfm/rules')).statusCode).toBe(200);
+  });
+
+  it('404s an id that is not a market slug without asking Firestore (the admin SDK throws on such ids)', async () => {
+    const db = seed();
+    // What the real SDK does with a document id that is empty, has a slash, or is reserved.
+    const collection = db.collection.bind(db);
+    const asked: string[] = [];
+    db.collection = ((name: string) => {
+      const col = collection(name);
+      if (name !== 'farmers_markets') return col;
+      const doc = col.doc.bind(col);
+      col.doc = ((id?: string) => {
+        asked.push(String(id));
+        if (!id || id.includes('/') || id === '.' || id === '..' || /^__.*__$/.test(id)) {
+          throw new Error(`Value for argument "documentPath" is not a valid resource path: "${id}"`);
+        }
+        return doc(id);
+      }) as never;
+      return col;
+    }) as never;
+    const app = await boot(db);
+    for (const bad of ['a%2Fb', 'wlrfm%2Fsecret', '%2Fwlrfm', 'a%2F%2E%2E%2Fb', '__name__', 'WLRFM', 'has%20space', 'x', 'a'.repeat(40), '%00']) {
+      const res = await app.inject({ method: 'GET', url: `/api/markets/${bad}/rules` });
+      expect(res.statusCode, bad).toBe(404);
+    }
+    expect(asked).toEqual([]);
+    // A well-formed id still reaches the database.
+    expect((await app.inject({ method: 'GET', url: '/api/markets/wlrfm/rules' })).statusCode).toBe(200);
+    expect(asked).toEqual(['wlrfm']);
+  });
 });
 
 describe('PATCH /api/markets/:id — season, fees, payment links, legal texts, booth map', () => {

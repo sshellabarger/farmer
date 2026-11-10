@@ -6,6 +6,7 @@ import { isAlreadyExists } from '../db/firestore.js';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
 import { addDays, eachDate, parseDate, weekdayOf } from '../utils/tz.js';
 import {
+  MARKET_SLUG_RE,
   applicationsOpen,
   marketCategories,
   marketFees,
@@ -35,7 +36,7 @@ export { addressSchema, productEntrySchema };
 export const STALL_PREFERENCE_MAX = 3;
 
 /** A market id is its slug (the same pattern `createMarketSchema` enforces). */
-export const MARKET_ID_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+export const MARKET_ID_RE = MARKET_SLUG_RE;
 
 /**
  * Flood backstop for the public submission (Phase 4 fix X2), independent of
