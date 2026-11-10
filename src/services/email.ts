@@ -1,6 +1,7 @@
 import { Resend } from 'resend';
 import type { Env } from '../config/env.js';
 import { SendsDisabledError } from './sms.js';
+import { escapeHtml } from '../utils/html.js';
 
 /**
  * Outbound email. Mirrors the SMS guard (SPEC §7.3): Resend is reachable
@@ -30,6 +31,15 @@ export async function resendSend(resend: Resend, payload: Parameters<Resend['ema
   if (error) throw new Error(`Resend error: ${error.message}`);
 }
 
+/** The name every email carries in its header and footer (Phase 4 fix X6: producers receive these now). */
+export const EMAIL_BRAND = 'SJCA Markets';
+export const EMAIL_ORGANISATION = 'St. Joseph Center of Arkansas';
+
+/**
+ * The page every email is wrapped in. `title` is plain text (the subject) and
+ * is escaped here; `body` is HTML and is inserted as it is, so whoever builds
+ * it escapes what it interpolates (`escapeHtml`, src/utils/html.ts).
+ */
 export function baseLayout(title: string, body: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
   body { font-family: -apple-system, sans-serif; color: #1a1a1a; margin: 0; padding: 0; background: #f5f5f0; }
@@ -41,11 +51,15 @@ export function baseLayout(title: string, body: string): string {
   th { text-align: left; padding: 8px 10px; background: #f5f5f0; font-size: 12px; text-transform: uppercase; }
   td { padding: 10px; border-bottom: 1px solid #f0f0eb; }
   .footer { padding: 16px 32px; background: #f5f5f0; font-size: 12px; color: #999; text-align: center; }
-  </style></head><body><div class="wrapper"><div class="header"><h1>FarmLink</h1><p>${title}</p></div><div class="body">${body}</div><div class="footer">FarmLink</div></div></body></html>`;
+  </style></head><body><div class="wrapper"><div class="header"><h1>${EMAIL_BRAND}</h1><p>${escapeHtml(title)}</p></div><div class="body">${body}</div><div class="footer">${EMAIL_ORGANISATION} - ${EMAIL_BRAND}</div></div></body></html>`;
 }
 
 /**
- * Send a simple HTML email. `message` may contain HTML; newlines become <br>.
+ * Send a simple HTML email. `message` IS HTML (newlines become <br>): it is
+ * inserted into the page unescaped, so the caller escapes every value it did
+ * not write itself with `escapeHtml` (the error alerts and the deadline
+ * summary build their own markup; the producer-facing bodies in invites.ts
+ * escape each interpolated value). `subject` is plain text.
  * Throws SendsDisabledError when the real provider is configured outside
  * production + ALLOW_REAL_SENDS; the console provider logs and resolves.
  */

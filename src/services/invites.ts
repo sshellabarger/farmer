@@ -3,6 +3,7 @@ import type { Env } from '../config/env.js';
 import { isAlreadyExists } from '../db/firestore.js';
 import { localToUtc, addDays } from '../utils/tz.js';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
+import { escapeHtml, htmlLink } from '../utils/html.js';
 import { sendEmail } from './email.js';
 import { trySendSms, type TrySendSmsResult } from './sms.js';
 import { applicationsOpen, marketFees, quietUntil, type FarmersMarket } from './markets.js';
@@ -207,16 +208,27 @@ export function inviteFromData(data: Record<string, unknown>): ApplicationInvite
   };
 }
 
-function inviteEmailBody(market: FarmersMarket, season: string, link: string, appUrl: string): string {
+/** `${APP_URL}/rules?market=<id>`: the public rules page of a market. */
+function rulesUrl(appUrl: string, marketId: string): string {
+  return `${appUrl.replace(/\/+$/, '')}/rules?market=${encodeURIComponent(marketId)}`;
+}
+
+/**
+ * The invitation email. The body is HTML (`sendEmail` inserts it as it is,
+ * turning newlines into <br>): every interpolated value goes through
+ * `escapeHtml`, and every address through `htmlLink` (Phase 4 fix X6).
+ */
+export function inviteEmailBody(market: FarmersMarket, season: string, link: string, appUrl: string): string {
   const fees = marketFees(market);
+  const e = escapeHtml;
   return [
     `Hello,`,
     ``,
-    `Applications for the ${season} ${market.name} season are open. Every vendor applies again each season. Your returning-vendor application is already filled in with what we have on file; please review it and submit it here:`,
-    link,
+    `Applications for the ${e(season)} ${e(market.name)} season are open. Every vendor applies again each season. Your returning-vendor application is already filled in with what we have on file; please review it and submit it here:`,
+    htmlLink(link),
     ``,
-    `A non-refundable application fee of $${fees.application_fee} is paid after you submit.`,
-    `Market rules: ${appUrl.replace(/\/+$/, '')}/rules?market=${encodeURIComponent(market.id)}`,
+    `A non-refundable application fee of $${e(fees.application_fee)} is paid after you submit.`,
+    `Market rules: ${htmlLink(rulesUrl(appUrl, market.id))}`,
     ``,
     `St. Joseph Center of Arkansas - SJCA Markets`,
   ].join('\n');
@@ -591,7 +603,12 @@ export interface AcceptanceTotals {
   installments: number;
 }
 
-function acceptanceEmailBody(p: {
+/**
+ * The acceptance email. HTML, like the invitation: the first name is what the
+ * applicant typed on the public form, so it and every other interpolated
+ * value is escaped (Phase 4 fix X6).
+ */
+export function acceptanceEmailBody(p: {
   market: FarmersMarket;
   season: string;
   firstName: string;
@@ -603,33 +620,34 @@ function acceptanceEmailBody(p: {
   appUrl: string;
 }): string {
   const t = p.totals;
+  const e = escapeHtml;
   const lines: string[] = [];
-  lines.push(p.firstName ? `Hello ${p.firstName},` : 'Hello,');
+  lines.push(p.firstName ? `Hello ${e(p.firstName)},` : 'Hello,');
   lines.push('');
-  lines.push(`Your ${p.season} ${p.market.name} application has been approved.`);
+  lines.push(`Your ${e(p.season)} ${e(p.market.name)} application has been approved.`);
   lines.push('');
   lines.push(
-    `Booth: ${t.rate === 'seasonal' ? 'seasonal' : 'daily'} rate, ${t.spaces} ${t.spaces === 1 ? 'space' : 'spaces'}, electricity ${t.electric ? 'yes' : 'no'}${t.rate === 'seasonal' ? `, ${t.pay_in_full ? 'paying in full' : 'paying in installments'}` : ''}.`,
+    `Booth: ${t.rate === 'seasonal' ? 'seasonal' : 'daily'} rate, ${e(t.spaces)} ${t.spaces === 1 ? 'space' : 'spaces'}, electricity ${t.electric ? 'yes' : 'no'}${t.rate === 'seasonal' ? `, ${t.pay_in_full ? 'paying in full' : 'paying in installments'}` : ''}.`,
   );
   lines.push(
     t.basis === 'per_market'
-      ? `Booth fee: $${t.total} per market.`
-      : `Booth fee: $${t.total} for the season${t.installments > 1 ? `, in ${t.installments} installments` : ''}.`,
+      ? `Booth fee: $${e(t.total)} per market.`
+      : `Booth fee: $${e(t.total)} for the season${t.installments > 1 ? `, in ${e(t.installments)} installments` : ''}.`,
   );
   lines.push('');
-  lines.push(`Step 1 - sign the Hold Harmless agreement: ${p.agreementUrl}`);
-  if (p.boothFeeUrl) lines.push(`Step 2 - pay your booth fee: ${p.boothFeeUrl}`);
+  lines.push(`Step 1 - sign the Hold Harmless agreement: ${htmlLink(p.agreementUrl)}`);
+  if (p.boothFeeUrl) lines.push(`Step 2 - pay your booth fee: ${htmlLink(p.boothFeeUrl)}`);
   lines.push('');
   lines.push(
     'Proof of $1,000,000 general liability insurance naming KBK-Breck, LLC c/o Kelley Commercial Partners, The WLRFM and ALFN/West Little Rock Farmers Market as additional insureds is required before your first market day.',
   );
-  if (p.insuranceHelpUrl) lines.push(`Insurance information: ${p.insuranceHelpUrl}`);
+  if (p.insuranceHelpUrl) lines.push(`Insurance information: ${htmlLink(p.insuranceHelpUrl)}`);
   if (p.firstDate) {
     lines.push('');
-    lines.push(`The first market day of the season is ${p.firstDate}.`);
+    lines.push(`The first market day of the season is ${e(p.firstDate)}.`);
   }
   lines.push('');
-  lines.push(`Market rules: ${p.appUrl.replace(/\/+$/, '')}/rules?market=${encodeURIComponent(p.market.id)}`);
+  lines.push(`Market rules: ${htmlLink(rulesUrl(p.appUrl, p.market.id))}`);
   lines.push('');
   lines.push('St. Joseph Center of Arkansas - SJCA Markets');
   return lines.join('\n');
