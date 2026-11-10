@@ -626,9 +626,13 @@ describe('PATCH /api/applications/:id approve', () => {
     const texts = rowsOfKind(db, 'acceptance');
     expect(texts).toHaveLength(1);
     expect(texts[0]).toMatchObject({ id: `acceptance:${id}`, to: APPLICANT_PHONE, producer_id: 'p1', status: 'simulated', application_id: id, membership_id: mid });
-    expect(String(texts[0]!.body)).toContain(`https://test.example/agreement?t=${tokens[0]!.token}`);
-    expect(String(texts[0]!.body)).toContain('Booth fee: $1250. Pay here: https://pay.test.example/booth');
-    expect(String(texts[0]!.body)).toContain('Terry');
+    // The text carries the news, the agreement link and where the details are; the amounts and the
+    // payment link are in the email (fix X14: with them the text was three SMS).
+    expect(String(texts[0]!.body)).toBe(
+      `SJCA Markets: your 2027 West Little Rock Farmers Market application is approved, Terry! Details are in your email.\nSign your Hold Harmless agreement: https://test.example/agreement?t=${tokens[0]!.token as string}\nReply STOP to opt out.`,
+    );
+    expect(String(texts[0]!.body)).not.toMatch(/Booth fee|pay\.test\.example|\$/);
+    expect(texts[0]!.segments).toBe(2);
     expect(String(texts[0]!.body)).toMatch(/^[\x20-\x7e\n]+$/); // ASCII only
     expect(body.sends).toEqual({ sms: 'simulated', email: true, quiet_until: null });
 
@@ -637,6 +641,7 @@ describe('PATCH /api/applications/:id approve', () => {
     const email = printed(log);
     expect(email).toContain('[SJCA Markets] Your 2027 West Little Rock Farmers Market application is approved');
     expect(email).toContain('Booth fee: $1250 for the season');
+    expect(email).toContain('Step 2 - pay your booth fee: <a href="https://pay.test.example/booth">https://pay.test.example/booth</a>');
     // This market has not written an insurance requirement: the email names no landlord and no amount (fix X7).
     expect(email).not.toMatch(/KBK|additional insured|1,000,000/);
     expect(email).toContain('https://help.test.example/insurance');
@@ -693,7 +698,10 @@ describe('PATCH /api/applications/:id approve', () => {
     expect(producerId).not.toBe('p1');
     expect(db.dump('producers')[producerId]).toMatchObject({ business_name: 'Newbie Gardens', contact_name: 'Nora Newbie', phone: APPLICANT_PHONE, email: 'newbie@example.test', emails: ['newbie@example.test'], active: true, source: 'application' });
     expect(db.dump('producer_memberships')[`${producerId}_wlrfm_2027`]).toMatchObject({ fee_plan: 'daily', spaces: 1 });
-    expect(rowsOfKind(db, 'acceptance')[0]!.body).toContain('per market');
+    // The per-market amount is in the email; the text only points there.
+    expect(String(emailPrints()[0]![3])).toContain('Booth fee: $25 per market.');
+    expect(rowsOfKind(db, 'acceptance')[0]!.body).toContain('Details are in your email.');
+    expect(rowsOfKind(db, 'acceptance')[0]!.body).not.toContain('per market');
   });
 
   it('a different business name for a known email becomes an alias; names never match', async () => {

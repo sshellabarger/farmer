@@ -5,7 +5,7 @@ import { localToUtc, addDays } from '../utils/tz.js';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
 import { escapeHtml, htmlLink } from '../utils/html.js';
 import { sendEmail } from './email.js';
-import { trySendSms, type TrySendSmsResult } from './sms.js';
+import { splitMessage, trySendSms, type TrySendSmsResult } from './sms.js';
 import { applicationsOpen, marketFees, quietUntil, type FarmersMarket } from './markets.js';
 import { listMembershipsForMarket } from './seasons.js';
 import { mintPurposeToken, purposeTokenUrl, resolvePurposeToken } from './purpose-tokens.js';
@@ -50,24 +50,51 @@ function greeting(firstName: string): string {
   return firstName ? `${firstName}, ` : '';
 }
 
+/** The acceptance text is at most this many SMS segments, as `splitMessage` (services/sms.ts) splits it. */
+export const ACCEPTANCE_MAX_SEGMENTS = 2;
+
+/**
+ * The acceptance text (Phase 4 fix X14): the news, the agreement link, where
+ * the details are, and the opt-out line. The amounts and the payment link live
+ * in the email, not here: with them a production-shaped message (a 19-character
+ * APP_URL, a 43-character token, a 31-character market name) was 336
+ * characters and went out as three SMS, the link alone in the second.
+ *
+ * Laid out for `splitMessage`, which breaks at the last newline inside each
+ * 153-character window: the first line is segment one, the link and the
+ * opt-out line together are segment two, so the link is never cut and never
+ * travels alone. A long market name or first name would push the first line
+ * over a segment, so the wording is fitted: with the first name; without it;
+ * then with the market name shortened, a character at a time, until the whole
+ * text is `ACCEPTANCE_MAX_SEGMENTS` segments. When no wording can fit (a link
+ * longer than a segment, or a name outside the GSM alphabet, which drops a
+ * segment to 67 characters) the full wording is sent rather than a mangled one.
+ */
+function acceptanceText(p: { season: string; market_name: string; first_name: string; agreement_link: string; details_in_email: boolean }): string {
+  const head = (firstName: string, marketName: string): string =>
+    `SJCA Markets: your ${p.season} ${marketName} application is approved${firstName ? `, ${firstName}` : ''}!${p.details_in_email ? ' Details are in your email.' : ''}`;
+  const tail = `Sign your Hold Harmless agreement: ${p.agreement_link}\nReply STOP to opt out.`;
+  const build = (firstName: string, marketName: string): string => `${head(firstName, marketName)}\n${tail}`;
+  // Fits: the whole text is within the limit AND the split falls on the line break, so the two
+  // texts that arrive are the two halves as written, never a sentence cut in the middle.
+  const fits = (firstName: string, marketName: string): boolean => {
+    const parts = splitMessage(build(firstName, marketName));
+    return parts.length === 1 || (parts.length <= ACCEPTANCE_MAX_SEGMENTS && parts[0] === head(firstName, marketName));
+  };
+
+  if (fits(p.first_name, p.market_name) || !fits('', '')) return build(p.first_name, p.market_name);
+  let marketName = p.market_name;
+  while (!fits('', marketName) && marketName.length > 0) marketName = marketName.slice(0, -1).trimEnd();
+  return build('', marketName);
+}
+
 export const TEMPLATES_A1 = {
-  /** Sent when an application is approved: the Hold Harmless link and (when the market has one) the booth-fee payment link. */
-  acceptance: (p: {
-    season: string;
-    market_name: string;
-    first_name: string;
-    agreement_link: string;
-    total: number;
-    per_market: boolean;
-    booth_fee_url: string | null;
-  }): string => {
-    const lines = [
-      `SJCA Markets: your ${p.season} ${p.market_name} application is approved${p.first_name ? `, ${p.first_name}` : ''}! Please sign the Hold Harmless agreement here: ${p.agreement_link}`,
-    ];
-    lines.push(`Booth fee: $${p.total}${p.per_market ? ' per market' : ''}.${p.booth_fee_url ? ` Pay here: ${p.booth_fee_url}` : ''}`);
-    lines.push('Reply STOP to opt out.');
-    return lines.join('\n');
-  },
+  /**
+   * Sent when an application is approved. `details_in_email` is true when the
+   * acceptance email went out with it (the fee, the payment link, insurance and
+   * the first market day are there); false leaves that sentence out.
+   */
+  acceptance: acceptanceText,
   application_invite: (p: { season: string; market_name: string; first_name: string; link: string }): string =>
     `SJCA Markets: applications for the ${p.season} ${p.market_name} season are open. ${greeting(p.first_name)}${p.first_name ? 'your' : 'Your'} returning-vendor application is prefilled here: ${p.link}\nReply STOP to opt out.`,
 } as const;
@@ -714,38 +741,8 @@ export async function sendAcceptance(args: {
   const { db, env, market, season } = args;
   const firstName = firstNameOf(args.contactName);
 
-  let sms: SmsOutcome;
-  let quiet_until: Date | null = null;
-  const blocker = textBlocker(args.producer);
-  const quiet = quietUntil(market, args.now);
-  if (blocker) {
-    sms = blocker;
-  } else if (quiet) {
-    sms = 'skipped_quiet_hours';
-    quiet_until = quiet;
-  } else {
-    const result = await trySendSms({
-      env,
-      db,
-      to: args.producer.phone as string,
-      body: TEMPLATES_A1.acceptance({
-        season,
-        market_name: market.name,
-        first_name: firstName,
-        agreement_link: args.agreementUrl,
-        total: args.totals.total,
-        per_market: args.totals.basis === 'per_market',
-        booth_fee_url: args.boothFeeUrl,
-      }),
-      kind: 'acceptance',
-      producer_id: args.producerId,
-      sent_by: args.actor,
-      extra: { application_id: args.applicationId, membership_id: args.membershipId, token: args.agreementToken },
-      dedupe_key: `acceptance:${args.applicationId}`,
-    });
-    sms = smsOutcome(result);
-  }
-
+  // The email goes first: it carries the amounts and the payment link, and the text
+  // only says "details are in your email" when that email really went out.
   let email = false;
   if (env.FROM_EMAIL !== '' || env.EMAIL_PROVIDER === 'console') {
     const outcome = await trySendEmail(
@@ -767,5 +764,36 @@ export async function sendAcceptance(args: {
     );
     email = outcome !== 'failed';
   }
+
+  let sms: SmsOutcome;
+  let quiet_until: Date | null = null;
+  const blocker = textBlocker(args.producer);
+  const quiet = quietUntil(market, args.now);
+  if (blocker) {
+    sms = blocker;
+  } else if (quiet) {
+    sms = 'skipped_quiet_hours';
+    quiet_until = quiet;
+  } else {
+    const result = await trySendSms({
+      env,
+      db,
+      to: args.producer.phone as string,
+      body: TEMPLATES_A1.acceptance({
+        season,
+        market_name: market.name,
+        first_name: firstName,
+        agreement_link: args.agreementUrl,
+        details_in_email: email,
+      }),
+      kind: 'acceptance',
+      producer_id: args.producerId,
+      sent_by: args.actor,
+      extra: { application_id: args.applicationId, membership_id: args.membershipId, token: args.agreementToken },
+      dedupe_key: `acceptance:${args.applicationId}`,
+    });
+    sms = smsOutcome(result);
+  }
+
   return { sms, email, quiet_until };
 }
