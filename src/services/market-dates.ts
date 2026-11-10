@@ -91,7 +91,7 @@ export interface MarketDateActions {
   opener?: AssignmentCycleState | null;
 }
 
-/** Why approved booth texts are not going out: two vendors on one booth, a cancelled target date, or a target that has already started. */
+/** Why approved booth texts are not going out: two vendors on one booth, a cancelled target date still ahead, or a target whose start time has passed (final). */
 export type BoothTextsBlocked = 'conflict' | 'cancelled' | 'started';
 
 /** One booth-assignment cycle (draft, approval, texts) as stored: `actions.*` for the next market, `actions.opener.*` for a season opener. */

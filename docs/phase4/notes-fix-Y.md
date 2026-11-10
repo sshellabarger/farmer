@@ -1,7 +1,7 @@
 # Phase 4 fix notes - fixer Y (booth side)
 
 Branch `rework/p4-fix-booths`, from `rework/p4-fix` (`4332952`). `npm run typecheck && npm test` green
-(51 files, 698 tests); `cd web && npx tsc --noEmit && npx next build` green (22 static routes, no `[param]`).
+(51 files, 699 tests); `cd web && npx tsc --noEmit && npx next build` green (22 static routes, no `[param]`).
 Nothing was deployed, pushed or run against a real project; every test uses the fake DB and the console
 providers.
 
@@ -68,8 +68,9 @@ processes every approved cycle that is not - whatever the date's age, including 
   carries the text type and labels.
 - **Y3 - the target date is validated.** `approveAssignments` refuses (409 `target_cancelled` /
   `target_started`) before taking any lock. `sendBoothTexts` sends nothing for a cancelled target
-  (`booth_texts_blocked = 'cancelled'`, re-checked every tick without a lock, because a date can be
-  un-cancelled) or a started one (`'started'`, final).
+  (`booth_texts_blocked = 'cancelled'`, re-checked every tick without a lock, because a date still ahead
+  can be un-cancelled) or one whose start time has passed (`'started'`, final - also for a cancelled
+  target once its time has passed, so the engine stops looking; the view's `target_cancelled` says which).
 - **Y4 - approved dates are never stranded.** The booth-text step left the per-date loop: after the
   windowed steps the engine walks every collecting date it already loaded and runs the step for each
   approved, unsettled cycle. The "outside the automatic window" warning on the panel is gone.

@@ -724,9 +724,12 @@ function AssignmentsCard({
     }
   };
 
+  // A target whose time has passed reads `started` whether it took place or was cancelled; say which.
+  const holdReason: BoothTextsBlocked | null = a.booth_texts_blocked === 'started' && a.target_cancelled ? 'cancelled' : a.booth_texts_blocked;
+
   const textStatus = (): string => {
     if (!approved) return 'Not approved. No booth texts have gone out.';
-    if (a.booth_texts_blocked) return BLOCKED_TEXT[a.booth_texts_blocked];
+    if (holdReason) return BLOCKED_TEXT[holdReason];
     if (a.booth_texts_due_at) {
       if (a.booth_texts_too_late) return 'Quiet hours end when this market starts, so the texts still owed will NOT be sent. Please call those vendors.';
       if (Date.parse(a.booth_texts_due_at) > Date.now()) return `Booth texts wait for quiet hours to end: ${formatInstant(a.booth_texts_due_at, tz)}.`;
@@ -822,8 +825,8 @@ function AssignmentsCard({
           </Notice>
         </div>
       )}
-      {approved && a.booth_texts_blocked && a.booth_texts_blocked !== 'conflict' && (
-        <div className="mb-3"><Notice kind="warning">{BLOCKED_TEXT[a.booth_texts_blocked]}</Notice></div>
+      {approved && holdReason && holdReason !== 'conflict' && (
+        <div className="mb-3"><Notice kind="warning">{BLOCKED_TEXT[holdReason]}</Notice></div>
       )}
       {approved && !a.booth_texts_blocked && a.booth_texts_too_late && (
         <div className="mb-3"><Notice kind="error">Quiet hours end when this market starts, so the booth texts still owed will NOT be sent. Please call those vendors.</Notice></div>

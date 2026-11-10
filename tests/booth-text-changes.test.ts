@@ -593,6 +593,23 @@ describe('Y3 — the target date is validated', () => {
     expect(actionsOf(db, SOURCE)).toMatchObject({ booth_texts_blocked: null, booth_texts_sent_at: new Date('2026-09-23T13:10:00Z') });
   });
 
+  it('a cancelled target that never comes back stops being re-checked once its start time has passed', async () => {
+    const { db, r } = await approvedInQuietHours();
+    await db.collection('market_dates').doc(TARGET).update({ status: 'cancelled', cancellation_reason: 'storm' });
+    await tick(db, T_0800);
+    expect(actionsOf(db, SOURCE).booth_texts_blocked).toBe('cancelled'); // still ahead: it could be un-cancelled
+
+    const afterStart = new Date('2026-09-26T13:00:00Z');
+    expect((await tick(db, afterStart)).booth_texts_sent).toBe(0);
+    expect(actionsOf(db, SOURCE)).toMatchObject({ booth_texts_blocked: 'started', booth_texts_sent_at: null }); // final
+    const stamp = (db.dump('market_dates')[SOURCE] as any).updated_at;
+    await tick(db, new Date('2026-09-26T13:05:00Z'));
+    expect((db.dump('market_dates')[SOURCE] as any).updated_at).toEqual(stamp); // the engine has stopped looking
+    vi.setSystemTime(afterStart);
+    expect(await r.view()).toMatchObject({ booth_texts_blocked: 'started', target_cancelled: true, target_started: true });
+    expect(boothMessages(db)).toHaveLength(0);
+  });
+
   it('texts whose quiet hours end when the market starts are never sent, and the panel is told so in advance', async () => {
     const { db, r } = await drafted();
     vi.setSystemTime(new Date('2026-09-26T03:00:00Z')); // Fri 22:00 CDT, the night before the target market

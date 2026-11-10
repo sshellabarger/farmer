@@ -1235,8 +1235,9 @@ export async function sendBoothTexts(
   if (!target || target.id !== targetId) throw new Error(`booth texts for ${date.id}: target date ${targetId} not found`);
 
   // A cancelled or started target never produces "your booth on Sat Apr 10 is V1". Decided before any
-  // lock: `cancelled` is re-checked every tick (a date can be un-cancelled) and must not burn a lock each
-  // time; `started` is final and records the version so the engine stops looking.
+  // lock: `cancelled` (a target still ahead) is re-checked every tick - it can be un-cancelled - and must
+  // not burn a lock each time; `started` (its start time has passed, cancelled or not) is final and
+  // records the version so the engine stops looking.
   const targetHold = boothTextsHold(target, 0, now);
   if (targetHold) {
     if (targetHold === 'started') {

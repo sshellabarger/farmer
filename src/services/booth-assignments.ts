@@ -1264,10 +1264,16 @@ export async function loadCycleTarget(db: Firestore, market: FarmersMarket, cycl
   return nextTargetOf(db, market, cycle.date);
 }
 
-/** Why approved booth texts cannot go out for this target right now (`conflict` is judged from the rows). */
+/**
+ * Why approved booth texts cannot go out for this target right now (`conflict`
+ * is judged from the rows). `started` comes first and is final: once the
+ * target's start time has passed nothing will ever be sent, whether the market
+ * took place or was cancelled (a past date cannot be un-cancelled), so the
+ * engine stops looking. `cancelled` is a target still ahead - it can come back.
+ */
 export function boothTextsHold(target: Pick<MarketDateDoc, 'status' | 'start_at'> | null, conflicts: number, now: Date): BoothTextsBlocked | null {
-  if (target && target.status === 'cancelled') return 'cancelled';
   if (target && target.start_at.getTime() <= now.getTime()) return 'started';
+  if (target && target.status === 'cancelled') return 'cancelled';
   return conflicts > 0 ? 'conflict' : null;
 }
 

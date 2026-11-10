@@ -423,7 +423,7 @@ export type AssignmentSource = 'usual' | 'suggested' | 'manual';
  */
 export type AssignmentCycleMode = 'next' | 'opener';
 
-/** Why approved booth texts are held back: two vendors on one booth, a cancelled target date, or a target that has started. */
+/** Why approved booth texts are held back: two vendors on one booth, a cancelled target date still ahead, or a target whose start time has passed (final; see `target_cancelled` for which). */
 export type BoothTextsBlocked = 'conflict' | 'cancelled' | 'started';
 
 /**
