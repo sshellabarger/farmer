@@ -191,28 +191,47 @@ async function drafted(opts: SeedOpts = {}, mutate?: (db: ReturnType<typeof fake
   return { db, app };
 }
 
+/** The id a vendor's booth-text key is built on: their newest current assignment row for the target date. */
+function newestRowId(db: ReturnType<typeof fakeDb>, producer: string): string {
+  const mine = currentRows(db)
+    .filter((r) => r.producer_id === producer)
+    .sort((a, b) => a.assigned_at.getTime() - b.assigned_at.getTime() || a.id.localeCompare(b.id));
+  return mine[mine.length - 1]!.id;
+}
+const boothKey = (db: ReturnType<typeof fakeDb>, producer: string) => DEDUPE_KEYS.booth(TARGET, producer, newestRowId(db, producer));
+/** A booth text as the engine logs it, for seeding "a run already texted this vendor". */
+function loggedText(db: ReturnType<typeof fakeDb>, producer: string, at: Date, extra: Record<string, unknown> = {}) {
+  const rows = currentRows(db).filter((r) => r.producer_id === producer);
+  return {
+    direction: 'outbound', kind: 'booth', producer_id: producer, market_date_id: TARGET, status: 'sent', created_at: at, to: '+15015550101', body: 'x',
+    booth_text: 'assignment', assignment_id: newestRowId(db, producer), booth_ids: rows.map((r) => r.booth_id), booth_labels: [], source_date_id: SOURCE, seq: 1,
+    ...extra,
+  };
+}
+
 describe('approving outside quiet hours', () => {
-  it('texts each seated vendor once, keyed booth:<target>:<producer>, naming every booth they hold', async () => {
+  it('texts each seated vendor once, keyed booth:<target>:<producer>:<assignment>, naming every booth they hold', async () => {
     const { db, app } = await drafted();
     const res = await approve(app);
     expect(res.statusCode).toBe(200);
     expect(res.json().texts).toEqual({ attempted: true, sent: 4, failed: 0, excluded: 0, deferred_until: null });
 
     const msgs = boothMessages(db);
-    expect(msgs.map((m) => m.id).sort()).toEqual([
-      `booth:${TARGET}:p1`, `booth:${TARGET}:p2`, `booth:${TARGET}:p3`, `booth:${TARGET}:p6`,
-    ]);
+    expect(msgs.map((m) => m.id).sort()).toEqual(['p1', 'p2', 'p3', 'p6'].map((p) => boothKey(db, p)).sort());
+    expect(boothKey(db, 'p3')).toMatch(new RegExp(`^booth:${TARGET}:p3:[0-9a-f-]{36}$`));
     for (const m of msgs) {
-      expect(m).toMatchObject({ direction: 'outbound', kind: 'booth', market_date_id: TARGET, status: 'simulated', source_date_id: SOURCE });
+      expect(m).toMatchObject({ direction: 'outbound', kind: 'booth', market_date_id: TARGET, status: 'simulated', source_date_id: SOURCE, booth_text: 'assignment', segments: 1 });
       expect(m.body).toContain('Sat Sep 26'); // the TARGET date, not the date being closed out
-      expect(m.body.endsWith('Reply STOP to opt out.')).toBe(true);
+      expect(m.body).not.toContain('STOP'); // one segment: this template carries no opt-out line
+      expect(m.assignment_id).toBe(newestRowId(db, m.producer_id));
     }
     const p1 = msgs.find((m) => m.producer_id === 'p1')!;
     expect(p1.to).toBe('+15015550101');
     expect(p1.body).toBe(
-      'SJCA Markets: Alice, your booth at West Little Rock Farmers Market on Sat Sep 26 is V1 and V2. Please check in at the table when you arrive.\nReply STOP to opt out.',
+      'SJCA Markets: Alice, your booth at West Little Rock Farmers Market on Sat Sep 26 is V1 and V2. Please check in at the table when you arrive.',
     );
     expect(p1.booth_labels).toEqual(['V1', 'V2']);
+    expect(p1.booth_ids).toEqual(['wlrfm_v1', 'wlrfm_v2']);
     expect(msgs.find((m) => m.producer_id === 'p6')!.body).toContain('is Food truck.');
     expect(msgs.find((m) => m.producer_id === 'p3')!.body).toContain('is V7.');
     expect(consoleBoothTexts()).toBe(4);
@@ -237,13 +256,25 @@ describe('approving outside quiet hours', () => {
   });
 
   it('treats an already-sent keyed text as sent, never re-sending it', async () => {
-    const { db, app } = await drafted({}, async (d) => {
-      await d.collection('messages').doc(`booth:${TARGET}:p1`).set({ direction: 'outbound', kind: 'booth', producer_id: 'p1', market_date_id: TARGET, status: 'sent', created_at: new Date(), to: '+15015550101', body: 'x' });
-    });
+    const { db, app } = await drafted();
+    await db.collection('messages').doc(boothKey(db, 'p1')).set(loggedText(db, 'p1', new Date()));
     const res = await approve(app);
     expect(res.json().texts.sent).toBe(3);
     expect(consoleBoothTexts()).toBe(3);
     expect((db.dump('market_dates')[SOURCE] as any).actions.booth_text_recipients).toBe(4);
+  });
+
+  it('a text the provider failed is left failed and counted, not retried by later ticks', async () => {
+    const { db, app } = await drafted();
+    await db.collection('messages').doc(boothKey(db, 'p1')).set(loggedText(db, 'p1', new Date(), { status: 'failed', error: 'provider down' }));
+    const res = await approve(app);
+    expect(res.json().texts).toMatchObject({ attempted: true, sent: 3 });
+    const actions = (db.dump('market_dates')[SOURCE] as any).actions;
+    expect(actions).toMatchObject({ booth_text_recipients: 3, booth_text_failed: 1 });
+    const later = await tick(db, new Date('2026-09-22T15:05:00Z'));
+    expect(later.booth_texts_sent).toBe(0);
+    expect(boothMessages(db).filter((m) => m.producer_id === 'p1')).toHaveLength(1);
+    expect(boothMessages(db).find((m) => m.producer_id === 'p1')!.status).toBe('failed');
   });
 
   it('excludes a vendor whose only membership is a different season', async () => {
@@ -320,12 +351,25 @@ describe('approving in quiet hours', () => {
     await approve(app);
     // A run died after texting p1 but before writing booth_texts_sent_at.
     await db.collection('workflow_locks').doc(`${SOURCE}__booth_texts`).set({ market_date_id: SOURCE, key: 'booth_texts', claimed_at: new Date('2026-09-23T12:00:00Z'), run_id: 'dead', created_at: new Date('2026-09-23T12:00:00Z') });
-    await db.collection('messages').doc(`booth:${TARGET}:p1`).set({ direction: 'outbound', kind: 'booth', producer_id: 'p1', market_date_id: TARGET, status: 'sent', created_at: new Date('2026-09-23T12:00:01Z'), to: '+15015550101', body: 'x' });
+    await db.collection('messages').doc(boothKey(db, 'p1')).set(loggedText(db, 'p1', new Date('2026-09-23T12:00:01Z')));
     vi.setSystemTime(T_WINDOW_OPEN);
     const r = await tick(db, T_WINDOW_OPEN);
     expect(r.booth_texts_sent).toBe(3);
     expect(boothMessages(db)).toHaveLength(4);
     expect(consoleBoothTexts()).toBe(3);
+  });
+
+  it('a live booth_texts lock held by another run is respected: nothing is sent until it goes stale', async () => {
+    const { db, app } = await drafted();
+    vi.setSystemTime(T_QUIET);
+    await approve(app);
+    await db.collection('workflow_locks').doc(`${SOURCE}__booth_texts`).set({ market_date_id: SOURCE, key: 'booth_texts', claimed_at: new Date('2026-09-23T12:58:00Z'), run_id: 'alive', created_at: new Date('2026-09-23T12:58:00Z') });
+    const held = await tick(db, T_WINDOW_OPEN);
+    expect(held.booth_texts_sent).toBe(0);
+    expect(held.skipped_claimed).toBe(1);
+    expect(boothMessages(db)).toHaveLength(0);
+    const stale = await tick(db, new Date('2026-09-23T13:10:00Z'));
+    expect(stale.booth_texts_sent).toBe(4);
   });
 });
 
@@ -417,19 +461,45 @@ describe('TEMPLATES.booth and DEDUPE_KEYS.booth', () => {
     expect(TEMPLATES.booth({ ...base, labels: ['V7', 'V8'] })).toContain('is V7 and V8. Please');
     expect(TEMPLATES.booth({ ...base, labels: ['V7', 'V8', 'V9'] })).toContain('is V7, V8 and V9. Please');
     expect(TEMPLATES.booth({ ...base, first_name: '', labels: ['V7'] }).startsWith('SJCA Markets: your booth at')).toBe(true);
+    expect(TEMPLATES.booth({ ...base, labels: ['V7'], changed: true })).toContain('is now V7. Please');
   });
 
-  it('stays within two SMS segments with a 40-character market name, ASCII only', () => {
-    // The contract's wording is kept verbatim; with a 40-character name it runs to 172 characters, i.e. two segments
-    // (the contract's "<= 160" note does not hold for the wording it prescribes - see the A2 notes).
-    const body = TEMPLATES.booth({ market_name: 'M'.repeat(40), date_short: 'Sat Sep 26', labels: ['V7', 'V8'], first_name: 'Alice' });
-    expect(body.length).toBe(172);
-    expect(splitMessage(body).length).toBeLessThanOrEqual(2);
-    expect(/^[\x20-\x7e\n]+$/.test(body)).toBe(true);
+  it('is ONE segment for a 31-character market name, a 12-character first name and two booth labels, with no STOP line', () => {
+    const market_name = 'West Little Rock Farmers Market';
+    expect(market_name.length).toBe(31);
+    const args = { market_name, date_short: 'Sat Sep 26', first_name: 'Maximilianna', labels: ['V21', 'V22'] };
+    expect(args.first_name.length).toBe(12);
+    const first = TEMPLATES.booth(args);
+    const corrective = TEMPLATES.booth({ ...args, changed: true });
+    const release = TEMPLATES.booth_release(args);
+    for (const body of [first, corrective, release]) {
+      expect(splitMessage(body)).toHaveLength(1);
+      expect(body.length).toBeLessThanOrEqual(153);
+      expect(body).not.toMatch(/STOP/i);
+      expect(/^[\x20-\x7e]+$/.test(body)).toBe(true); // ASCII, no newline
+      expect(body).toContain('Maximilianna');
+    }
+    expect(first).toBe('SJCA Markets: Maximilianna, your booth at West Little Rock Farmers Market on Sat Sep 26 is V21 and V22. Please check in at the table when you arrive.');
+    expect(corrective).toContain('is now V21 and V22.');
+    expect(release).toBe('SJCA Markets: Maximilianna, you are no longer assigned a booth at West Little Rock Farmers Market on Sat Sep 26. Questions? Reply to this text.');
+    // The food-truck label is longer than a stall label and still fits.
+    expect(splitMessage(TEMPLATES.booth({ ...args, labels: ['Food truck'], changed: true }))).toHaveLength(1);
   });
 
-  it('keys by target date and producer, and refuses a part containing a colon', () => {
-    expect(DEDUPE_KEYS.booth('wlrfm_2026-09-26', 'p1')).toBe('booth:wlrfm_2026-09-26:p1');
-    expect(() => DEDUPE_KEYS.booth('a:b', 'p1')).toThrow();
+  it('sheds the greeting name, then the closing sentence, before it would spill into a second segment', () => {
+    const long = { market_name: 'M'.repeat(40), date_short: 'Sat Sep 26', labels: ['V21', 'V22'], first_name: 'Maximilianna' };
+    const noName = TEMPLATES.booth(long);
+    expect(splitMessage(noName)).toHaveLength(1);
+    expect(noName).toBe(`SJCA Markets: your booth at ${'M'.repeat(40)} on Sat Sep 26 is V21 and V22. Please check in at the table when you arrive.`);
+    const bare = TEMPLATES.booth({ ...long, market_name: 'M'.repeat(70) });
+    expect(splitMessage(bare)).toHaveLength(1);
+    expect(bare).toBe(`SJCA Markets: your booth at ${'M'.repeat(70)} on Sat Sep 26 is V21 and V22.`);
+  });
+
+  it('keys by target date, producer and assignment, and refuses a part containing a colon', () => {
+    expect(DEDUPE_KEYS.booth('wlrfm_2026-09-26', 'p1', 'a1')).toBe('booth:wlrfm_2026-09-26:p1:a1');
+    expect(DEDUPE_KEYS.booth_release('wlrfm_2026-09-26', 'p1', 'a1')).toBe('booth_release:wlrfm_2026-09-26:p1:a1');
+    expect(() => DEDUPE_KEYS.booth('a:b', 'p1', 'a1')).toThrow();
+    expect(() => DEDUPE_KEYS.booth('wlrfm_2026-09-26', 'p1', '')).toThrow();
   });
 });
