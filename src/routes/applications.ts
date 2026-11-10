@@ -244,6 +244,62 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
 
     const market = await loadMarket(app.db, input.market_id);
     if (!market || market.active !== true) return reply.status(404).send({ error: 'Market not found' });
+
+    const email = normalizeEmail(input.contact.email);
+    if (!email) return reply.status(400).send({ error: 'Invalid email' });
+    const fees = marketFees(market);
+    const links = marketPaymentLinks(market);
+    // The season this market takes applications for; null while it has never opened any.
+    const seasonLabel = market.season?.label || null;
+
+    /**
+     * What the first, accepted POST of a submission answered; a repeat of it gets the same body.
+     * The repeat also finishes what the first may not have: if that request died after creating the
+     * application and before marking its uploads, they are marked now (attachUploads is idempotent),
+     * so the nightly purge never mistakes an application's files for abandoned ones.
+     */
+    const originalResult = async (applicationId: string, a: Rec) => {
+      const namedUploads = (Array.isArray(a.upload_ids) ? a.upload_ids : []).filter((x): x is string => typeof x === 'string');
+      if (namedUploads.length > 0) {
+        try {
+          await attachUploads(app.db, { application_id: applicationId, draft_id: input.draft_id, upload_ids: namedUploads, now });
+        } catch (err) {
+          app.log.error(err, 'Could not re-attach the uploads of a repeated submission');
+        }
+      }
+      const fee = rec(a.fee);
+      return {
+        id: applicationId,
+        status: 'new' as const,
+        fee: {
+          amount: typeof fee.amount === 'number' ? fee.amount : fees.application_fee,
+          currency: typeof fee.currency === 'string' ? fee.currency : fees.currency,
+          url: fillPaymentUrl(links.application_fee_url, email),
+        },
+        season_total: a.season_total as SeasonTotal,
+      };
+    };
+    /** True when the stored application IS this submission: live, same season, same draft, same address. */
+    const isThisSubmission = (a: Rec) =>
+      seasonLabel !== null &&
+      isLiveApplication(a) &&
+      a.season === seasonLabel &&
+      a.market_id === market.id &&
+      a.draft_id === input.draft_id &&
+      normalizeEmail(String(rec(a.contact).email ?? '')) === email;
+
+    // A repeat of a submission that was already accepted is answered FIRST, with what the first
+    // answer said (fix X3a): before the uploads are looked at (they are attached by now) and before
+    // anything else that may have changed since it was accepted - the window closing at midnight,
+    // a new rules or consent version, a stall being retired. The applicant already applied; a retry
+    // of the same request must not tell them otherwise. One equality query, reused below for the
+    // duplicate check and the daily cap.
+    const existingDocs = seasonLabel ? (await app.db.collection('applications').where('market_id', '==', market.id).get()).docs : [];
+    for (const d of existingDocs) {
+      const a = d.data() as Rec;
+      if (isThisSubmission(a)) return reply.status(201).send(await originalResult(d.id, a));
+    }
+
     if (!applicationsOpen(market, now)) return reply.status(409).send({ error: 'Applications are closed for this market' });
     const season = market.season!.label;
 
@@ -271,8 +327,6 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       });
     }
 
-    const email = normalizeEmail(input.contact.email);
-    if (!email) return reply.status(400).send({ error: 'Invalid email' });
     const mobile = normalizePhone(input.contact.mobile);
     if (!E164_RE.test(mobile)) return reply.status(400).send({ error: 'Enter a valid mobile number' });
 
@@ -311,59 +365,24 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       if (unknown) return reply.status(400).send({ error: 'One of the stalls you picked is not available' });
     }
 
-    const fees = marketFees(market);
-    const links = marketPaymentLinks(market);
     const marketCount = summarizeSeason(market).summary.market_count;
-
-    /**
-     * What the first, accepted POST of a submission answered; a repeat of it gets the same body.
-     * The repeat also finishes what the first may not have: if that request died after creating the
-     * application and before marking its uploads, they are marked now (attachUploads is idempotent),
-     * so the nightly purge never mistakes an application's files for abandoned ones.
-     */
-    const originalResult = async (applicationId: string, a: Rec) => {
-      const namedUploads = (Array.isArray(a.upload_ids) ? a.upload_ids : []).filter((x): x is string => typeof x === 'string');
-      if (namedUploads.length > 0) {
-        try {
-          await attachUploads(app.db, { application_id: applicationId, draft_id: input.draft_id, upload_ids: namedUploads, now });
-        } catch (err) {
-          app.log.error(err, 'Could not re-attach the uploads of a repeated submission');
-        }
-      }
-      const fee = rec(a.fee);
-      return {
-        id: applicationId,
-        status: 'new' as const,
-        fee: {
-          amount: typeof fee.amount === 'number' ? fee.amount : fees.application_fee,
-          currency: typeof fee.currency === 'string' ? fee.currency : fees.currency,
-          url: fillPaymentUrl(links.application_fee_url, email),
-        },
-        season_total: a.season_total as SeasonTotal,
-      };
-    };
-    /** True when the stored application IS this submission: live, same season, same draft, same address. */
-    const isThisSubmission = (a: Rec) =>
-      isLiveApplication(a) && a.season === season && a.market_id === market.id && a.draft_id === input.draft_id && normalizeEmail(String(rec(a.contact).email ?? '')) === email;
     const duplicate = () => reply.status(409).send({ error: 'We already have an application for this email this season' });
 
-    // One live application per email, market and season; a repeat of the same draft is the same
-    // submission and is answered BEFORE the uploads are looked at (they are attached by now, fix X3a).
-    // This scan is the friendly read-side answer and covers applications older than the key
-    // documents; the key claimed below is what makes it atomic.
-    const existingSnap = await app.db.collection('applications').where('market_id', '==', market.id).get();
+    // One live application per email, market and season. A repeat of this very submission was
+    // answered at the top; any other live application for the address is a duplicate. This read
+    // is the friendly answer and covers applications older than the key documents; the key
+    // claimed below is what makes it atomic.
     const today = utcDay(now);
     let submittedToday = 0;
-    for (const d of existingSnap.docs) {
+    for (const d of existingDocs) {
       const a = d.data() as Rec;
       const submittedAt = toDate(a.submitted_at);
       if (submittedAt && utcDay(submittedAt) === today) submittedToday += 1;
     }
-    for (const d of existingSnap.docs) {
+    for (const d of existingDocs) {
       const a = d.data() as Rec;
       if (a.season !== season || !isLiveApplication(a)) continue;
       if (normalizeEmail(String(rec(a.contact).email ?? '')) !== email) continue;
-      if (isThisSubmission(a)) return reply.status(201).send(await originalResult(d.id, a));
       // The other application's id is nobody else's business: anyone can type an email address here.
       return duplicate();
     }

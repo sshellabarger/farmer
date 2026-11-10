@@ -119,6 +119,60 @@ describe('(a) a repeat of an accepted submission', () => {
     expect(again.json().fee.amount).toBe(15);
   });
 
+  it('returns the original 201 whatever has changed since it was accepted: the window closed, the rules, the consent wording, a stall', async () => {
+    const db = seed({}, { season: { label: '2027', application_open: '2026-12-01', application_close: '2026-12-15', schedule_version_id: 'v27' } });
+    const app = await boot(db);
+    const body = { booth: { ...(validSubmission().booth as object), stall_preference: ['wlrfm_v1'] } };
+    const first = await submit(app, body); // accepted on the last day of the window
+    expect(first.statusCode).toBe(201);
+    const stored = JSON.stringify(db.dump('applications'));
+
+    // The applicant's phone retries the same request just after midnight, market time: the window is closed now.
+    vi.setSystemTime(new Date('2026-12-16T06:00:05Z'));
+    let again = await submit(app, body);
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toEqual(first.json());
+
+    // And after the market has published new rules, new consent wording and retired the stall.
+    const legal = (db.dump('farmers_markets').wlrfm as Record<string, any>).legal;
+    await db.collection('farmers_markets').doc('wlrfm').update({ legal: { ...legal, rules_version: '2027-2', sms_consent_version: 'sjca-sms-2', sms_consent_text: 'New wording.' } });
+    await db.collection('booths').doc('wlrfm_v1').update({ active: false });
+    again = await submit(app, body);
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toEqual(first.json());
+
+    // Nothing was written by the repeats.
+    expect(db.count('applications')).toBe(1);
+    expect(JSON.stringify(db.dump('applications'))).toBe(stored);
+
+    // Anyone who has NOT been accepted is still told the truth: closed.
+    const contact = { ...(validSubmission().contact as object), email: 'late@example.test' };
+    const late = await submit(app, { draft_id: DRAFT_2, contact });
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toMatch(/closed/);
+    // And the same person from a different draft is not "this submission": closed as well.
+    expect((await submit(app, { ...body, draft_id: DRAFT_3 })).statusCode).toBe(409);
+    expect(db.count('applications')).toBe(1);
+  });
+
+  it('a withdrawn or declined application is not answered as a repeat: the applicant is applying again', async () => {
+    const db = seed();
+    const app = await boot(db);
+    const first = await submit(app);
+    await patch(app, first.json().id, { action: 'withdraw' });
+    const again = await submit(app); // the very same draft
+    expect(again.statusCode).toBe(201);
+    expect(again.json().id).not.toBe(first.json().id);
+    expect(db.count('applications')).toBe(2);
+  });
+
+  it('a market that never opened applications has nothing to repeat', async () => {
+    const app = await boot(seed({}, { season: null }));
+    const res = await submit(app);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/closed/);
+  });
+
   it('still refuses an upload that belongs to somebody else\'s application', async () => {
     const db = seed();
     const app = await boot(db);
