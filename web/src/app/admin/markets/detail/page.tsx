@@ -1101,6 +1101,7 @@ function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: 
     hold_harmless_markdown: market.legal?.hold_harmless_markdown || '',
     hold_harmless_version: market.legal?.hold_harmless_version || '',
     insurance_help_url: market.legal?.insurance_help_url || '',
+    insurance_requirements_text: market.legal?.insurance_requirements_text || '',
     adh_guidelines_url: market.legal?.adh_guidelines_url || '',
     food_freedom_url: market.legal?.food_freedom_url || '',
     sms_consent_text: market.legal?.sms_consent_text || '',
@@ -1126,6 +1127,7 @@ function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: 
         hold_harmless_markdown: v.hold_harmless_markdown,
         hold_harmless_version: v.hold_harmless_version.trim(),
         insurance_help_url: v.insurance_help_url.trim() || null,
+        insurance_requirements_text: v.insurance_requirements_text.trim(),
         adh_guidelines_url: v.adh_guidelines_url.trim() || null,
         food_freedom_url: v.food_freedom_url.trim() || null,
         sms_consent_text: v.sms_consent_text,
@@ -1156,6 +1158,18 @@ function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: 
         <Field label="Insurance information sheet" value={v.insurance_help_url} onChange={set('insurance_help_url')} disabled={readOnly} placeholder="https://" />
         <Field label="ADH farmers market guidelines" value={v.adh_guidelines_url} onChange={set('adh_guidelines_url')} disabled={readOnly} placeholder="https://" />
         <Field label="Food Freedom guide" value={v.food_freedom_url} onChange={set('food_freedom_url')} disabled={readOnly} placeholder="https://" />
+      </div>
+      <div className="mt-5">
+        <BigTextArea
+          label="Insurance requirement (one or two sentences: the amount and who must be named as additional insured)"
+          value={v.insurance_requirements_text}
+          onChange={set('insurance_requirements_text')}
+          rows={3}
+          disabled={readOnly}
+        />
+        <p className="text-xs text-earth-500 mt-1 mb-0">
+          Plain text. Shown on the application above the insurance question and in the acceptance email. Leave it empty and neither says anything about insurance requirements.
+        </p>
       </div>
       <div className="mt-5">
         <BigTextArea label="Text message consent wording" value={v.sms_consent_text} onChange={set('sms_consent_text')} rows={4} disabled={readOnly} />

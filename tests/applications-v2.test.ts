@@ -634,7 +634,8 @@ describe('PATCH /api/applications/:id approve', () => {
     const email = printed(log);
     expect(email).toContain('[SJCA Markets] Your 2027 West Little Rock Farmers Market application is approved');
     expect(email).toContain('Booth fee: $1250 for the season');
-    expect(email).toContain('KBK-Breck, LLC c/o Kelley Commercial Partners');
+    // This market has not written an insurance requirement: the email names no landlord and no amount (fix X7).
+    expect(email).not.toMatch(/KBK|additional insured|1,000,000/);
     expect(email).toContain('https://help.test.example/insurance');
     expect(email).toContain('2027-04-03');
     expect(email).toContain('https://test.example/rules?market=wlrfm');
@@ -642,6 +643,27 @@ describe('PATCH /api/applications/:id approve', () => {
     // Audit trail.
     const actions = Object.values(db.dump('audit_log')).map((a) => a.action);
     expect(actions).toEqual(expect.arrayContaining(['producer.update', 'membership.create', 'application.approve']));
+  });
+
+  it('the acceptance email carries the market\'s own insurance requirement, escaped, and nothing when there is none (fix X7)', async () => {
+    const wording = 'Vendors must carry $1,000,000 in general liability insurance naming Example Landlord, LLC & "The Market" as additional insureds.';
+    const legal = { ...(market().legal as Record<string, unknown>), insurance_requirements_text: wording };
+    const db = seed({}, { legal });
+    const app = await boot(db);
+    const id = (await submit(app)).json().id;
+    expect((await approve(app, id)).statusCode).toBe(200);
+    const email = String(emailPrints()[0]![3]);
+    expect(email).toContain('Vendors must carry $1,000,000 in general liability insurance naming Example Landlord, LLC &amp; &quot;The Market&quot; as additional insureds.');
+    expect(email).toContain('Insurance information: <a href="https://help.test.example/insurance">');
+    expect(email).not.toContain('KBK');
+
+    // No wording and no help link: the email says nothing about insurance at all.
+    const bare = seed({}, { legal: { ...(market().legal as Record<string, unknown>), insurance_help_url: null } });
+    const bareApp = await boot(bare);
+    const bareId = (await submit(bareApp)).json().id;
+    log.mockClear();
+    expect((await approve(bareApp, bareId)).statusCode).toBe(200);
+    expect(String(emailPrints()[0]![3])).not.toMatch(/insur/i);
   });
 
   it('a second approval is refused and sends nothing more', async () => {

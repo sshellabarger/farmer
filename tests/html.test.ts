@@ -62,6 +62,7 @@ describe('the producer-facing email bodies', () => {
       totals,
       boothFeeUrl: 'https://pay.example.test/booth?a=1&b=2',
       insuranceHelpUrl: 'https://help.example.test/"onmouseover="x',
+      insuranceRequirementsText: 'Carry $1,000,000 naming <b>Landlord & Co</b>.',
       firstDate: '2027-04-03',
       appUrl: 'https://test.example',
     });
@@ -72,6 +73,7 @@ describe('the producer-facing email bodies', () => {
     expect(body).toContain('<a href="https://pay.example.test/booth?a=1&amp;b=2">');
     expect(body).toContain('href="https://help.example.test/&quot;onmouseover=&quot;x"');
     expect(body).toContain('Booth fee: $1450 for the season, in 2 installments.');
+    expect(body).toContain('Carry $1,000,000 naming &lt;b&gt;Landlord &amp; Co&lt;/b&gt;.');
     expect(body).toContain('<a href="https://test.example/rules?market=wlrfm">');
     // The only markup in the body is the links this code wrote.
     expect(body.replace(/<a href="[^"<>]*">[^<>]*<\/a>/g, '')).not.toMatch(/[<>]/);

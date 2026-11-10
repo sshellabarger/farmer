@@ -977,6 +977,7 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
             totals,
             boothFeeUrl: marketPaymentLinks(market).booth_fee_url,
             insuranceHelpUrl: marketLegal(market).insurance_help_url,
+            insuranceRequirementsText: marketLegal(market).insurance_requirements_text,
             firstDate: firstSeasonDate(market),
             actor: user.id,
             now,

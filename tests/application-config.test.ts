@@ -227,6 +227,29 @@ describe('PATCH /api/markets/:id — season, fees, payment links, legal texts, b
     expect((audit.after as { legal: Record<string, unknown> }).legal).toMatchObject({ rules_version: '2027-2', rules_markdown_length: 15 });
   });
 
+  it('the insurance requirement is market data: empty by default, set through PATCH, served on the public config (fix X7)', async () => {
+    const db = seed();
+    const app = await boot(db);
+    const config = async () => (await app.inject({ method: 'GET', url: '/api/applications/config?market=wlrfm' })).json();
+    // A market that has not set it says nothing.
+    expect((await config()).legal.insurance_requirements_text).toBe('');
+
+    const wording = '  All vendors must carry $1,000,000 in general liability insurance naming Example Landlord, LLC as additional insured.  ';
+    const res = await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: wording } } });
+    expect(res.statusCode).toBe(200);
+    const legal = db.dump('farmers_markets').wlrfm!.legal as Record<string, unknown>;
+    expect(legal.insurance_requirements_text).toBe(wording.trim());
+    expect(legal).toMatchObject({ rules_version: '2027-1', hold_harmless_version: '2027-1' }); // the other legal fields are kept
+    expect((await config()).legal.insurance_requirements_text).toBe(wording.trim());
+    expect(res.json().market.legal.insurance_requirements_text).toBe(wording.trim());
+
+    // It can be cleared again, and it is bounded.
+    expect((await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: '' } } })).statusCode).toBe(200);
+    expect((await config()).legal.insurance_requirements_text).toBe('');
+    expect((await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: 'x'.repeat(2001) } } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: 7 } } })).statusCode).toBe(400);
+  });
+
   it('categories and product types are validated as whole arrays, keys unique and cross-referenced', async () => {
     const db = seed();
     const category = { key: 'farmers_ranchers', label: 'Farmers', description: '', events_only: false, sort: 1 };

@@ -90,6 +90,13 @@ export interface MarketLegal {
   hold_harmless_markdown: string;
   hold_harmless_version: string;
   insurance_help_url: string | null;
+  /**
+   * The market's own sentence about the insurance a vendor must carry (the
+   * amount, who must be named as additional insured). Plain text, shown on the
+   * application and in the acceptance email; '' = say nothing. Market data,
+   * never wording in code (Phase 4 fix X7).
+   */
+  insurance_requirements_text: string;
   adh_guidelines_url: string | null;
   food_freedom_url: string | null;
   sms_consent_text: string;
@@ -333,6 +340,7 @@ export const legalSchema = z.object({
   hold_harmless_markdown: z.string().max(50_000),
   hold_harmless_version: z.string().max(40),
   insurance_help_url: httpUrl.nullable(),
+  insurance_requirements_text: z.string().trim().max(2000),
   adh_guidelines_url: httpUrl.nullable(),
   food_freedom_url: httpUrl.nullable(),
   sms_consent_text: z.string().min(1).max(2000),
@@ -422,6 +430,7 @@ export const DEFAULT_LEGAL: MarketLegal = {
   hold_harmless_markdown: '',
   hold_harmless_version: '',
   insurance_help_url: null,
+  insurance_requirements_text: '',
   adh_guidelines_url: null,
   food_freedom_url: null,
   sms_consent_text:

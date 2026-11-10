@@ -43,6 +43,8 @@ export interface MarketLegal {
   hold_harmless_markdown: string;
   hold_harmless_version: string;
   insurance_help_url: string | null;
+  /** The market's own sentence about the insurance vendors must carry; '' = nothing is shown. Absent from servers that predate it. */
+  insurance_requirements_text?: string;
   adh_guidelines_url: string | null;
   food_freedom_url: string | null;
   sms_consent_text: string;

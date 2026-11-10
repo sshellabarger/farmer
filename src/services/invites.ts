@@ -616,6 +616,8 @@ export function acceptanceEmailBody(p: {
   totals: AcceptanceTotals;
   boothFeeUrl: string | null;
   insuranceHelpUrl: string | null;
+  /** The market's `legal.insurance_requirements_text`; '' leaves the sentence out. */
+  insuranceRequirementsText: string;
   firstDate: string | null;
   appUrl: string;
 }): string {
@@ -637,10 +639,10 @@ export function acceptanceEmailBody(p: {
   lines.push('');
   lines.push(`Step 1 - sign the Hold Harmless agreement: ${htmlLink(p.agreementUrl)}`);
   if (p.boothFeeUrl) lines.push(`Step 2 - pay your booth fee: ${htmlLink(p.boothFeeUrl)}`);
-  lines.push('');
-  lines.push(
-    'Proof of $1,000,000 general liability insurance naming KBK-Breck, LLC c/o Kelley Commercial Partners, The WLRFM and ALFN/West Little Rock Farmers Market as additional insureds is required before your first market day.',
-  );
+  // What insurance the market asks for is the market's wording (`legal.insurance_requirements_text`), never this code's.
+  const requirements = p.insuranceRequirementsText.trim();
+  if (requirements || p.insuranceHelpUrl) lines.push('');
+  if (requirements) lines.push(e(requirements));
   if (p.insuranceHelpUrl) lines.push(`Insurance information: ${htmlLink(p.insuranceHelpUrl)}`);
   if (p.firstDate) {
     lines.push('');
@@ -686,6 +688,7 @@ export async function sendAcceptance(args: {
   totals: AcceptanceTotals;
   boothFeeUrl: string | null;
   insuranceHelpUrl: string | null;
+  insuranceRequirementsText: string;
   firstDate: string | null;
   actor: string;
   now: Date;
@@ -739,6 +742,7 @@ export async function sendAcceptance(args: {
         totals: args.totals,
         boothFeeUrl: args.boothFeeUrl,
         insuranceHelpUrl: args.insuranceHelpUrl,
+        insuranceRequirementsText: args.insuranceRequirementsText,
         firstDate: args.firstDate,
         appUrl: env.APP_URL,
       }),
