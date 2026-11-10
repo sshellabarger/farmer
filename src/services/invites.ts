@@ -113,6 +113,17 @@ export function producerEmail(producer: Record<string, unknown>): string | null 
   return null;
 }
 
+/** Every address on file for a producer (`email` and `emails[]`), normalised and de-duplicated. */
+export function producerEmails(producer: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  const candidates: unknown[] = [producer.email, ...(Array.isArray(producer.emails) ? (producer.emails as unknown[]) : [])];
+  for (const candidate of candidates) {
+    const n = normalizeEmail(typeof candidate === 'string' ? candidate : null);
+    if (n) out.add(n);
+  }
+  return [...out];
+}
+
 /** An application link expires at the market-local midnight after `application_close`, else 120 days out. */
 export function applicationTokenExpiry(market: FarmersMarket, now: Date): Date {
   const close = market.season?.application_close;
@@ -502,14 +513,21 @@ export async function inviteReapply(args: {
     else if (m.status !== 'inactive') thisSeason.add(m.producer_id);
   }
 
-  // Producers that already have a live application for (market, season).
+  // Producers that already have a live application for (market, season): named on the application
+  // (approved, or submitted through the prefill link), or recognisable by its contact email. A
+  // returning vendor who typed the public form from scratch is matched by email, the same identity
+  // rule approval uses (never by name), so they are not invited to apply a second time (fix X12).
   const appSnap = await db.collection('applications').where('market_id', '==', market.id).get();
   const applied = new Set<string>();
+  const appliedEmails = new Set<string>();
   for (const d of appSnap.docs) {
     const a = d.data() as Record<string, unknown>;
     if (a.season !== season || a.status === 'declined' || a.status === 'withdrawn') continue;
     if (typeof a.producer_id === 'string') applied.add(a.producer_id);
     if (typeof a.prefill_producer_id === 'string') applied.add(a.prefill_producer_id);
+    const contact = a.contact && typeof a.contact === 'object' ? (a.contact as Record<string, unknown>) : {};
+    const contactEmail = normalizeEmail(typeof contact.email === 'string' ? contact.email : null);
+    if (contactEmail) appliedEmails.add(contactEmail);
   }
 
   const out: InviteBatchResult = {
@@ -535,7 +553,7 @@ export async function inviteReapply(args: {
     out.candidates += 1;
     const businessName = String(producer.business_name ?? '');
 
-    if (applied.has(producerId) || thisSeason.has(producerId)) {
+    if (applied.has(producerId) || thisSeason.has(producerId) || producerEmails(producer).some((e) => appliedEmails.has(e))) {
       out.skipped_applied += 1;
       continue;
     }

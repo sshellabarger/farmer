@@ -334,6 +334,50 @@ describe('POST /api/markets/:id/invite-reapply', () => {
     expect(rowsOfKind(db, 'application_invite')).toHaveLength(2); // p2 twice: the first keyed, the resend not
   });
 
+  it('skips a returning producer who already applied WITHOUT the prefill link: the application is matched by its contact email (fix X12)', async () => {
+    const db = crowd();
+    // p2 typed the public form from scratch, from a second address the market has on file for them:
+    // the application names no producer at all.
+    await db.collection('producers').doc('p2').update({ emails: ['bravo@example.test', 'bravo.office@example.test'] });
+    await db.collection('applications').doc('a_direct').set({
+      market_id: 'wlrfm',
+      season: '2027',
+      status: 'under_review',
+      producer_id: null,
+      prefill_producer_id: null,
+      contact: { email: ' Bravo.Office@Example.test ', name: 'Bravo Owner' },
+      schema_version: 2,
+    });
+    const app = await boot(db);
+
+    const dry = await bulk(app, { dry_run: true });
+    expect(dry.json()).toMatchObject({ candidates: 5, invited: 2, skipped_applied: 2, skipped_no_contact: 1 });
+    expect(dry.json().results.map((r: { producer_id: string }) => r.producer_id)).toEqual(['p1', 'p3', 'p7']);
+
+    const res = await bulk(app);
+    expect(res.json()).toMatchObject({ candidates: 5, invited: 2, skipped_applied: 2, skipped_no_contact: 1 });
+    expect(Object.keys(db.dump('application_invites')).sort()).toEqual(['wlrfm_2027_p1', 'wlrfm_2027_p7']);
+    expect(rowsOfKind(db, 'application_invite')).toHaveLength(0); // p2 was the only textable producer
+    expect(emailPrints()).toHaveLength(2);
+    expect(printed(log)).not.toContain('bravo');
+  });
+
+  it('an email match counts only for a live application of this market and season', async () => {
+    const db = crowd();
+    const direct = (over: Record<string, unknown>) => ({ market_id: 'wlrfm', season: '2027', status: 'new', producer_id: null, prefill_producer_id: null, contact: { email: 'bravo@example.test' }, schema_version: 2, ...over });
+    await db.collection('applications').doc('declined').set(direct({ status: 'declined' }));
+    await db.collection('applications').doc('withdrawn').set(direct({ status: 'withdrawn' }));
+    await db.collection('applications').doc('last_year').set(direct({ season: '2026' }));
+    await db.collection('applications').doc('elsewhere').set(direct({ market_id: 'other' }));
+    await db.collection('applications').doc('no_contact').set(direct({ contact: null }));
+    await db.collection('applications').doc('bad_email').set(direct({ contact: { email: 'not an address' } }));
+    const app = await boot(db);
+    const res = await bulk(app);
+    // Exactly as without those applications: p2 is still invited.
+    expect(res.json()).toMatchObject({ candidates: 5, invited: 3, skipped_applied: 1, skipped_no_contact: 1 });
+    expect(Object.keys(db.dump('application_invites')).sort()).toEqual(['wlrfm_2027_p1', 'wlrfm_2027_p2', 'wlrfm_2027_p7']);
+  });
+
   it('only the configured season can be invited, and only once it is set', async () => {
     const app = await boot(crowd());
     expect((await bulk(app, { season: '2028' })).statusCode).toBe(409);
