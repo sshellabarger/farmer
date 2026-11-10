@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import { membershipRoutes } from '../src/routes/memberships.js';
 import { fakeDb } from './helpers/fake-db.js';
@@ -57,6 +57,17 @@ async function buildApp(db: ReturnType<typeof fakeDb>) {
 function auth(userId: string) {
   return { authorization: `Bearer ${tokenFor(userId)}` };
 }
+
+// These routes read the clock: "the current season" of a market is decided at `new Date()`
+// (D33). A pinned clock keeps every case in the same season whenever the suite runs.
+const NOW = new Date('2026-11-10T16:00:00Z');
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('GET /api/memberships', () => {
   it('400s when neither or both of market_id/producer_id are given', async () => {
