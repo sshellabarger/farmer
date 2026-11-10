@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import type { BoothDoc } from '@/lib/phase4-types';
+import type { BoothAssignmentsView, BoothDoc, BoothTextStatus, BoothTextsBlocked, MarketDateBoothViews } from '@/lib/phase4-types';
 import type { MarketDateStatusView, ReminderSent } from '@/lib/types';
 import { canAccessMarket, useStaffGuard } from '@/components/staff-guard';
 import { StatusChip } from '@/components/status-chip';
@@ -18,7 +18,16 @@ import { AdminShell, EmptyRow, LoadingScreen, TableCard, Td, Th, formatDateLabel
  * formatted market-local with `Intl.DateTimeFormat({ timeZone })` — never
  * the browser's own locale/offset APIs, which would render it in the
  * visitor's own timezone instead of the market's.
+ *
+ * Booth assignments (Phase 4): every date has the panel for the NEXT market
+ * (built from this date's check-ins). The first market date of a season also
+ * has an "Opening day" panel that assigns the date itself, starting from the
+ * seasonal vendors - it is shown first while that market is still ahead.
  */
+
+/** The status response with the Phase 4 fix assignments views (see phase4-types.ts). */
+type StatusView = Omit<MarketDateStatusView, 'assignments'> & MarketDateBoothViews;
+
 export default function MarketDateStatusPage() {
   return (
     <Suspense fallback={<LoadingScreen />}>
@@ -32,7 +41,7 @@ function MarketDateStatusRoute() {
   const params = useSearchParams();
   const id = params.get('id') || '';
 
-  const [status, setStatus] = useState<MarketDateStatusView | null>(null);
+  const [status, setStatus] = useState<StatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [flash, setFlash] = useState('');
@@ -41,7 +50,7 @@ function MarketDateStatusRoute() {
     if (!id) return;
     setError('');
     try {
-      const s = await api.getMarketDateStatus(id);
+      const s = await api.getMarketDateBoothStatus(id);
       setStatus(s);
     } catch (err: any) {
       setError(err?.message || 'Could not load this market date');
@@ -80,6 +89,22 @@ function MarketDateStatusRoute() {
   const canEdit = canAccessMarket(user, market.id);
   const canClose = isAdmin && date.status === 'collecting' && Date.parse(date.end_at) < Date.now() && !date.actions.deadline_processed_at;
 
+  // The season opener assigns itself. Before opening day that panel is the one staff work in, so it comes first;
+  // afterwards it is history and the "next market" panel leads.
+  const opener = status.opener_assignments ?? null;
+  const openerFirst = !!opener && !opener.target_started;
+  const openerCard = opener ? (
+    <AssignmentsCard
+      dateId={date.id}
+      timeZone={market.timezone}
+      view={opener}
+      canEdit={canEdit}
+      onReload={reload}
+      onError={setError}
+      onFlash={flashMsg}
+    />
+  ) : null;
+
   return (
     <AdminShell
       title={`${weekdayLabel(date.date)}, ${formatDateLabel(date.date)}`}
@@ -115,13 +140,23 @@ function MarketDateStatusRoute() {
         />
         <ExcludedCard status={status} />
         <DeadlineCard status={status} />
-        <AssignmentsCard
-          status={status}
-          canEdit={canEdit}
-          onReload={reload}
-          onError={setError}
-          onFlash={flashMsg}
-        />
+        {openerFirst && openerCard}
+        {status.assignments ? (
+          <AssignmentsCard
+            dateId={date.id}
+            timeZone={market.timezone}
+            view={status.assignments}
+            canEdit={canEdit}
+            onReload={reload}
+            onError={setError}
+            onFlash={flashMsg}
+          />
+        ) : (
+          <Card title="Assignments">
+            <p className="text-sm text-earth-400 m-0">Booth assignments are not available from the server yet.</p>
+          </Card>
+        )}
+        {!openerFirst && openerCard}
         <MessagesCard status={status} />
         {canClose && (
           <CloseCard
@@ -188,7 +223,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 
 /* ─── Timeline ─── */
 
-function TimelineCard({ status }: { status: MarketDateStatusView }) {
+function TimelineCard({ status }: { status: StatusView }) {
   const { date, market, schedule, next_due } = status;
   const tz = market.timezone;
 
@@ -290,14 +325,14 @@ function RecipientsCard({
   canEdit,
   onResend,
 }: {
-  status: MarketDateStatusView;
+  status: StatusView;
   canEdit: boolean;
   onResend: (producerId: string) => Promise<void>;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const tz = status.market.timezone;
 
-  const respondedChip = (r: MarketDateStatusView['recipients'][number]) => {
+  const respondedChip = (r: StatusView['recipients'][number]) => {
     if (!r.responded) return 'no_response';
     return r.late ? 'late' : 'responded';
   };
@@ -363,7 +398,7 @@ function RecipientsCard({
 
 /* ─── Excluded ─── */
 
-function ExcludedCard({ status }: { status: MarketDateStatusView }) {
+function ExcludedCard({ status }: { status: StatusView }) {
   return (
     <Card title={`Excluded (${status.counts.excluded})`}>
       <TableCard minWidth={480}>
@@ -396,7 +431,7 @@ function ExcludedCard({ status }: { status: MarketDateStatusView }) {
 
 /* ─── After the deadline ─── */
 
-function DeadlineCard({ status }: { status: MarketDateStatusView }) {
+function DeadlineCard({ status }: { status: StatusView }) {
   const { date } = status;
   if (!date.actions.deadline_processed_at) {
     return (
@@ -452,13 +487,14 @@ function DeadlineCard({ status }: { status: MarketDateStatusView }) {
   );
 }
 
-/* ─── Assignments (Phase 4: booth drafts and approval) ─── */
+/* ─── Assignments (Phase 4: booth drafts, approval and booth texts) ─── */
 
 const UNASSIGNED_REASON: Record<string, string> = {
   no_power_stall: 'no powered stall is free',
-  no_pair: 'no two neighbouring free booths (second space not available)',
+  no_pair: 'second space not available (no free neighbouring booth)',
   full: 'every booth is taken',
   no_food_truck_slot: 'no food truck slot',
+  not_placed: 'not placed yet - a booth is free',
 };
 
 const SKIPPED_REASON: Record<string, string> = {
@@ -467,61 +503,123 @@ const SKIPPED_REASON: Record<string, string> = {
   no_attendees: 'nobody checked in as attending',
 };
 
+const CAN_ADD_REASON: Record<string, string> = {
+  not_attending: 'said not attending',
+  no_answer: 'no answer',
+  daily_plan: 'daily plan',
+};
+
+const BLOCKED_TEXT: Record<BoothTextsBlocked, string> = {
+  conflict: 'Booth texts are on hold: two vendors share a booth. Nobody is texted until that is fixed.',
+  cancelled: 'Booth texts are on hold: the market these booths are for was cancelled. Nothing is sent for a cancelled date.',
+  started: 'No booth texts are sent any more: the market these booths are for has already started.',
+};
+
+const TEXT_STATUS_LABEL: Record<BoothTextStatus, string> = {
+  none: 'not approved',
+  pending: 'pending',
+  sent: 'sent',
+  failed: 'failed',
+  blocked: 'on hold',
+  excluded: 'cannot be texted',
+  skipped: 'not sent',
+};
+
+const TEXT_STATUS_COLOR: Record<BoothTextStatus, { bg: string; text: string }> = {
+  none: { bg: '#F3F4F6', text: '#6B7280' },
+  pending: { bg: '#DBEAFE', text: '#1E40AF' },
+  sent: { bg: '#D1FAE5', text: '#065F46' },
+  failed: { bg: '#FEE2E2', text: '#991B1B' },
+  blocked: { bg: '#FEF3C7', text: '#92400E' },
+  excluded: { bg: '#F3F4F6', text: '#6B7280' },
+  skipped: { bg: '#FEF3C7', text: '#92400E' },
+};
+
+function TextStatusChip({ status }: { status: BoothTextStatus }) {
+  const c = TEXT_STATUS_COLOR[status];
+  return (
+    <span className="inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap" style={{ background: c.bg, color: c.text }}>
+      {TEXT_STATUS_LABEL[status]}
+    </span>
+  );
+}
+
+function joinLabels(labels: string[]): string {
+  if (labels.length <= 1) return labels[0] ?? '';
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+
 function AssignmentsCard({
-  status,
+  dateId,
+  timeZone,
+  view: a,
   canEdit,
   onReload,
   onError,
   onFlash,
 }: {
-  status: MarketDateStatusView;
+  dateId: string;
+  timeZone: string;
+  view: BoothAssignmentsView;
   canEdit: boolean;
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
   onFlash: (msg: string) => void;
 }) {
-  const a = status.assignments;
-  const tz = status.market.timezone;
+  const tz = timeZone;
+  const cycle = a.cycle;
+  const isOpener = cycle === 'opener';
   const [busy, setBusy] = useState(false);
+  const [resending, setResending] = useState<string | null>(null);
   const [pending, setPending] = useState<{ boothId: string; producerId: string; secondId: string } | null>(null);
+  /** After approval a change is confirmed first: the vendors it touches are texted. */
+  const [confirm, setConfirm] = useState<{ producer_id: string; booth_ids: string[] }[] | null>(null);
 
-  if (!a) {
-    return (
-      <Card title="Assignments">
-        <p className="text-sm text-earth-400 m-0">Booth assignments are not available from the server yet.</p>
-      </Card>
-    );
-  }
-
-  const actions = status.date.actions;
   const boothById = new Map(a.booths.map((b) => [b.booth.id, b]));
   const heldBy = (producerId: string): string[] => a.booths.filter((b) => b.assignment?.producer_id === producerId).map((b) => b.booth.id);
   const labelOf = (id: string) => boothById.get(id)?.booth.label || id;
-  const vendors = new Map(a.attending.map((v) => [v.producer_id, v]));
+  const vendors = new Map<string, { business_name: string; spaces: 1 | 2 }>();
+  for (const v of a.attending) vendors.set(v.producer_id, v);
+  for (const v of a.can_add) vendors.set(v.producer_id, v);
+  for (const b of a.booths) {
+    if (b.assignment && !vendors.has(b.assignment.producer_id)) vendors.set(b.assignment.producer_id, { business_name: b.assignment.business_name, spaces: 1 });
+  }
+  const nameOf = (producerId: string) => vendors.get(producerId)?.business_name || producerId;
 
   const assignedVendors = new Set(a.booths.filter((b) => b.assignment).map((b) => b.assignment!.producer_id));
   const approved = !!a.approved_at;
-  const textsSent = !!a.booth_texts_sent_at;
   const drafted = !!a.drafted_at;
   const hasDraft = !!a.assignments_draft_at;
-  const editsLocked = textsSent || !canEdit;
-  const canDraft = canEdit && !approved && a.target_date !== null;
+  // Changes stay open after approval and after the texts went out, until the market they are for has started.
+  const editsLocked = !canEdit || !hasDraft || (approved && a.target_started);
+  const canDraft = canEdit && !approved && a.target_date !== null && !a.target_started && a.draft_open;
+  const addedByStaff = a.attending.filter((v) => v.added_by_staff);
 
-  const options: AssignOption[] = a.attending.map((v) => ({
-    producer_id: v.producer_id,
-    business_name: v.business_name,
-    spaces: v.spaces,
-    held: heldBy(v.producer_id).map(labelOf),
-  }));
+  // Everyone on the list, then everyone staff may add by hand.
+  const options: AssignOption[] = [
+    ...a.attending.map((v) => ({
+      producer_id: v.producer_id,
+      business_name: v.added_by_staff ? `${v.business_name} (added by staff)` : v.business_name,
+      spaces: v.spaces,
+      held: heldBy(v.producer_id).map(labelOf),
+    })),
+    ...a.can_add.map((v) => ({
+      producer_id: v.producer_id,
+      business_name: `+ ${v.business_name} (${CAN_ADD_REASON[v.reason] || v.reason.replace(/_/g, ' ')})`,
+      spaces: v.spaces,
+      held: [] as string[],
+    })),
+  ];
 
   const fail = (err: any, fallback: string) => onError(err?.message || fallback);
 
   const draft = async () => {
     setBusy(true);
     try {
-      await api.draftAssignments(status.date.id, drafted);
+      const res = await api.draftBoothAssignments(dateId, { cycle, redraft: drafted });
       await onReload();
-      onFlash(drafted ? 'Assignments redrafted' : 'Assignments drafted');
+      const warned = res.draft.warnings.length;
+      onFlash(`${drafted ? 'Assignments redrafted' : 'Assignments drafted'}${warned ? ` - ${warned} vendor${warned === 1 ? '' : 's'} to look at (power)` : ''}`);
     } catch (err: any) {
       fail(err, 'Could not draft assignments');
     } finally {
@@ -529,20 +627,16 @@ function AssignmentsCard({
     }
   };
 
-  /** Turn "these producers should now hold exactly these booths" into the PATCH changes. */
-  const send = async (moves: Map<string, string[]>) => {
-    const changes = Array.from(moves.entries())
-      .filter(([pid, ids]) => {
-        const before = heldBy(pid);
-        return before.length !== ids.length || before.some((id) => !ids.includes(id));
-      })
-      .map(([producer_id, booth_ids]) => ({ producer_id, booth_ids }));
-    if (changes.length === 0) return;
+  const save = async (changes: { producer_id: string; booth_ids: string[] }[]) => {
     setBusy(true);
     try {
-      const res = await api.updateAssignments(status.date.id, changes);
+      const res = await api.updateBoothAssignments(dateId, { cycle, changes });
       await onReload();
-      onFlash(res.warning === 'approved' ? 'Saved. These assignments were already approved; booth texts are not re-sent for changes.' : 'Assignments saved');
+      onFlash(
+        res.warning === 'approved'
+          ? 'Saved. Each vendor whose booth changed is texted on the next engine run (outside quiet hours).'
+          : 'Assignments saved',
+      );
     } catch (err: any) {
       fail(err, 'Could not save the change');
       await onReload();
@@ -551,11 +645,27 @@ function AssignmentsCard({
     }
   };
 
+  /** Turn "these producers should now hold exactly these booths" into the PATCH changes; after approval, ask first. */
+  const send = async (moves: Map<string, string[]>) => {
+    const changes = Array.from(moves.entries())
+      .filter(([pid, ids]) => {
+        const before = heldBy(pid);
+        return before.length !== ids.length || before.some((id) => !ids.includes(id));
+      })
+      .map(([producer_id, booth_ids]) => ({ producer_id, booth_ids }));
+    if (changes.length === 0) return;
+    if (approved) {
+      setConfirm(changes);
+      return;
+    }
+    await save(changes);
+  };
+
   /** Place `producerId` ('' to empty the booth) on `boothId`, plus an optional second booth. */
   const place = async (boothId: string, producerId: string, secondId?: string) => {
     const moves = new Map<string, string[]>();
     const take = (id: string) => {
-      // Whoever holds the booth now loses it.
+      // Whoever holds the booth now loses it (in the same change, so it is never double booked).
       const holder = boothById.get(id)?.assignment?.producer_id;
       if (holder && holder !== producerId) {
         const current = moves.get(holder) ?? heldBy(holder);
@@ -588,7 +698,7 @@ function AssignmentsCard({
   const approve = async () => {
     setBusy(true);
     try {
-      const res = await api.approveAssignments(status.date.id);
+      const res = await api.approveBoothAssignments(dateId, { cycle });
       await onReload();
       const t = res.texts;
       if (t.deferred_until) onFlash(`Approved. Booth texts wait for quiet hours to end: ${formatInstant(t.deferred_until, tz)}.`);
@@ -601,34 +711,59 @@ function AssignmentsCard({
     }
   };
 
-  const textStatus = (): string => {
-    if (textsSent) {
-      return `Booth texts sent ${formatInstant(a.booth_texts_sent_at, tz)}: ${actions.booth_text_recipients ?? 0} sent, ${actions.booth_text_failed ?? 0} failed, ${actions.booth_text_excluded ?? 0} not texted.`;
+  const resend = async (producerId: string) => {
+    setResending(producerId);
+    try {
+      const res = await api.resendBoothText(dateId, producerId, cycle);
+      await onReload();
+      onFlash(`Booth text resent - ${res.sms.status}${res.sms.error ? `: ${res.sms.error}` : ''}`);
+    } catch (err: any) {
+      fail(err, 'Could not resend the booth text');
+    } finally {
+      setResending(null);
     }
-    if (approved && a.booth_texts_due_at) return `Approved. Booth texts are deferred by quiet hours until ${formatInstant(a.booth_texts_due_at, tz)}.`;
-    if (approved) return 'Approved. Booth texts go out on the next engine tick.';
-    return 'Not approved. No booth texts have gone out.';
+  };
+
+  const textStatus = (): string => {
+    if (!approved) return 'Not approved. No booth texts have gone out.';
+    if (a.booth_texts_blocked) return BLOCKED_TEXT[a.booth_texts_blocked];
+    if (a.booth_texts_due_at) {
+      if (a.booth_texts_too_late) return 'Quiet hours end when this market starts, so the texts still owed will NOT be sent. Please call those vendors.';
+      if (Date.parse(a.booth_texts_due_at) > Date.now()) return `Booth texts wait for quiet hours to end: ${formatInstant(a.booth_texts_due_at, tz)}.`;
+      return 'Booth texts go out on the next engine run (within a few minutes).';
+    }
+    const c = a.text_counts;
+    const parts = [`${c.sent} sent`];
+    if (c.failed) parts.push(`${c.failed} failed`);
+    if (c.excluded) parts.push(`${c.excluded} cannot be texted`);
+    if (c.skipped) parts.push(`${c.skipped} not sent`);
+    return `${a.booth_texts_sent_at ? `Booth texts went out ${formatInstant(a.booth_texts_sent_at, tz)}` : 'Booth texts'}: ${parts.join(', ')}.`;
   };
 
   const secondChoices = pending
     ? a.booths.filter((b) => b.booth.active && b.booth.id !== pending.boothId && boothById.get(pending.boothId)?.booth.row === b.booth.row)
     : [];
 
+  const targetLabel = a.target_date ? a.target_date.date_label : '';
+
   return (
-    <Card title="Assignments">
+    <Card title={isOpener ? 'Opening day assignments' : 'Assignments'}>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
           <div className="text-sm font-semibold text-earth-800">
-            {a.target_date ? <>Booths for {a.target_date.date_label}</> : 'No later market date to assign'}
+            {a.target_date ? <>{isOpener ? 'Booths for opening day, ' : 'Booths for '}{targetLabel}</> : 'No later market date to assign'}
             <span className="text-text-muted font-normal"> - season {a.season}</span>
           </div>
           <div className="text-xs text-earth-500 mt-0.5">
-            Built from the vendors who said they are attending next. {a.assignments_draft_at ? `Drafted ${formatInstant(a.assignments_draft_at, tz)}.` : drafted ? 'Drafting ran but placed no one.' : 'Not drafted yet.'}
+            {isOpener
+              ? 'Opening day: the list starts from seasonal vendors. Add daily-plan vendors by hand. '
+              : 'Built from the vendors who said they are attending next. Anyone else in this season can be added by hand. '}
+            {a.assignments_draft_at ? `Drafted ${formatInstant(a.assignments_draft_at, tz)}.` : drafted ? 'Drafting ran but placed no one.' : isOpener ? 'Not drafted yet - press Draft to start.' : 'Not drafted yet.'}
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {approved && <StatusChip status="approved" />}
-          {textsSent && <StatusChip status="sent" />}
+          {a.booth_texts_sent_at && <StatusChip status="sent" />}
           {canDraft &&
             (hasDraft ? (
               <ConfirmButton
@@ -655,7 +790,7 @@ function AssignmentsCard({
               confirmLabel={`Approve and text ${assignedVendors.size} vendor${assignedVendors.size === 1 ? '' : 's'} their booth?`}
               danger={false}
               busy={busy}
-              disabled={a.summary.conflicts > 0 || assignedVendors.size === 0}
+              disabled={a.summary.conflicts > 0 || assignedVendors.size === 0 || a.target_cancelled || a.target_started}
               onConfirm={approve}
             />
           )}
@@ -663,30 +798,75 @@ function AssignmentsCard({
       </div>
 
       {a.drafts_skipped && !hasDraft && (
-        <div className="mb-3"><Notice kind="warning">Drafting was skipped: {SKIPPED_REASON[a.drafts_skipped] || a.drafts_skipped.replace(/_/g, ' ')}.</Notice></div>
+        <div className="mb-3"><Notice kind="warning">Drafting was skipped: {SKIPPED_REASON[a.drafts_skipped] || a.drafts_skipped.replace(/_/g, ' ')}.{a.drafts_skipped === 'no_attendees' ? ' Press Draft to start an empty list and add vendors by hand.' : ''}</Notice></div>
       )}
-      {!status.in_window && !textsSent && (
+      {a.target_cancelled && !approved && (
         <div className="mb-3">
-          <Notice kind="warning">This date is outside the automatic window. Approving sends the booth texts right away; the engine will not retry them later.</Notice>
+          <Notice kind="warning">
+            {isOpener
+              ? 'This market date was cancelled, so its assignments cannot be approved.'
+              : `The market these booths are for (${targetLabel}) was cancelled. Redraft to assign the next market date instead.`}
+          </Notice>
         </div>
       )}
-      {a.summary.conflicts > 0 && (
-        <div className="mb-3"><Notice kind="error">{a.summary.conflicts} booth{a.summary.conflicts === 1 ? ' is' : 's are'} double booked. Fix them before approving.</Notice></div>
+      {a.target_started && !approved && hasDraft && (
+        <div className="mb-3"><Notice kind="warning">The market these booths are for has already started, so they can no longer be approved or texted.</Notice></div>
       )}
-      {textsSent && (
-        <div className="mb-3"><Notice kind="info">Booth texts have gone out, so assignments are locked. Changes after texts are a separate feature.</Notice></div>
+      {a.summary.conflicts > 0 && (
+        <div className="mb-3">
+          <Notice kind="error">
+            {a.summary.conflicts} booth{a.summary.conflicts === 1 ? ' is' : 's are'} double booked:{' '}
+            {a.conflicts.map((c) => `${c.booth_label} (${c.producers.map((p) => p.business_name).join(' and ')})`).join('; ')}.{' '}
+            {approved ? 'No booth text goes out until this is fixed.' : 'Fix this before approving.'} Give one of them another booth; the grid shows
+            only one vendor per booth.
+          </Notice>
+        </div>
+      )}
+      {approved && a.booth_texts_blocked && a.booth_texts_blocked !== 'conflict' && (
+        <div className="mb-3"><Notice kind="warning">{BLOCKED_TEXT[a.booth_texts_blocked]}</Notice></div>
+      )}
+      {approved && !a.booth_texts_blocked && a.booth_texts_too_late && (
+        <div className="mb-3"><Notice kind="error">Quiet hours end when this market starts, so the booth texts still owed will NOT be sent. Please call those vendors.</Notice></div>
+      )}
+      {approved && canEdit && !a.target_started && (
+        <div className="mb-3">
+          <Notice kind="info">
+            These assignments are approved. You can still change them: each vendor whose booth changes is texted the new booth once, and a vendor you
+            remove is told they no longer have one. Texts go out on the next engine run, never during quiet hours.
+          </Notice>
+        </div>
+      )}
+      {approved && a.target_started && (
+        <div className="mb-3"><Notice kind="info">This market has started, so its assignments are locked.</Notice></div>
+      )}
+      {a.warnings.length > 0 && (
+        <div className="mb-3">
+          <Notice kind="warning">
+            Needs electricity but holds no powered booth:{' '}
+            {a.warnings.map((w, i) => (
+              <span key={w.producer_id}>
+                {i > 0 ? '; ' : ''}
+                {w.business_name} ({joinLabels(w.booth_ids.map(labelOf))})
+              </span>
+            ))}
+            . The vendor was left where they usually stand - move them if they need a powered stall.
+          </Notice>
+        </div>
       )}
 
       <div className="flex flex-wrap gap-2 mb-4 text-xs">
         <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{assignedVendors.size} vendor{assignedVendors.size === 1 ? '' : 's'} placed</span>
         <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{a.summary.unassigned} unplaced</span>
         <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{a.summary.booths_free} of {a.summary.booths_total} booths free</span>
+        {addedByStaff.length > 0 && (
+          <span className="px-2 py-1 rounded-full bg-earth-50 border border-earth-100">{addedByStaff.length} added by staff</span>
+        )}
       </div>
 
       {pending && (
         <div className="mb-4 p-3 rounded-xl border border-earth-100 bg-earth-15 max-w-xl space-y-3">
           <div className="text-sm font-semibold text-earth-800">
-            {vendors.get(pending.producerId)?.business_name} has two spaces. Second space next to {labelOf(pending.boothId)}:
+            {nameOf(pending.producerId)} has two spaces. Second space next to {labelOf(pending.boothId)}:
           </div>
           <select
             value={pending.secondId}
@@ -720,13 +900,53 @@ function AssignmentsCard({
         </div>
       )}
 
-      <AssignGrid booths={a.booths} options={options} disabled={editsLocked || busy} onSelect={onSelect} />
+      {confirm && (
+        <div className="mb-4 p-3 rounded-xl border border-amber-200 bg-amber-50 max-w-xl space-y-3" role="alertdialog" aria-label="Confirm the change">
+          <div className="text-sm font-semibold text-earth-800">These assignments are approved. Save this change and text the vendor?</div>
+          <ul className="m-0 pl-4 text-sm text-earth-700 space-y-1">
+            {confirm.map((c) => (
+              <li key={c.producer_id}>
+                <span className="font-semibold">{nameOf(c.producer_id)}</span>{' '}
+                {c.booth_ids.length > 0
+                  ? `will be texted the new booth: ${joinLabels(c.booth_ids.map(labelOf))}.`
+                  : 'will be texted that they no longer have a booth for this date (if they were already told one).'}
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-earth-500 m-0">Texts go out on the next engine run, never during quiet hours. A vendor who cannot be texted is listed below.</p>
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={() => setConfirm(null)} className="px-3 py-1.5 rounded-xl text-xs font-semibold border border-earth-200 bg-white text-earth-700 cursor-pointer">Cancel</button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                const changes = confirm;
+                setConfirm(null);
+                await save(changes);
+              }}
+              className="px-3 py-1.5 rounded-xl text-xs font-semibold text-white border-none cursor-pointer disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, #21512C, #3D7A47)' }}
+            >
+              Save and text
+            </button>
+          </div>
+        </div>
+      )}
+
+      <AssignGrid booths={a.booths} options={options} disabled={editsLocked || busy || confirm !== null} onSelect={onSelect} />
+      {canEdit && !hasDraft && a.target_date && (
+        <p className="text-xs text-earth-500 mt-2 mb-0">
+          {a.draft_open
+            ? 'Draft the assignments first; then any booth can be changed, and any vendor of this season added, from the lists above.'
+            : 'This market has not happened yet. After it, its check-ins decide who is assigned for the next market; the draft opens then.'}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-5">
         <div>
           <div className="text-xs font-semibold text-earth-500 mb-1.5">Not placed ({a.unassigned.length})</div>
           {a.unassigned.length === 0 ? (
-            <p className="text-sm text-earth-400 m-0">Everyone attending has a booth.</p>
+            <p className="text-sm text-earth-400 m-0">Everyone on the list has a booth.</p>
           ) : (
             <ul className="m-0 p-0 list-none space-y-1">
               {a.unassigned.map((u, i) => (
@@ -737,59 +957,147 @@ function AssignmentsCard({
               ))}
             </ul>
           )}
-        </div>
-        <div>
-          <div className="text-xs font-semibold text-earth-500 mb-1.5">Not attending ({a.not_attending.length})</div>
-          {a.not_attending.length === 0 ? (
-            <p className="text-sm text-earth-400 m-0">Nobody.</p>
-          ) : (
-            <ul className="m-0 p-0 list-none space-y-1">
-              {a.not_attending.map((u) => (
-                <li key={u.producer_id} className="text-sm">
-                  <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
-                </li>
-              ))}
-            </ul>
+          {addedByStaff.length > 0 && (
+            <>
+              <div className="text-xs font-semibold text-earth-500 mb-1.5 mt-3">Added by staff ({addedByStaff.length})</div>
+              <ul className="m-0 p-0 list-none space-y-1">
+                {addedByStaff.map((v) => (
+                  <li key={v.producer_id} className="text-sm">
+                    <Link href={`/admin/producers/detail?id=${encodeURIComponent(v.producer_id)}`} className="text-green-700 no-underline hover:underline">{v.business_name}</Link>
+                    <span className="text-text-muted text-xs"> - {joinLabels(v.booth_ids.map(labelOf)) || 'no booth'}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </div>
-        <div>
-          <div className="text-xs font-semibold text-earth-500 mb-1.5">No answer ({a.no_answer.length})</div>
-          {a.no_answer.length === 0 ? (
-            <p className="text-sm text-earth-400 m-0">Everyone answered.</p>
-          ) : (
-            <ul className="m-0 p-0 list-none space-y-1">
-              {a.no_answer.map((u) => (
-                <li key={u.producer_id} className="text-sm">
-                  <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        {isOpener ? (
+          <div className="sm:col-span-2">
+            <div className="text-xs font-semibold text-earth-500 mb-1.5">Not on the list - add by hand ({a.can_add.length})</div>
+            {a.can_add.length === 0 ? (
+              <p className="text-sm text-earth-400 m-0">Every active vendor of this season is on the list.</p>
+            ) : (
+              <ul className="m-0 p-0 list-none space-y-1">
+                {a.can_add.map((u) => (
+                  <li key={u.producer_id} className="text-sm">
+                    <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
+                    <span className="text-text-muted text-xs"> - {CAN_ADD_REASON[u.reason] || u.reason.replace(/_/g, ' ')}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : (
+          <>
+            <div>
+              <div className="text-xs font-semibold text-earth-500 mb-1.5">Not attending ({a.not_attending.length})</div>
+              {a.not_attending.length === 0 ? (
+                <p className="text-sm text-earth-400 m-0">Nobody.</p>
+              ) : (
+                <ul className="m-0 p-0 list-none space-y-1">
+                  {a.not_attending.map((u) => (
+                    <li key={u.producer_id} className="text-sm">
+                      <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-earth-500 mb-1.5">No answer ({a.no_answer.length})</div>
+              {a.no_answer.length === 0 ? (
+                <p className="text-sm text-earth-400 m-0">Everyone answered.</p>
+              ) : (
+                <ul className="m-0 p-0 list-none space-y-1">
+                  {a.no_answer.map((u) => (
+                    <li key={u.producer_id} className="text-sm">
+                      <Link href={`/admin/producers/detail?id=${encodeURIComponent(u.producer_id)}`} className="text-green-700 no-underline hover:underline">{u.business_name}</Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="mt-5 pt-4 border-t border-earth-100">
         <div className="text-xs font-semibold text-earth-500 mb-1.5">Booth texts</div>
         <p className="text-sm text-earth-700 m-0 mb-3">{textStatus()}</p>
-        {a.messages.length > 0 && (
-          <TableCard minWidth={480}>
+        {approved && a.texts.length > 0 && (
+          <TableCard minWidth={640}>
             <thead>
               <tr className="border-b border-border-light">
-                <Th>To</Th>
+                <Th>Vendor</Th>
+                <Th>Text</Th>
                 <Th>Status</Th>
-                <Th>When</Th>
+                <Th>Last sent</Th>
+                {canEdit && <Th />}
               </tr>
             </thead>
             <tbody>
-              {a.messages.map((m) => (
-                <tr key={m.id} className="border-b border-border-light last:border-none">
-                  <Td><span className="font-mono text-[12px]">{m.to}</span></Td>
-                  <Td><StatusChip status={m.status} /></Td>
-                  <Td><span className="text-[12px]">{formatInstant(m.created_at, tz)}</span></Td>
+              {a.texts.map((t) => (
+                <tr key={t.producer_id} className="border-b border-border-light last:border-none">
+                  <Td>
+                    <Link href={`/admin/producers/detail?id=${encodeURIComponent(t.producer_id)}`} className="font-semibold text-green-700 no-underline hover:underline">
+                      {t.business_name}
+                    </Link>
+                  </Td>
+                  <Td>
+                    <span className="text-[12px]">
+                      {t.type === 'release' ? `No booth any more (was ${joinLabels(t.booth_labels) || 'assigned'})` : `Booth ${joinLabels(t.booth_labels)}`}
+                    </span>
+                  </Td>
+                  <Td>
+                    <TextStatusChip status={t.status} />
+                    {t.status === 'excluded' && t.reason && <div className="text-[11px] text-text-muted mt-0.5">{reasonLabel(t.reason)}</div>}
+                    {t.status === 'skipped' && <div className="text-[11px] text-text-muted mt-0.5">could not be texted earlier - resend</div>}
+                  </Td>
+                  <Td><span className="text-[12px]">{t.last_message ? formatInstant(t.last_message.created_at, tz) : '—'}</span></Td>
+                  {canEdit && (
+                    <Td className="text-right">
+                      {t.can_resend && (
+                        <ConfirmButton
+                          label="Resend"
+                          confirmLabel="Send this text again"
+                          danger={false}
+                          busy={resending === t.producer_id}
+                          onConfirm={() => resend(t.producer_id)}
+                        />
+                      )}
+                    </Td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </TableCard>
+        )}
+        {a.messages.length > 0 && (
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-earth-500 cursor-pointer">Every booth text sent for this date ({a.messages.length})</summary>
+            <div className="mt-2">
+              <TableCard minWidth={560}>
+                <thead>
+                  <tr className="border-b border-border-light">
+                    <Th>To</Th>
+                    <Th>Text</Th>
+                    <Th>Status</Th>
+                    <Th>When</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {a.messages.map((m) => (
+                    <tr key={m.id} className="border-b border-border-light last:border-none">
+                      <Td><span className="font-mono text-[12px]">{m.to}</span></Td>
+                      <Td><span className="text-[12px]">{m.type === 'release' ? 'Release notice' : `Booth ${joinLabels(m.booth_labels)}`}</span></Td>
+                      <Td><StatusChip status={m.status} /></Td>
+                      <Td><span className="text-[12px]">{formatInstant(m.created_at, tz)}</span></Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </TableCard>
+            </div>
+          </details>
         )}
       </div>
     </Card>
@@ -798,7 +1106,7 @@ function AssignmentsCard({
 
 /* ─── Messages ─── */
 
-function MessagesCard({ status }: { status: MarketDateStatusView }) {
+function MessagesCard({ status }: { status: StatusView }) {
   const tz = status.market.timezone;
   return (
     <Card title={`Messages (${status.messages.length})`}>

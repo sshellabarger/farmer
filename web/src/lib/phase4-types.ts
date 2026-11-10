@@ -414,6 +414,139 @@ export interface BoothDoc {
 
 export type AssignmentSource = 'usual' | 'suggested' | 'manual';
 
+/* ── The assignments view (Phase 4 fix, booth side): cycles, hand-added vendors, per-vendor booth texts ── */
+
+/**
+ * `next`: a date's check-ins assign the NEXT market (every date has this cycle).
+ * `opener`: the first market date of the season assigns ITSELF, starting from
+ * the vendors on the seasonal plan; staff draft it by hand.
+ */
+export type AssignmentCycleMode = 'next' | 'opener';
+
+/** Why approved booth texts are held back: two vendors on one booth, a cancelled target date, or a target that has started. */
+export type BoothTextsBlocked = 'conflict' | 'cancelled' | 'started';
+
+/**
+ * Per vendor: `none` (not approved), `pending` (the engine will send it),
+ * `sent`, `failed` (the provider refused; staff resend), `blocked` (held, see
+ * `booth_texts_blocked`), `excluded` (cannot be texted, see `reason`),
+ * `skipped` (could not be texted when the texts went out and can be now).
+ */
+export type BoothTextStatus = 'none' | 'pending' | 'sent' | 'failed' | 'blocked' | 'excluded' | 'skipped';
+
+/** `not_placed`: a suitable booth is free (nothing drafted yet, or staff took the booth away). */
+export type BoothUnassignedReason = 'no_power_stall' | 'no_pair' | 'full' | 'no_food_truck_slot' | 'not_placed';
+
+export interface BoothTextRow {
+  producer_id: string;
+  business_name: string;
+  /** `release`: the vendor was told a booth and has been taken off the date. */
+  type: 'assignment' | 'release';
+  booth_labels: string[];
+  status: BoothTextStatus;
+  reason: string | null;
+  last_message: { id: string; status: string; created_at: string } | null;
+  can_resend: boolean;
+}
+
+/** One cycle's assignments as GET /api/market-dates/:id/status returns them (`assignments`, `opener_assignments`). */
+export interface BoothAssignmentsView {
+  cycle: AssignmentCycleMode;
+  /** False while a `next` cycle cannot be drafted yet (its own market has not ended); always true for an opener. */
+  draft_open: boolean;
+  target_date: { id: string; date: string; date_label: string; start_at: string } | null;
+  target_cancelled: boolean;
+  target_started: boolean;
+  season: string;
+  drafted_at: string | null;
+  assignments_draft_at: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  booth_texts_sent_at: string | null;
+  /** When the owed booth texts go out; null when none are owed or they are held. */
+  booth_texts_due_at: string | null;
+  /** Quiet hours end at or after the market's start: the owed texts will never be sent. */
+  booth_texts_too_late: boolean;
+  booth_texts_blocked: BoothTextsBlocked | null;
+  drafts_skipped: 'no_next_date' | 'no_booths' | 'no_attendees' | null;
+  booths: {
+    booth: BoothDoc;
+    assignment: { id: string; producer_id: string; business_name: string; source: AssignmentSource; assigned_by: string; assigned_at: string } | null;
+  }[];
+  attending: {
+    producer_id: string;
+    business_name: string;
+    spaces: 1 | 2;
+    electric: boolean;
+    booth_kind: BoothKind;
+    fee_plan: 'seasonal' | 'daily';
+    usual_booth_id: string | null;
+    booth_ids: string[];
+    /** Not on the cycle's own list: staff placed this vendor by hand. */
+    added_by_staff: boolean;
+  }[];
+  /** Current-season vendors who are not on the list and may be placed by hand. */
+  can_add: {
+    producer_id: string;
+    business_name: string;
+    spaces: 1 | 2;
+    electric: boolean;
+    booth_kind: BoothKind;
+    fee_plan: 'seasonal' | 'daily';
+    reason: 'not_attending' | 'no_answer' | 'daily_plan';
+  }[];
+  unassigned: { producer_id: string; business_name: string; reason: BoothUnassignedReason }[];
+  warnings: { producer_id: string; business_name: string; reason: 'power_mismatch'; booth_ids: string[] }[];
+  not_attending: { producer_id: string; business_name: string }[];
+  no_answer: { producer_id: string; business_name: string }[];
+  summary: { assigned: number; unassigned: number; booths_total: number; booths_free: number; conflicts: number };
+  conflict_booth_ids: string[];
+  /** Every vendor on each double-booked booth (the grid shows only one of them). */
+  conflicts: { booth_id: string; booth_label: string; producers: { producer_id: string; business_name: string }[] }[];
+  texts: BoothTextRow[];
+  text_counts: Record<Exclude<BoothTextStatus, 'none'>, number>;
+  messages: { id: string; producer_id: string | null; to: string; status: string; created_at: string; type: 'assignment' | 'release'; booth_labels: string[] }[];
+}
+
+/** What the status route adds for booth assignments (Phase 4 fix). */
+export interface MarketDateBoothViews {
+  assignments?: BoothAssignmentsView;
+  /** The season opener's own cycle; null on every other date. */
+  opener_assignments?: BoothAssignmentsView | null;
+  is_season_opener?: boolean;
+}
+
+export interface BoothDraftResult {
+  skipped: 'no_next_date' | 'no_booths' | 'no_attendees' | null;
+  target_date_id: string | null;
+  vendors_placed: number;
+  vendors_unassigned: number;
+  rows_written: number;
+  superseded: number;
+  warnings: { producer_id: string; reason: 'power_mismatch'; booth_ids: string[] }[];
+}
+
+export interface BoothApproveTexts {
+  attempted: boolean;
+  sent: number;
+  failed: number;
+  excluded: number;
+  deferred_until: string | null;
+}
+
+export interface BoothAssignmentsUpdateResult {
+  assignments: BoothAssignmentsView;
+  /** `approved`: the assignments were already approved, so each vendor whose booths changed is texted the change. */
+  warning?: string;
+}
+
+export interface BoothTextResendResult {
+  sms: { status: 'sent' | 'simulated' | 'failed'; error?: string };
+  type: 'assignment' | 'release';
+  message_id: string | null;
+  assignments: BoothAssignmentsView;
+}
+
 export interface BoothAssignmentDoc {
   id: string;
   market_id: string;

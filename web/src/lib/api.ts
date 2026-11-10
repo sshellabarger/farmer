@@ -246,6 +246,35 @@ export const api = {
       { method: 'POST', body: JSON.stringify(data) },
     ),
   getMarketDateStatus: (id: string) => request<MarketDateStatusView>(`/market-dates/${encodeURIComponent(id)}/status`),
+  // ── Phase 4 fix (booth side): cycle-aware booth assignments. `cycle` is 'next' (a date's check-ins assign the
+  //    next market) or 'opener' (the season's first market date assigns itself). Types live in phase4-types.ts.
+  getMarketDateBoothStatus: (id: string) =>
+    request<Omit<MarketDateStatusView, 'assignments'> & import('./phase4-types').MarketDateBoothViews>(
+      `/market-dates/${encodeURIComponent(id)}/status`,
+    ),
+  draftBoothAssignments: (dateId: string, data: { cycle: import('./phase4-types').AssignmentCycleMode; redraft: boolean }) =>
+    request<{ draft: import('./phase4-types').BoothDraftResult; assignments: import('./phase4-types').BoothAssignmentsView }>(
+      `/market-dates/${encodeURIComponent(dateId)}/assignments/draft`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  updateBoothAssignments: (
+    dateId: string,
+    data: { cycle: import('./phase4-types').AssignmentCycleMode; changes: { producer_id: string; booth_ids: string[] }[] },
+  ) =>
+    request<import('./phase4-types').BoothAssignmentsUpdateResult>(`/market-dates/${encodeURIComponent(dateId)}/assignments`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  approveBoothAssignments: (dateId: string, data: { cycle: import('./phase4-types').AssignmentCycleMode }) =>
+    request<{ assignments: import('./phase4-types').BoothAssignmentsView; texts: import('./phase4-types').BoothApproveTexts }>(
+      `/market-dates/${encodeURIComponent(dateId)}/assignments/approve`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  resendBoothText: (dateId: string, producer_id: string, cycle: import('./phase4-types').AssignmentCycleMode) =>
+    request<import('./phase4-types').BoothTextResendResult>(
+      `/market-dates/${encodeURIComponent(dateId)}/assignments/resend-text${qs({ producer_id, cycle })}`,
+      { method: 'POST' },
+    ),
   resendCheckin: (id: string, producer_id: string) =>
     request<{ sms: SmsOutcome; token_expires_at: string; message_id: string | null }>(
       `/market-dates/${encodeURIComponent(id)}/resend-checkin${qs({ producer_id })}`,
