@@ -395,6 +395,11 @@ export async function marketDateRoutes(app: FastifyInstance) {
         return reply.status(409).send({ error: 'The engine is drafting this date right now; refresh the page', reason: 'in_progress' });
       case 'not_opener':
         return reply.status(409).send({ error: 'This date is not the first market date of the season', reason: 'not_opener' });
+      case 'not_ended':
+        return reply.status(409).send({
+          error: 'This market has not ended yet; the next market is assigned from its check-ins once it has',
+          reason: 'not_ended',
+        });
       case 'season_mismatch':
         return reply.status(409).send({
           error: 'This opening day belongs to a season the market is not in yet; set the season on the market before drafting it',

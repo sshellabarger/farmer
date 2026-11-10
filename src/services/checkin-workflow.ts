@@ -1360,7 +1360,7 @@ export async function resendBoothText(
 
 export type ManualDraftOutcome =
   | { status: 'drafted'; draft: DraftResult }
-  | { status: 'approved' | 'already_drafted' | 'in_progress' | 'not_opener' | 'season_mismatch' }
+  | { status: 'approved' | 'already_drafted' | 'in_progress' | 'not_opener' | 'season_mismatch' | 'not_ended' }
   | { status: 'skipped'; reason: DraftSkipReason };
 
 /**
@@ -1369,7 +1369,10 @@ export type ManualDraftOutcome =
  * to redrafting; a drafted one needs `redraft`; nothing to draft ONTO (no target
  * date, no booths) is `skipped` and nothing is written. Nobody on the list yet is
  * not a refusal here (Phase 4 fix): the draft is simply empty, and staff add
- * vendors by hand. The first draft takes the same `drafts` lock as the engine's
+ * vendors by hand - but only once the market has ended (`not_ended` before
+ * that): its check-ins do not exist yet, and an empty draft made months early
+ * would stand in for the engine's own draft after the market, which then never
+ * runs. The first draft takes the same `drafts` lock as the engine's
  * step, so the two cannot both draft; a redraft takes a lock keyed by the draft
  * version it replaces (`redraft_<assignments_draft_at ms>`), so two concurrent
  * redrafts collide and the next one, after the version moves on, does not.
@@ -1395,6 +1398,8 @@ export async function draftNow(
   if (mode === 'opener') {
     if ((await findSeasonOpener(db, market))?.id !== date.id) return { status: 'not_opener' };
     if (!openerSeasonMatches(market, now)) return { status: 'season_mismatch' };
+  } else if (date.end_at.getTime() > now.getTime()) {
+    return { status: 'not_ended' };
   }
 
   const prep = await prepareDraft(db, market, date, now, mode);

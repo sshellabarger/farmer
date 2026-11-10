@@ -371,7 +371,8 @@ describe('PATCH /api/market-dates/:id/assignments', () => {
     expect(boothsOf(rows, 'p3')).toEqual([]);
     expect(boothsOf(rows, 'p2')).toEqual(['wlrfm_v3', 'wlrfm_v4']);
     const view = (await app.inject({ method: 'GET', url: `/api/market-dates/${SOURCE}/status`, headers: auth('mgr_w') })).json().assignments;
-    expect(view.unassigned.map((u: any) => u.producer_id)).toEqual(['p3']);
+    // Free booths remain, so this is not a shortage: the vendor is simply not placed.
+    expect(view.unassigned).toEqual([{ producer_id: 'p3', business_name: 'Gamma Farm', reason: 'not_placed' }]);
     expect(view.summary.assigned).toBe(3);
   });
 
@@ -555,6 +556,8 @@ describe('GET /api/market-dates/:id/status — assignments', () => {
     expect(before.assignments.drafted_at).toBeNull();
     expect(before.assignments.booths.every((b: any) => b.assignment === null)).toBe(true);
     expect(before.assignments.attending.map((v: any) => v.producer_id)).toEqual(['p1', 'p2', 'p3', 'p6']);
+    expect(before.assignments.unassigned.map((u: any) => u.reason)).toEqual(['not_placed', 'not_placed', 'not_placed', 'not_placed']); // nothing drafted yet, booths are free
+    expect(before.assignments.texts).toEqual([]);
 
     await draft(app);
     const after = (await app.inject({ method: 'GET', url: `/api/market-dates/${SOURCE}/status`, headers: auth('mgr_w') })).json();

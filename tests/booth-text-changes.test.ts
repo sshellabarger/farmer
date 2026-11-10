@@ -155,7 +155,12 @@ describe('Y1 — no booth text for a double-booked booth', () => {
     const { r } = await drafted();
     const clash = await r.patch([{ producer_id: 'p3', booth_ids: ['wlrfm_v3'] }]);
     expect(clash.statusCode).toBe(200);
-    expect(clash.json().assignments).toMatchObject({ summary: { conflicts: 1 }, conflict_booth_ids: ['wlrfm_v3'] });
+    expect(clash.json().assignments).toMatchObject({
+      summary: { conflicts: 1 },
+      conflict_booth_ids: ['wlrfm_v3'],
+      // The grid shows one vendor per booth, so the view names everyone on a double-booked one.
+      conflicts: [{ booth_id: 'wlrfm_v3', booth_label: 'V3', producers: [{ producer_id: 'p2', business_name: 'Beta Farm' }, { producer_id: 'p3', business_name: 'Gamma Farm' }] }],
+    });
     expect((await r.approve()).json().reason).toBe('conflicts');
   });
 

@@ -1141,6 +1141,12 @@ export interface Textability {
 export interface AssignmentsView {
   /** `next`: this date's check-ins assign the next market. `opener`: the season's first market date assigns itself. */
   cycle: CycleMode;
+  /**
+   * False while a `next` cycle cannot be drafted yet: its own market has not
+   * ended, so the check-ins that decide the next market do not exist. Always
+   * true for an opener (it is drafted ahead of its market).
+   */
+  draft_open: boolean;
   target_date: { id: string; date: string; date_label: string; start_at: Date } | null;
   /** Booth texts stop for a cancelled or started target; changes after approval stop once it has started. */
   target_cancelled: boolean;
@@ -1176,8 +1182,8 @@ export interface AssignmentsView {
   }[];
   /** Current-season vendors who are not on the list and whom staff may place by hand. */
   can_add: { producer_id: string; business_name: string; spaces: 1 | 2; electric: boolean; booth_kind: BoothKind; fee_plan: FeePlan; reason: CanAddReason }[];
-  /** `no_pair` also lists a two-space vendor who holds one booth. */
-  unassigned: { producer_id: string; business_name: string; reason: UnassignedReason }[];
+  /** Vendors on the list with no booth, or a two-space vendor holding one (`no_pair`). */
+  unassigned: { producer_id: string; business_name: string; reason: ViewUnassignedReason }[];
   /** `power_mismatch`: a vendor who needs electricity holds no powered stall. */
   warnings: { producer_id: string; business_name: string; reason: 'power_mismatch'; booth_ids: string[] }[];
   not_attending: { producer_id: string; business_name: string }[];
@@ -1185,6 +1191,8 @@ export interface AssignmentsView {
   summary: BoothSummary & { conflicts: number };
   /** Booth ids held by more than one vendor. */
   conflict_booth_ids: string[];
+  /** The same double bookings, with every vendor on each booth (the booth grid can only show one). */
+  conflicts: { booth_id: string; booth_label: string; producers: { producer_id: string; business_name: string }[] }[];
   /** One row per vendor who holds a booth (or was told one and lost it): what they have been told. */
   texts: BoothTextRow[];
   text_counts: Record<Exclude<BoothTextStatus, 'none'>, number>;
@@ -1211,18 +1219,24 @@ export function longDateLabel(date: string): string {
   return `${WEEKDAY_LABELS[wd]}, ${MONTHS[m - 1]} ${d}, ${y}`;
 }
 
-/** Why a vendor with no (or too few) booths is unplaced, judged against the booths still free. */
-function explainUnassigned(v: VendorInfo, held: number, freeBooths: BoothDoc[]): UnassignedReason {
-  if (v.booth_kind === 'food_truck') return 'no_food_truck_slot';
+/**
+ * Why a vendor on the list has no (or too few) booths, judged against the booths
+ * still free. `not_placed`: a booth that would suit them IS free - nothing has
+ * been drafted yet, or staff took their booth away - so it is not a shortage.
+ */
+export type ViewUnassignedReason = UnassignedReason | 'not_placed';
+
+function explainUnassigned(v: VendorInfo, held: number, freeBooths: BoothDoc[]): ViewUnassignedReason {
+  if (v.booth_kind === 'food_truck') return freeBooths.some((b) => b.kind === 'food_truck') ? 'not_placed' : 'no_food_truck_slot';
   if (held > 0) return 'no_pair'; // a two-space vendor with one booth: the second space is what is missing
   const stalls = freeBooths.filter((b) => b.kind === 'stall');
   if (stalls.length === 0) return 'full';
   if (v.spaces === 2) {
     const hasPair = stalls.some((a) => stalls.some((b) => b.row === a.row && b.order === a.order + 1 && (!v.electric || (a.power && b.power))));
-    return hasPair ? 'full' : 'no_pair';
+    return hasPair ? 'not_placed' : 'no_pair';
   }
   if (v.electric && !stalls.some((b) => b.power)) return 'no_power_stall';
-  return 'full';
+  return 'not_placed';
 }
 
 /** A `queued` row older than this never got the provider's answer: staff see it as failed and can resend. */
@@ -1378,6 +1392,7 @@ export async function buildAssignmentsView(
   const withoutBooth = (v: VendorInfo) => !holders.has(v.producer_id);
   return {
     cycle: cycle.mode,
+    draft_open: cycle.mode === 'opener' || date.end_at.getTime() <= now.getTime(),
     target_date: target ? { id: target.id, date: target.date, date_label: longDateLabel(target.date), start_at: target.start_at } : null,
     target_cancelled: targetCancelled,
     target_started: targetStarted,
@@ -1408,6 +1423,13 @@ export async function buildAssignmentsView(
     no_answer: attendance.no_answer.filter(withoutBooth).map((v) => ({ producer_id: v.producer_id, business_name: v.business_name })),
     summary: { ...summary, conflicts: conflictIds.length },
     conflict_booth_ids: conflictIds,
+    conflicts: conflictIds.map((boothId) => ({
+      booth_id: boothId,
+      booth_label: boothById.get(boothId)?.label ?? boothId,
+      producers: [...new Set(rows.filter((r) => r.booth_id === boothId).map((r) => r.producer_id))]
+        .map((id) => ({ producer_id: id, business_name: nameOf(id) }))
+        .sort((a, b) => a.business_name.localeCompare(b.business_name) || a.producer_id.localeCompare(b.producer_id)),
+    })),
     texts,
     text_counts,
     messages,

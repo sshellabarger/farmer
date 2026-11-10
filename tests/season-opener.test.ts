@@ -131,6 +131,21 @@ describe('the season opener is offered its own, self-sourced assignments', () =>
     expect(second.opener_assignments).toBeNull();
   });
 
+  it('the "next market" draft of a date cannot be made before that market has ended (it would stand in for the engine draft)', async () => {
+    const { db, next, opener } = await boot();
+    expect((await next.view()).draft_open).toBe(false);
+    expect((await opener.view()).draft_open).toBe(true);
+    const res = await next.draft(); // staff press Draft on the wrong card, seven weeks before opening day
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ reason: 'not_ended' });
+    expect(actionsOf(db, OPENER).drafts_generated_at).toBeNull(); // the engine's own draft after the market is still due
+    expect(db.count('workflow_locks')).toBe(0);
+    expect(db.count('booth_assignments')).toBe(0);
+    vi.setSystemTime(new Date('2027-04-03T17:00:00Z')); // the market has just ended
+    expect((await next.view()).draft_open).toBe(true);
+    expect((await next.draft()).statusCode).toBe(200);
+  });
+
   it('the engine never drafts an opener on its own', async () => {
     const { db } = await boot();
     const run = await tick(db, T_FEB);
