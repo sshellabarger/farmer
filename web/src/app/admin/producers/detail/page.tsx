@@ -48,6 +48,15 @@ interface InviteOutcome {
   url: string;
   email: string;
   sms: string;
+  /** An earlier invitation had its missing text or email sent now. */
+  completed: boolean;
+  quietUntil: string | null;
+}
+
+/** A text outcome in plain words; a text held for the market's quiet hours says until when. */
+function textOutcome(status: string, quietUntil?: string | null): string {
+  if (status === 'skipped_quiet_hours') return `held for quiet hours${quietUntil ? ` until ${formatStamp(quietUntil)}` : ''}`;
+  return status.replace(/_/g, ' ');
 }
 
 function ProducerDetail() {
@@ -69,7 +78,7 @@ function ProducerDetail() {
   const [error, setError] = useState('');
   const [flash, setFlash] = useState('');
   const [inviteOutcome, setInviteOutcome] = useState<InviteOutcome | null>(null);
-  const [inviteConflict, setInviteConflict] = useState<string | null>(null);
+  const [inviteConflict, setInviteConflict] = useState<{ marketId: string; quietUntil: string | null } | null>(null);
   const [inviting, setInviting] = useState(false);
 
   const reload = useCallback(async () => {
@@ -158,12 +167,13 @@ function ProducerDetail() {
     setInviteConflict(null);
     try {
       const r = await api.inviteProducer(producer.id, marketId, force);
-      setInviteOutcome({ marketId, url: r.url, email: r.invite.email_status, sms: r.invite.sms_status });
+      setInviteOutcome({ marketId, url: r.url, email: r.invite.email_status, sms: r.invite.sms_status, completed: r.completed === true, quietUntil: r.quiet_until ?? null });
       await copyText(r.url);
       await reload();
     } catch (err: any) {
-      if (err instanceof ApiError && err.status === 409 && /already invited/i.test(err.message)) setInviteConflict(marketId);
-      else setError(err?.message || 'Could not send the invitation');
+      if (err instanceof ApiError && err.status === 409 && (err.body.code === 'already_invited' || /already invited/i.test(err.message))) {
+        setInviteConflict({ marketId, quietUntil: typeof err.body.quiet_until === 'string' ? err.body.quiet_until : null });
+      } else setError(err?.message || 'Could not send the invitation');
     } finally {
       setInviting(false);
     }
@@ -222,7 +232,9 @@ function ProducerDetail() {
       {inviteOutcome && (
         <div className="mb-4">
           <Notice kind="success">
-            Invitation for {marketName(inviteOutcome.marketId)}: email {inviteOutcome.email.replace(/_/g, ' ')}, text {inviteOutcome.sms.replace(/_/g, ' ')}. The link was copied:{' '}
+            {inviteOutcome.completed ? 'Invitation completed' : 'Invitation'} for {marketName(inviteOutcome.marketId)}: email {inviteOutcome.email.replace(/_/g, ' ')}, text{' '}
+            {textOutcome(inviteOutcome.sms, inviteOutcome.quietUntil)}.
+            {inviteOutcome.sms === 'skipped_quiet_hours' && ' Invite again after quiet hours to send the text; the email is not repeated.'} The link was copied:{' '}
             <span className="font-mono text-[12px] break-all">{inviteOutcome.url}</span>
           </Notice>
         </div>
@@ -230,8 +242,9 @@ function ProducerDetail() {
       {inviteConflict && (
         <div className="mb-4">
           <Notice kind="warning">
-            {producer.business_name} was already invited for {marketName(inviteConflict)}.{' '}
-            <ConfirmButton label="Resend the invitation" confirmLabel="Resend" danger={false} busy={inviting} onConfirm={() => sendInvite(inviteConflict, true)} />
+            {producer.business_name} was already invited for {marketName(inviteConflict.marketId)}.{' '}
+            {inviteConflict.quietUntil && `The text is held for quiet hours until ${formatStamp(inviteConflict.quietUntil)}; invite again after that to send it. `}
+            <ConfirmButton label="Resend the invitation" confirmLabel="Resend" danger={false} busy={inviting} onConfirm={() => sendInvite(inviteConflict.marketId, true)} />
           </Notice>
         </div>
       )}
@@ -271,7 +284,8 @@ function ProducerDetail() {
               if (send) await reload();
               return r;
             } catch (err: any) {
-              setError(err?.message || 'Could not create the agreement link');
+              const until = err instanceof ApiError && err.body.code === 'quiet_hours' && typeof err.body.quiet_until === 'string' ? err.body.quiet_until : null;
+              setError(`${err?.message || 'Could not create the agreement link'}${until ? ` Quiet hours end ${formatStamp(until)}.` : ''}`);
               return null;
             }
           }}
@@ -885,7 +899,7 @@ function AgreementBlock({
       </div>
       {result && (
         <div className="mt-2 text-[12px] text-text-soft">
-          {result.sent ? `Text: ${result.sms.replace(/_/g, ' ')}. ` : copied ? 'Link copied. ' : ''}
+          {result.sent ? `Text: ${textOutcome(result.sms)}. ` : copied ? 'Link copied. ' : ''}
           <span className="font-mono break-all">{result.url}</span>
         </div>
       )}

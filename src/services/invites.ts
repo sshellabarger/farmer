@@ -5,9 +5,9 @@ import { localToUtc, addDays } from '../utils/tz.js';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
 import { sendEmail } from './email.js';
 import { trySendSms, type TrySendSmsResult } from './sms.js';
-import { marketFees, type FarmersMarket } from './markets.js';
+import { applicationsOpen, marketFees, quietUntil, type FarmersMarket } from './markets.js';
 import { listMembershipsForMarket } from './seasons.js';
-import { mintPurposeToken, purposeTokenUrl } from './purpose-tokens.js';
+import { mintPurposeToken, purposeTokenUrl, resolvePurposeToken } from './purpose-tokens.js';
 import { normalizeEmail } from './identity.js';
 
 /**
@@ -17,6 +17,12 @@ import { normalizeEmail } from './identity.js';
  * dedupe key and is also guarded by an atomically created
  * `application_invites` document, a forced resend carries neither.
  *
+ * Quiet hours (Phase 4 fix X5). These texts are triggered by staff, at
+ * whatever hour staff happen to work, so each send asks the market first
+ * (`quietUntil`): inside the market's quiet window the email still goes, the
+ * text does not (`skipped_quiet_hours`), and the invite record keeps the two
+ * channels apart so a later run sends exactly what is still missing.
+ *
  * Phone numbers and email addresses are never logged here.
  */
 
@@ -25,8 +31,17 @@ const E164_RE = /^\+[1-9]\d{6,14}$/;
 export const APPLICATION_TOKEN_FALLBACK_DAYS = 120;
 export const AGREEMENT_TOKEN_DAYS = 60;
 
-export type SmsOutcome = 'sent' | 'simulated' | 'failed' | 'duplicate' | 'skipped_no_phone' | 'skipped_opted_out';
+export type SmsOutcome = 'sent' | 'simulated' | 'failed' | 'duplicate' | 'skipped_no_phone' | 'skipped_opted_out' | 'skipped_quiet_hours';
 export type EmailOutcome = 'sent' | 'simulated' | 'failed' | 'skipped_no_email';
+
+/** The text reached the provider (or its log row already existed): nothing more to send on this channel. */
+export function smsDelivered(status: string): boolean {
+  return status === 'sent' || status === 'simulated' || status === 'duplicate';
+}
+
+export function emailDelivered(status: string): boolean {
+  return status === 'sent' || status === 'simulated';
+}
 
 /* ── Text templates (ASCII only) ── */
 
@@ -118,41 +133,76 @@ export interface InviteResend {
   sms_status: string;
 }
 
+/** A later run that sent a channel the first run could not (quiet hours, no phone yet, a failed email). */
+export interface InviteCompletion {
+  at: Date;
+  by: string;
+  /** null when that channel was not attempted on this run. */
+  email_status: string | null;
+  sms_status: string | null;
+}
+
+/**
+ * `pending` is what a channel reads between the atomic `create()` of the
+ * invite and its send: a request that died in that gap leaves a record that
+ * says, truthfully, that nothing went out, and the next run completes it.
+ */
+export type InviteEmailStatus = EmailOutcome | 'pending';
+export type InviteSmsStatus = SmsOutcome | 'pending';
+
 export interface ApplicationInviteDoc {
   market_id: string;
   season: string;
   producer_id: string;
   token: string;
   email: string | null;
-  email_status: EmailOutcome | 'simulated';
+  email_status: InviteEmailStatus;
+  /** When the email went out (the latest one); null while it has not. Tracked apart from the text. */
+  email_sent_at: Date | null;
   phone: string | null;
-  sms_status: SmsOutcome;
+  sms_status: InviteSmsStatus;
+  /** When the text went out (the latest one); null while it has not. */
+  sms_sent_at: Date | null;
   message_id: string | null;
   sent_by: string;
   sent_at: Date;
   resends: InviteResend[];
+  completions: InviteCompletion[];
 }
 
 export function inviteFromData(data: Record<string, unknown>): ApplicationInviteDoc {
   const resends = Array.isArray(data.resends) ? (data.resends as Record<string, unknown>[]) : [];
+  const completions = Array.isArray(data.completions) ? (data.completions as Record<string, unknown>[]) : [];
+  const emailStatus = (typeof data.email_status === 'string' ? data.email_status : 'skipped_no_email') as InviteEmailStatus;
+  const smsStatus = (typeof data.sms_status === 'string' ? data.sms_status : 'skipped_no_phone') as InviteSmsStatus;
+  const sentAt = toDateOrEpoch(data.sent_at);
   return {
     market_id: String(data.market_id ?? ''),
     season: String(data.season ?? ''),
     producer_id: String(data.producer_id ?? ''),
     token: String(data.token ?? ''),
     email: typeof data.email === 'string' ? data.email : null,
-    email_status: (typeof data.email_status === 'string' ? data.email_status : 'skipped_no_email') as ApplicationInviteDoc['email_status'],
+    email_status: emailStatus,
+    // A record written before the channels were tracked apart sent both when it was created.
+    email_sent_at: toDate(data.email_sent_at) ?? (emailDelivered(emailStatus) ? sentAt : null),
     phone: typeof data.phone === 'string' ? data.phone : null,
-    sms_status: (typeof data.sms_status === 'string' ? data.sms_status : 'skipped_no_phone') as SmsOutcome,
+    sms_status: smsStatus,
+    sms_sent_at: toDate(data.sms_sent_at) ?? (smsDelivered(smsStatus) ? sentAt : null),
     message_id: typeof data.message_id === 'string' ? data.message_id : null,
     sent_by: String(data.sent_by ?? ''),
-    sent_at: toDateOrEpoch(data.sent_at),
+    sent_at: sentAt,
     resends: resends.map((r) => ({
       at: toDateOrEpoch(r.at),
       by: String(r.by ?? ''),
       token: String(r.token ?? ''),
       email_status: String(r.email_status ?? ''),
       sms_status: String(r.sms_status ?? ''),
+    })),
+    completions: completions.map((c) => ({
+      at: toDateOrEpoch(c.at),
+      by: String(c.by ?? ''),
+      email_status: typeof c.email_status === 'string' ? c.email_status : null,
+      sms_status: typeof c.sms_status === 'string' ? c.sms_status : null,
     })),
   };
 }
@@ -172,14 +222,57 @@ function inviteEmailBody(market: FarmersMarket, season: string, link: string, ap
   ].join('\n');
 }
 
+/**
+ * What a run would send for one producer, decided from the invite record (if
+ * any), the producer as they are now and the hour. Pure, so the dry run and
+ * the real run can never disagree.
+ *
+ *   first    no record yet: the email (when there is an address) and the text
+ *            (unless `hold` says why not);
+ *   resend   `force` over an existing record: both channels again, the text
+ *            without a dedupe key (a deliberate repeat);
+ *   complete an existing record with a channel still missing that can go out
+ *            now: the email when it never went (no address then, or it
+ *            failed), the text when it was skipped (quiet hours, no phone
+ *            then, opted out then) and nothing holds it now. A text the
+ *            provider FAILED is not retried here: its log row holds the dedupe
+ *            key, so only a forced resend can send it again;
+ *   none     an existing record with nothing to add right now.
+ */
+export function planInvite(
+  existing: ApplicationInviteDoc | null,
+  opts: { force: boolean; email: string | null; hold: SmsOutcome | null },
+): { action: 'first' | 'resend' | 'complete' | 'none'; email: boolean; sms: boolean } {
+  if (!existing || opts.force) return { action: existing ? 'resend' : 'first', email: !!opts.email, sms: !opts.hold };
+  const email = !emailDelivered(existing.email_status) && !!opts.email;
+  const sms = !smsDelivered(existing.sms_status) && existing.sms_status !== 'failed' && !opts.hold;
+  return { action: email || sms ? 'complete' : 'none', email, sms };
+}
+
+/** Why the text of an invite cannot go out right now (the producer first, then the hour), or null. */
+function inviteTextHold(producer: Record<string, unknown>, quiet: Date | null): SmsOutcome | null {
+  return textBlocker(producer) ?? (quiet ? 'skipped_quiet_hours' : null);
+}
+
 export type InviteResult =
-  | { status: 'invited'; invite: ApplicationInviteDoc; url: string; resent: boolean }
+  /** `completed`: an existing invite had a missing channel sent on this run (same token). */
+  | { status: 'invited'; invite: ApplicationInviteDoc; url: string; resent: boolean; completed: boolean }
   | { status: 'already'; invite: ApplicationInviteDoc };
 
 /**
- * Invite one producer to apply for `season`. `force` re-sends an existing
- * invite (appending to `resends`, no dedupe key). The caller has already
- * checked that applications are open for `season`.
+ * Invite one producer to apply for `season`, or finish an invite an earlier
+ * run could only half send.
+ *
+ * The first invite `create()`s the record (the lock: two admins inviting at
+ * once produce one invite) and sends the email and, outside quiet hours, the
+ * text under the dedupe key `application_invite:<market>:<season>:<producer>`.
+ * A later run without `force` sends only what is still missing, with the SAME
+ * token and the SAME dedupe key, so re-running the invite after quiet hours
+ * texts exactly the producers who have not been texted, and a producer who
+ * gained a phone number since gets the text. `force` re-sends both channels
+ * (a new token, appended to `resends`, no dedupe key).
+ *
+ * The caller has already checked that applications are open for `season`.
  */
 export async function inviteProducer(args: {
   db: Firestore;
@@ -194,9 +287,93 @@ export async function inviteProducer(args: {
 }): Promise<InviteResult> {
   const { db, env, market, season, producerId, producer, actor, force, now } = args;
   const ref = db.collection('application_invites').doc(inviteDocId(market.id, season, producerId));
-  const existing = await ref.get();
-  if (existing.exists && !force) return { status: 'already', invite: inviteFromData(existing.data() as Record<string, unknown>) };
+  const existingSnap = await ref.get();
+  const existing = existingSnap.exists ? inviteFromData(existingSnap.data() as Record<string, unknown>) : null;
 
+  const email = producerEmail(producer);
+  const phone = typeof producer.phone === 'string' && E164_RE.test(producer.phone) ? producer.phone : null;
+  const hold = inviteTextHold(producer, quietUntil(market, now));
+  const plan = planInvite(existing, { force, email, hold });
+  const dedupeKey = `application_invite:${market.id}:${season}:${producerId}`;
+  const firstName = firstNameOf(typeof producer.contact_name === 'string' ? producer.contact_name : '');
+  const subject = `Apply for the ${season} ${market.name} season`;
+  const read = async () => inviteFromData(((await ref.get()).data() ?? {}) as Record<string, unknown>);
+
+  const sendText = (token: string, url: string, keyed: boolean) =>
+    trySendSms({
+      env,
+      db,
+      to: phone as string,
+      body: TEMPLATES_A1.application_invite({ season, market_name: market.name, first_name: firstName, link: url }),
+      kind: 'application_invite',
+      producer_id: producerId,
+      sent_by: actor,
+      extra: { token, market_id: market.id, season },
+      ...(keyed ? { dedupe_key: dedupeKey } : {}),
+    });
+
+  /* ── An existing invite, not forced: send what is still missing, or nothing ── */
+  if (existing && plan.action !== 'resend') {
+    const waiting = !smsDelivered(existing.sms_status) && existing.sms_status !== 'failed';
+    if (plan.action === 'none') {
+      // Keep the record honest about WHY the text is still waiting (it was "no phone", now it is "quiet hours").
+      if (waiting && hold && hold !== existing.sms_status) {
+        await ref.update({ sms_status: hold, phone, updated_at: now });
+        return { status: 'already', invite: await read() };
+      }
+      return { status: 'already', invite: existing };
+    }
+
+    // The same link the email (or an earlier text) carried, unless it can no longer be opened.
+    let token = existing.token;
+    const resolved = await resolvePurposeToken(db, token, 'application', now);
+    if (resolved.status !== 'ok') {
+      token = (
+        await mintPurposeToken(db, {
+          purpose: 'application',
+          producer_id: producerId,
+          market_id: market.id,
+          season,
+          expires_at: applicationTokenExpiry(market, now),
+          now,
+          created_by: actor,
+        })
+      ).token;
+    }
+    const url = purposeTokenUrl(env.APP_URL, 'application', token);
+
+    const update: Record<string, unknown> = { token, updated_at: now };
+    const tokenUpdate: Record<string, unknown> = {};
+    let emailStatus: EmailOutcome | null = null;
+    let smsStatus: SmsOutcome | null = null;
+    if (plan.email && email) {
+      emailStatus = await trySendEmail(env, email, subject, inviteEmailBody(market, season, url, env.APP_URL));
+      update.email = email;
+      update.email_status = emailStatus;
+      if (emailDelivered(emailStatus)) {
+        update.email_sent_at = now;
+        tokenUpdate.email_sent_at = now;
+      }
+    }
+    if (plan.sms && phone) {
+      const result = await sendText(token, url, true);
+      smsStatus = smsOutcome(result);
+      update.phone = phone;
+      update.sms_status = smsStatus;
+      update.message_id = result.message_id;
+      if (smsDelivered(smsStatus)) update.sms_sent_at = now;
+      if (result.message_id) tokenUpdate.sent_message_id = result.message_id;
+    } else if (waiting && hold && hold !== existing.sms_status) {
+      update.sms_status = hold;
+      update.phone = phone;
+    }
+    update.completions = [...existing.completions, { at: now, by: actor, email_status: emailStatus, sms_status: smsStatus }];
+    if (Object.keys(tokenUpdate).length > 0) await db.collection('link_tokens').doc(token).update(tokenUpdate);
+    await ref.update(update);
+    return { status: 'invited', invite: await read(), url, resent: false, completed: true };
+  }
+
+  /* ── A first invite, or a forced resend: a fresh token ── */
   const tokenDoc = await mintPurposeToken(db, {
     purpose: 'application',
     producer_id: producerId,
@@ -208,25 +385,24 @@ export async function inviteProducer(args: {
   });
   const url = purposeTokenUrl(env.APP_URL, 'application', tokenDoc.token);
 
-  const email = producerEmail(producer);
-  const blocker = textBlocker(producer);
-  const phone = typeof producer.phone === 'string' && E164_RE.test(producer.phone) ? producer.phone : null;
-
-  let resent = existing.exists;
-  if (!existing.exists) {
+  let resent = !!existing;
+  if (!existing) {
     const initial = {
       market_id: market.id,
       season,
       producer_id: producerId,
       token: tokenDoc.token,
       email,
-      email_status: email ? ('sent' as const) : ('skipped_no_email' as const),
+      email_status: email ? ('pending' as const) : ('skipped_no_email' as const),
+      email_sent_at: null,
       phone,
-      sms_status: blocker ?? ('sent' as const),
+      sms_status: hold ?? ('pending' as const),
+      sms_sent_at: null,
       message_id: null,
       sent_by: actor,
       sent_at: now,
       resends: [] as unknown[],
+      completions: [] as unknown[],
     };
     try {
       await ref.create(initial);
@@ -235,8 +411,7 @@ export async function inviteProducer(args: {
       // Another admin invited this producer between our read and this write.
       if (!force) {
         await db.collection('link_tokens').doc(tokenDoc.token).delete();
-        const winner = await ref.get();
-        return { status: 'already', invite: inviteFromData(winner.data() as Record<string, unknown>) };
+        return { status: 'already', invite: await read() };
       }
       resent = true;
     }
@@ -244,59 +419,53 @@ export async function inviteProducer(args: {
 
   // Sends. A first invite is idempotent by dedupe key; a forced resend is deliberate and carries none.
   let emailStatus: EmailOutcome = 'skipped_no_email';
-  if (email) {
-    const subject = `Apply for the ${season} ${market.name} season`;
-    emailStatus = await trySendEmail(env, email, subject, inviteEmailBody(market, season, url, env.APP_URL));
-  }
+  if (email) emailStatus = await trySendEmail(env, email, subject, inviteEmailBody(market, season, url, env.APP_URL));
 
-  let smsStatus: SmsOutcome = blocker ?? 'sent';
+  let smsStatus: SmsOutcome = hold ?? 'failed';
   let messageId: string | null = null;
-  if (!blocker && phone) {
-    const first = firstNameOf(typeof producer.contact_name === 'string' ? producer.contact_name : '');
-    const result = await trySendSms({
-      env,
-      db,
-      to: phone,
-      body: TEMPLATES_A1.application_invite({ season, market_name: market.name, first_name: first, link: url }),
-      kind: 'application_invite',
-      producer_id: producerId,
-      sent_by: actor,
-      extra: { token: tokenDoc.token, market_id: market.id, season },
-      ...(resent ? {} : { dedupe_key: `application_invite:${market.id}:${season}:${producerId}` }),
-    });
+  if (!hold && phone) {
+    const result = await sendText(tokenDoc.token, url, !resent);
     smsStatus = smsOutcome(result);
     messageId = result.message_id;
   }
 
   const tokenUpdate: Record<string, unknown> = {};
   if (messageId) tokenUpdate.sent_message_id = messageId;
-  if (emailStatus === 'sent' || emailStatus === 'simulated') tokenUpdate.email_sent_at = now;
+  if (emailDelivered(emailStatus)) tokenUpdate.email_sent_at = now;
   if (Object.keys(tokenUpdate).length > 0) await db.collection('link_tokens').doc(tokenDoc.token).update(tokenUpdate);
 
+  const update: Record<string, unknown> = { email_status: emailStatus, sms_status: smsStatus, message_id: messageId, updated_at: now };
+  if (emailDelivered(emailStatus)) update.email_sent_at = now;
+  if (smsDelivered(smsStatus)) update.sms_sent_at = now;
   if (resent) {
-    const current = inviteFromData(((await ref.get()).data() ?? {}) as Record<string, unknown>);
-    const resends = [
-      ...current.resends,
-      { at: now, by: actor, token: tokenDoc.token, email_status: emailStatus, sms_status: smsStatus },
-    ];
-    await ref.update({ resends, token: tokenDoc.token, email, phone, email_status: emailStatus, sms_status: smsStatus, message_id: messageId });
-  } else {
-    await ref.update({ email_status: emailStatus, sms_status: smsStatus, message_id: messageId });
+    const current = await read();
+    update.resends = [...current.resends, { at: now, by: actor, token: tokenDoc.token, email_status: emailStatus, sms_status: smsStatus }];
+    update.token = tokenDoc.token;
+    update.email = email;
+    update.phone = phone;
   }
+  await ref.update(update);
 
-  const finalDoc = inviteFromData(((await ref.get()).data() ?? {}) as Record<string, unknown>);
-  return { status: 'invited', invite: finalDoc, url, resent };
+  return { status: 'invited', invite: await read(), url, resent, completed: false };
 }
 
 /* ── Bulk: invite every returning producer ── */
 
 export interface InviteBatchResult {
   season: string;
+  /** False on a dry run made while the application window is closed (a real run is refused then). */
+  applications_open: boolean;
   candidates: number;
+  /** Producers invited on this run (a first invite, or a forced resend). */
   invited: number;
+  /** Producers already invited who had a missing channel (usually the text) sent on this run. */
+  completed: number;
   skipped_already: number;
   skipped_applied: number;
   skipped_no_contact: number;
+  /** Texts that did not go out because it is quiet hours at the market; run the invite again after `quiet_until`. */
+  held_quiet_hours: number;
+  quiet_until: Date | null;
   results: { producer_id: string; business_name: string; email_status: string; sms_status: string }[];
 }
 
@@ -312,6 +481,7 @@ export async function inviteReapply(args: {
 }): Promise<InviteBatchResult> {
   const { db, env, market, season, actor, force, dryRun, now } = args;
   const memberships = await listMembershipsForMarket(db, market.id);
+  const quiet = quietUntil(market, now);
 
   const otherSeason = new Set<string>();
   const thisSeason = new Set<string>();
@@ -330,7 +500,19 @@ export async function inviteReapply(args: {
     if (typeof a.prefill_producer_id === 'string') applied.add(a.prefill_producer_id);
   }
 
-  const out: InviteBatchResult = { season, candidates: 0, invited: 0, skipped_already: 0, skipped_applied: 0, skipped_no_contact: 0, results: [] };
+  const out: InviteBatchResult = {
+    season,
+    applications_open: applicationsOpen(market, now),
+    candidates: 0,
+    invited: 0,
+    completed: 0,
+    skipped_already: 0,
+    skipped_applied: 0,
+    skipped_no_contact: 0,
+    held_quiet_hours: 0,
+    quiet_until: quiet,
+    results: [],
+  };
 
   const producerIds = [...otherSeason].sort();
   for (const producerId of producerIds) {
@@ -355,27 +537,36 @@ export async function inviteReapply(args: {
     }
 
     if (dryRun) {
-      const already = !force && (await db.collection('application_invites').doc(inviteDocId(market.id, season, producerId)).get()).exists;
-      if (already) {
+      const snap = await db.collection('application_invites').doc(inviteDocId(market.id, season, producerId)).get();
+      const existing = snap.exists ? inviteFromData(snap.data() as Record<string, unknown>) : null;
+      const hold = inviteTextHold(producer, quiet);
+      const plan = planInvite(existing, { force, email, hold });
+      const textWaits = !existing || force || (!smsDelivered(existing.sms_status) && existing.sms_status !== 'failed');
+      const smsStatus = plan.sms ? 'would_send' : textWaits && hold ? hold : (existing?.sms_status ?? 'skipped_no_phone');
+      if (smsStatus === 'skipped_quiet_hours') out.held_quiet_hours += 1;
+      if (plan.action === 'none') {
         out.skipped_already += 1;
         continue;
       }
-      out.invited += 1;
+      if (plan.action === 'complete') out.completed += 1;
+      else out.invited += 1;
       out.results.push({
         producer_id: producerId,
         business_name: businessName,
-        email_status: email ? 'would_send' : 'skipped_no_email',
-        sms_status: blocker ?? 'would_send',
+        email_status: plan.email ? 'would_send' : (existing && !force ? existing.email_status : 'skipped_no_email'),
+        sms_status: smsStatus,
       });
       continue;
     }
 
     const result = await inviteProducer({ db, env, market, season, producerId, producer, actor, force, now });
+    if (result.invite.sms_status === 'skipped_quiet_hours') out.held_quiet_hours += 1;
     if (result.status === 'already') {
       out.skipped_already += 1;
       continue;
     }
-    out.invited += 1;
+    if (result.completed) out.completed += 1;
+    else out.invited += 1;
     out.results.push({
       producer_id: producerId,
       business_name: businessName,
@@ -447,6 +638,8 @@ function acceptanceEmailBody(p: {
 export interface AcceptanceSends {
   sms: SmsOutcome;
   email: boolean;
+  /** Set when the text was held for the market's quiet hours: when they end. Staff send the agreement link after that. */
+  quiet_until: Date | null;
 }
 
 /**
@@ -454,6 +647,10 @@ export interface AcceptanceSends {
  * (an approval never fails because a message did); the text is idempotent per
  * application (`acceptance:<application_id>`). The email is attempted when the
  * deployment has a sender address, or runs the console provider.
+ *
+ * Inside the market's quiet hours the email goes and the text does not
+ * (`skipped_quiet_hours`): an approval at 23:00 must not buzz a phone. Staff
+ * send the agreement link later through POST /api/memberships/:id/agreement-link.
  */
 export async function sendAcceptance(args: {
   db: Firestore;
@@ -473,14 +670,20 @@ export async function sendAcceptance(args: {
   insuranceHelpUrl: string | null;
   firstDate: string | null;
   actor: string;
+  now: Date;
 }): Promise<AcceptanceSends> {
   const { db, env, market, season } = args;
   const firstName = firstNameOf(args.contactName);
 
   let sms: SmsOutcome;
+  let quiet_until: Date | null = null;
   const blocker = textBlocker(args.producer);
+  const quiet = quietUntil(market, args.now);
   if (blocker) {
     sms = blocker;
+  } else if (quiet) {
+    sms = 'skipped_quiet_hours';
+    quiet_until = quiet;
   } else {
     const result = await trySendSms({
       env,
@@ -524,5 +727,5 @@ export async function sendAcceptance(args: {
     );
     email = outcome !== 'failed';
   }
-  return { sms, email };
+  return { sms, email, quiet_until };
 }

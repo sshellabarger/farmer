@@ -25,7 +25,7 @@ type Mode = 'none' | 'approve' | 'decline';
 interface ApprovalOutcome {
   producerId: string | null;
   membershipId: string | null;
-  sends: { sms: string; email: boolean } | null;
+  sends: { sms: string; email: boolean; quiet_until?: string | null } | null;
 }
 
 function ApplicationDetail() {
@@ -172,7 +172,15 @@ function ApplicationDetail() {
             {outcome?.sends && (
               <>
                 {' '}
-                Acceptance text: <strong>{outcome.sends.sms.replace(/_/g, ' ')}</strong>; acceptance email: <strong>{outcome.sends.email ? 'sent' : 'not sent'}</strong>.
+                Acceptance text: <strong>{outcome.sends.sms === 'skipped_quiet_hours' ? 'held for quiet hours' : outcome.sends.sms.replace(/_/g, ' ')}</strong>; acceptance email:{' '}
+                <strong>{outcome.sends.email ? 'sent' : 'not sent'}</strong>.
+                {outcome.sends.sms === 'skipped_quiet_hours' && (
+                  <>
+                    {' '}
+                    No text is sent during the market&apos;s quiet hours
+                    {outcome.sends.quiet_until ? ` (they end ${new Date(outcome.sends.quiet_until).toLocaleString()})` : ''}. Send the agreement link from the producer page after that.
+                  </>
+                )}
               </>
             )}
           </Notice>

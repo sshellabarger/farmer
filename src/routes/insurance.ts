@@ -6,6 +6,7 @@ import { writeAudit } from '../services/audit.js';
 import { issueAgreementLink, loadAgreementContext } from '../services/agreements.js';
 import { insuranceStatusAt, membershipFromData } from '../services/seasons.js';
 import type { MembershipView } from '../services/seasons.js';
+import { quietUntil } from '../services/markets.js';
 import { addDays, localToUtc, parseDate } from '../utils/tz.js';
 
 /**
@@ -120,6 +121,16 @@ export async function insuranceRoutes(app: FastifyInstance) {
     }
 
     const now = new Date();
+    // Staff-triggered texts wait for the market's quiet hours to end (fix X5). Refused before a
+    // token is minted; the link itself can still be created without sending.
+    const quiet = parsed.data.send ? quietUntil(ctx.market, now) : null;
+    if (quiet) {
+      return reply.status(409).send({
+        error: 'It is quiet hours at this market, so the text was not sent. Send it after quiet hours end, or create the link without sending.',
+        code: 'quiet_hours',
+        quiet_until: quiet,
+      });
+    }
     const issued = await issueAgreementLink(app.db, app.env, ctx, { user_id: user.id, now, send: parsed.data.send });
 
     await writeAudit(app.db, {

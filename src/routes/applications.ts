@@ -950,8 +950,9 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
         after: { status: 'approved', producer_id: producerId, membership_id: membershipId, season },
       });
 
-      // Messages are best-effort: the approval stands whatever happens to them.
-      let sends: { sms: string; email: boolean } = { sms: 'skipped_not_requested', email: false };
+      // Messages are best-effort: the approval stands whatever happens to them. Inside the market's
+      // quiet hours the email goes and the text is held (`skipped_quiet_hours`, with `quiet_until`).
+      let sends: { sms: string; email: boolean; quiet_until: Date | null } = { sms: 'skipped_not_requested', email: false, quiet_until: null };
       if (input.send) {
         const fees = marketFees(market);
         const totals = computeSeasonTotal(
@@ -978,12 +979,13 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
             insuranceHelpUrl: marketLegal(market).insurance_help_url,
             firstDate: firstSeasonDate(market),
             actor: user.id,
+            now,
           });
           const sentMessageId = sends.sms === 'sent' || sends.sms === 'simulated' ? `acceptance:${doc.id}` : null;
           if (sentMessageId) await app.db.collection('link_tokens').doc(agreement.token).update({ sent_message_id: sentMessageId });
         } catch (err) {
           app.log.error(err, 'Acceptance send failed');
-          sends = { sms: 'failed', email: false };
+          sends = { sms: 'failed', email: false, quiet_until: null };
         }
       }
 

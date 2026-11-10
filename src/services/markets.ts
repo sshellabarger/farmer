@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { DAYS_OF_WEEK, isValidTimeZone, parseDate, utcToLocalDate } from '../utils/tz.js';
 import type { DayOfWeek } from '../utils/tz.js';
+import { nextAllowedInstant } from '../utils/quiet-hours.js';
 import { SEASON_LABEL_RE } from './seasons.js';
 
 /**
@@ -654,4 +655,25 @@ export function applicationsOpen(market: Pick<FarmersMarket, 'season' | 'timezon
   if (s.application_open && today < s.application_open) return false;
   if (s.application_close && today > s.application_close) return false;
   return true;
+}
+
+/**
+ * When a text that STAFF trigger for this market (an invitation to re-apply,
+ * an acceptance, an agreement link) may next go out: null when the market is
+ * outside its quiet hours right now, else the instant the quiet window ends
+ * (market-local, `src/utils/quiet-hours.ts`). The engine defers its own texts
+ * the same way; a staff action cannot be deferred, so the caller sends the
+ * email, skips the text and says so (Phase 4 fix X5). A market document with
+ * no (or an unreadable) `quiet_hours` falls back to DEFAULT_QUIET_HOURS, as
+ * the engine does.
+ */
+export function quietUntil(market: Pick<FarmersMarket, 'quiet_hours' | 'timezone'>, now: Date): Date | null {
+  const tz = market.timezone || 'UTC';
+  let next: Date;
+  try {
+    next = nextAllowedInstant(now, market.quiet_hours ?? DEFAULT_QUIET_HOURS, tz);
+  } catch {
+    next = nextAllowedInstant(now, DEFAULT_QUIET_HOURS, tz);
+  }
+  return next.getTime() > now.getTime() ? next : null;
 }

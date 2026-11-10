@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import type { BoothDoc } from '@/lib/phase4-types';
+import type { BoothDoc, InviteBatchExtras } from '@/lib/phase4-types';
 import {
   DAYS_OF_WEEK,
   type DayOfWeek,
@@ -985,8 +985,8 @@ function InviteReturning({ market }: { market: Market }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [preview, setPreview] = useState<InviteBatchResult | null>(null);
-  const [result, setResult] = useState<InviteBatchResult | null>(null);
+  const [preview, setPreview] = useState<(InviteBatchResult & InviteBatchExtras) | null>(null);
+  const [result, setResult] = useState<(InviteBatchResult & InviteBatchExtras) | null>(null);
 
   const label = market.season?.label || '';
 
@@ -1021,13 +1021,17 @@ function InviteReturning({ market }: { market: Market }) {
   }
 
   const shown = result || preview;
+  // What a real run would send now: first invitations plus texts or emails an earlier run could not send.
+  const toSend = preview ? preview.invited + (preview.completed ?? 0) : 0;
+  const closed = preview?.applications_open === false;
 
   return (
     <div className="pt-4 mt-2 border-t border-earth-100 space-y-3">
       <div className="text-sm font-semibold text-earth-800">Invite returning vendors to apply for {label}</div>
       <p className="text-xs text-earth-500 m-0">
         Every producer with a membership in another season gets a link to a prefilled application, by email and by text when they have a phone and have not opted out.
-        Preview first; nothing is sent until you confirm.
+        Preview first; nothing is sent until you confirm. Invitations go out only while applications are open. During the market&apos;s quiet hours the emails go and the
+        texts wait: run the invitation again after quiet hours and only the missing texts are sent.
       </p>
       {error && <Notice kind="error">{error}</Notice>}
       <CheckboxField label="Also resend to producers who were already invited" checked={force} onChange={(c) => { setForce(c); setPreview(null); }} />
@@ -1035,11 +1039,11 @@ function InviteReturning({ market }: { market: Market }) {
         <SecondaryButton small onClick={() => run(true)} disabled={busy}>{busy && !preview ? 'Checking...' : 'Preview (dry run)'}</SecondaryButton>
         {preview && (
           <ConfirmButton
-            label={`Send ${preview.invited} invitation${preview.invited === 1 ? '' : 's'}`}
+            label={`Send ${toSend} invitation${toSend === 1 ? '' : 's'}`}
             confirmLabel="Yes, send them"
             danger={false}
             busy={busy}
-            disabled={preview.invited === 0}
+            disabled={toSend === 0 || closed}
             onConfirm={() => run(false)}
           />
         )}
@@ -1051,7 +1055,19 @@ function InviteReturning({ market }: { market: Market }) {
             {result ? 'Sent' : 'Dry run'} for season {shown.season}
           </div>
           <div>Candidates: {shown.candidates}</div>
+          {shown.applications_open === false && (
+            <div className="text-xs" style={{ color: '#B45309' }}>Applications are not open today, so nothing can be sent yet. Check the application dates above.</div>
+          )}
           <div>{result ? 'Invited' : 'Would be invited'}: {shown.invited}</div>
+          {(shown.completed ?? 0) > 0 && (
+            <div>{result ? 'Earlier invitations completed (the missing text or email was sent)' : 'Earlier invitations that would be completed'}: {shown.completed}</div>
+          )}
+          {(shown.held_quiet_hours ?? 0) > 0 && (
+            <div className="text-xs" style={{ color: '#B45309' }}>
+              {shown.held_quiet_hours} text{shown.held_quiet_hours === 1 ? ' is' : 's are'} held for quiet hours
+              {shown.quiet_until ? ` until ${new Date(shown.quiet_until).toLocaleString()}` : ''}. Run the invitation again after that to send {shown.held_quiet_hours === 1 ? 'it' : 'them'}; emails are not repeated.
+            </div>
+          )}
           <div>Already invited: {shown.skipped_already} - already applied: {shown.skipped_applied} - no contact on file: {shown.skipped_no_contact}</div>
           <div className="text-xs text-earth-500">Email: {tally(shown.results.map((r) => r.email_status))}</div>
           <div className="text-xs text-earth-500">Text: {tally(shown.results.map((r) => r.sms_status))}</div>

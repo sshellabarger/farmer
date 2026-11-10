@@ -627,7 +627,7 @@ describe('PATCH /api/applications/:id approve', () => {
     expect(String(texts[0]!.body)).toContain('Booth fee: $1250. Pay here: https://pay.test.example/booth');
     expect(String(texts[0]!.body)).toContain('Terry');
     expect(String(texts[0]!.body)).toMatch(/^[\x20-\x7e\n]+$/); // ASCII only
-    expect(body.sends).toEqual({ sms: 'simulated', email: true });
+    expect(body.sends).toEqual({ sms: 'simulated', email: true, quiet_until: null });
 
     // One acceptance email.
     expect(emailPrints()).toHaveLength(1);
@@ -759,7 +759,7 @@ describe('PATCH /api/applications/:id approve', () => {
     const id = (await submit(app)).json().id;
     const res = await approve(app, id, { send: false });
     expect(res.statusCode).toBe(200);
-    expect(res.json().sends).toEqual({ sms: 'skipped_not_requested', email: false });
+    expect(res.json().sends).toEqual({ sms: 'skipped_not_requested', email: false, quiet_until: null });
     expect(rowsOfKind(db, 'acceptance')).toHaveLength(0);
     expect(emailPrints()).toHaveLength(0);
     expect(smsPrints()).toHaveLength(0);
@@ -783,7 +783,7 @@ describe('PATCH /api/applications/:id approve', () => {
 
     const quiet = await approve(app, id, { send: false });
     expect(quiet.statusCode).toBe(200);
-    expect(quiet.json().sends).toEqual({ sms: 'skipped_not_requested', email: false });
+    expect(quiet.json().sends).toEqual({ sms: 'skipped_not_requested', email: false, quiet_until: null });
     expect((db.dump('applications')[id] as Record<string, unknown>).status).toBe('approved');
   });
 

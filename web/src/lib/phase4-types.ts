@@ -428,3 +428,21 @@ export interface BoothAssignmentDoc {
   superseded_by: string | null;
   superseded_at: string | null;
 }
+
+/* ── Phase 4 fixes, application side (staff-triggered texts and quiet hours) ── */
+
+/**
+ * Added to POST /api/markets/:id/invite-reapply. Inside the market's quiet
+ * hours the emails go and the texts are held (`sms_status:
+ * 'skipped_quiet_hours'`); running the invite again after `quiet_until` sends
+ * exactly the texts that are still missing (`completed`).
+ */
+export interface InviteBatchExtras {
+  /** False on a dry run made while the application window is closed (a real run is refused then). */
+  applications_open?: boolean;
+  /** Producers already invited who had a missing text or email sent on this run. */
+  completed?: number;
+  /** Texts held because it is quiet hours at the market. */
+  held_quiet_hours?: number;
+  quiet_until?: string | null;
+}
