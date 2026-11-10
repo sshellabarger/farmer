@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 import type { Env } from '../config/env.js';
 import { trySendSms, isAlreadyExists, type SmsKind } from './sms.js';
 import { checkinUrl, findOpenCheckin, recordAttendingNext, staffForMarket, toDate } from './open-checkin.js';
+import { currentSeason, isVendorOfRecord, listMembershipsForProducer, type SeasonSource } from './seasons.js';
 
 /**
  * Phase 3 inbound handler (SPEC §7.4, Phase 3 contract §5.1).
@@ -100,16 +101,28 @@ async function repliedRecently(db: Firestore, phone: string, now: Date): Promise
   });
 }
 
-/** The producer's first `active` membership market id, sorted by market id, or null. */
-async function firstActiveMembershipMarketId(db: Firestore, producerId: string): Promise<string | null> {
-  const snap = await db.collection('producer_memberships').where('producer_id', '==', producerId).get();
-  const activeMarketIds = snap.docs
-    .map((d) => d.data() as Record<string, unknown>)
-    .filter((m) => m.status === 'active')
-    .map((m) => String(m.market_id ?? ''))
-    .filter((id) => id.length > 0)
-    .sort((a, b) => a.localeCompare(b));
-  return activeMarketIds[0] ?? null;
+/**
+ * The market whose staff hear from this producer when no check-in is open:
+ * the first market (by id) where the producer has an `active` membership IN
+ * THAT MARKET'S CURRENT SEASON, or null.
+ *
+ * Memberships belong to one season (D33) and are read through seasons.ts, so
+ * last season's row does not count: a vendor who was active at a market in
+ * 2026 and did not return in 2027 no longer has their texts forwarded to
+ * that market's manager (Phase 4 fix X10). With no current membership
+ * anywhere the forward still reaches the admins (`staffForMarket('')`).
+ */
+export async function firstActiveMembershipMarketId(db: Firestore, producerId: string, now: Date): Promise<string | null> {
+  const active = (await listMembershipsForProducer(db, producerId)).filter((m) => isVendorOfRecord(m) && m.market_id.length > 0);
+  const marketIds = [...new Set(active.map((m) => m.market_id))].sort((a, b) => a.localeCompare(b));
+  for (const marketId of marketIds) {
+    if (marketId.includes('/')) continue;
+    const doc = await db.collection('farmers_markets').doc(marketId).get();
+    // A membership whose market document is gone reads against the legacy season, as every other reader does.
+    const season = currentSeason(doc.exists ? (doc.data() as SeasonSource) : { timezone: 'UTC' }, now);
+    if (active.some((m) => m.market_id === marketId && m.season === season)) return marketId;
+  }
+  return null;
 }
 
 async function marketNameOf(db: Firestore, marketId: string): Promise<string> {
@@ -234,7 +247,7 @@ export async function handleInboundText({
   // (4) A known producer gets the check-in workflow treatment.
   if (producerRef && producerData && producerId) {
     const open = await findOpenCheckin(db, producerId, now);
-    const marketId = open?.market_id ?? (await firstActiveMembershipMarketId(db, producerId)) ?? '';
+    const marketId = open?.market_id ?? (await firstActiveMembershipMarketId(db, producerId, now)) ?? '';
     const marketName = await marketNameOf(db, marketId);
     const link = open ? checkinUrl(env.APP_URL, open.token) : null;
 
