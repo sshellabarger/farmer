@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { planAssignments, conflictedBoothIds, computeBoothSummary } from '../src/services/booth-assignments.js';
-import type { PlanVendor } from '../src/services/booth-assignments.js';
+import {
+  planAssignments, conflictedBoothIds, computeBoothSummary, planBoothTexts, boothTextsSettled, boothTextsAllowedAt, seasonOpenerOf,
+} from '../src/services/booth-assignments.js';
+import type { BoothTextLogEntry, PlanVendor } from '../src/services/booth-assignments.js';
 import type { BoothDoc } from '../src/services/booths.js';
+import { assignmentCycleFromData, marketDateFromData } from '../src/services/market-dates.js';
 
 // The pure drafting algorithm (contract §3.5). Layout mirrors the WLRFM map as DATA built here:
 // two rows of 11 (V1-V11 west, V12-V22 east) plus a food-truck slot; V12-V14 are powered.
@@ -120,10 +123,34 @@ describe('planAssignments — electricity', () => {
     expect(r.unassigned).toEqual([{ producer_id: 'a', reason: 'no_power_stall' }]);
   });
 
-  it('does not seat an electric vendor in an unpowered usual booth', () => {
+  it('keeps an electric vendor in an unpowered usual booth and warns staff instead of silently moving them (contract 3.5)', () => {
     const r = planAssignments({ booths: layout(), vendors: [vendor('a', { electric: true, usual_booth_id: id('V3') })], fixed: [] });
-    expect(labelsOf(r, 'a')).toEqual(['V12']);
-    expect(r.placed[0]!.source).toBe('suggested');
+    expect(labelsOf(r, 'a')).toEqual(['V3']);
+    expect(r.placed[0]!.source).toBe('usual');
+    expect(r.unassigned).toEqual([]);
+    expect(r.warnings).toEqual([{ producer_id: 'a', reason: 'power_mismatch', booth_ids: [id('V3')] }]);
+    // A powered usual stall, or no need for power, is no warning.
+    expect(planAssignments({ booths: layout(), vendors: [vendor('a', { electric: true, usual_booth_id: id('V12') })], fixed: [] }).warnings).toEqual([]);
+    expect(planAssignments({ booths: layout(), vendors: [vendor('a', { usual_booth_id: id('V3') })], fixed: [] }).warnings).toEqual([]);
+  });
+
+  it('gives an electric two-space vendor on a powered row-end stall the unpowered neighbour (not one stall and no_pair)', () => {
+    // V11 is the last stall of the west row and the only powered one there: its one neighbour, V10, has no power.
+    const r = planAssignments({ booths: layout(['V11']), vendors: [vendor('a', { spaces: 2, electric: true, usual_booth_id: id('V11') })], fixed: [] });
+    expect(labelsOf(r, 'a')).toEqual(['V10', 'V11']);
+    expect(r.placed[0]!.source).toBe('usual');
+    expect(r.unassigned).toEqual([]);
+    expect(r.warnings).toEqual([]); // the usual stall is where they plug in
+    // The same vendor on a powered usual stall in the middle of the row: order + 1 first, whatever its power flag.
+    const mid = planAssignments({ booths: layout(['V5']), vendors: [vendor('a', { spaces: 2, electric: true, usual_booth_id: id('V5') })], fixed: [] });
+    expect(labelsOf(mid, 'a')).toEqual(['V5', 'V6']);
+    expect(mid.unassigned).toEqual([]);
+  });
+
+  it('warns once for an electric two-space vendor whose usual stall and neighbour both lack power', () => {
+    const r = planAssignments({ booths: layout(), vendors: [vendor('a', { spaces: 2, electric: true, usual_booth_id: id('V3') })], fixed: [] });
+    expect(labelsOf(r, 'a')).toEqual(['V3', 'V4']);
+    expect(r.warnings).toEqual([{ producer_id: 'a', reason: 'power_mismatch', booth_ids: [id('V3'), id('V4')] }]);
   });
 
   it('keeps non-electric vendors off powered stalls while others remain', () => {
@@ -264,5 +291,137 @@ describe('summary helpers', () => {
       { booth_id: id('V1'), producer_id: 'a' }, { booth_id: id('V2'), producer_id: 'a' }, { booth_id: id('V3'), producer_id: 'b' },
     ]);
     expect(s).toEqual({ assigned: 2, unassigned: 1, booths_total: 23, booths_free: 20 });
+  });
+});
+
+// ─── Phase 4 fix: what each vendor is owed, read from the rows and the log ───
+
+describe('planBoothTexts — booth texts follow the current assignment', () => {
+  const T = (min: number) => new Date(Date.UTC(2026, 8, 22, 15, min));
+  const booths = layout();
+  const row = (rowId: string, producer: string, label: string, at = T(0)) => ({ id: rowId, producer_id: producer, booth_id: id(label), assigned_at: at });
+  let n = 0;
+  function entry(producer: string, extra: Partial<BoothTextLogEntry>): BoothTextLogEntry {
+    n += 1;
+    return {
+      id: `m${n}`, producer_id: producer, to: '+15015550101', status: 'sent', created_at: T(1), seq: n, type: 'assignment',
+      assignment_id: null, booth_ids: [], booth_labels: [], ...extra,
+    };
+  }
+  const told = (producer: string, rowId: string, labels: string[], extra: Partial<BoothTextLogEntry> = {}) =>
+    entry(producer, { assignment_id: rowId, booth_ids: labels.map(id), booth_labels: labels, ...extra });
+  const released = (producer: string, rowId: string, labels: string[], extra: Partial<BoothTextLogEntry> = {}) =>
+    entry(producer, { type: 'release', assignment_id: rowId, booth_labels: labels, ...extra });
+
+  it('owes every seated vendor one first text, keyed on their newest current row, labels in booth order', () => {
+    const plan = planBoothTexts({ rows: [row('r2', 'a', 'V8'), row('r1', 'a', 'V7'), row('r3', 'b', 'Food truck')], booths, log: [] });
+    expect(plan).toEqual([
+      expect.objectContaining({ producer_id: 'a', type: 'assignment', assignment_id: 'r2', booth_labels: ['V7', 'V8'], state: 'owed', changed: false, seq: 1 }),
+      expect.objectContaining({ producer_id: 'b', type: 'assignment', assignment_id: 'r3', booth_labels: ['Food truck'], state: 'owed', changed: false }),
+    ]);
+  });
+
+  it('owes nothing once the vendor has been told exactly this assignment (sent, simulated or still queued)', () => {
+    for (const status of ['sent', 'simulated']) {
+      const [item] = planBoothTexts({ rows: [row('r1', 'a', 'V7')], booths, log: [told('a', 'r1', ['V7'], { status })] });
+      expect(item).toMatchObject({ state: 'sent', changed: false });
+    }
+    const [queued] = planBoothTexts({ rows: [row('r1', 'a', 'V7')], booths, log: [told('a', 'r1', ['V7'], { status: 'queued' })] });
+    expect(queued!.state).toBe('queued');
+  });
+
+  it('a provider failure is `failed`, not owed: the engine does not retry it', () => {
+    const [item] = planBoothTexts({ rows: [row('r1', 'a', 'V7')], booths, log: [told('a', 'r1', ['V7'], { status: 'failed' })] });
+    expect(item).toMatchObject({ state: 'failed', changed: false });
+    // A staff resend (a second, delivered row for the same assignment) settles it.
+    const [after] = planBoothTexts({ rows: [row('r1', 'a', 'V7')], booths, log: [told('a', 'r1', ['V7'], { status: 'failed' }), told('a', 'r1', ['V7'], { created_at: T(2) })] });
+    expect(after!.state).toBe('sent');
+  });
+
+  it('a changed assignment is owed one corrective text ("is now"), keyed on the new row', () => {
+    const [item] = planBoothTexts({ rows: [row('r9', 'a', 'V6', T(5))], booths, log: [told('a', 'r1', ['V7'])] });
+    expect(item).toMatchObject({ type: 'assignment', assignment_id: 'r9', booth_labels: ['V6'], state: 'owed', changed: true });
+    expect(item!.seq).toBeGreaterThan(1);
+  });
+
+  it('changed and changed back before anything was sent owes nothing: what the vendor was told is still true', () => {
+    const [item] = planBoothTexts({ rows: [row('r7', 'a', 'V7', T(9))], booths, log: [told('a', 'r1', ['V7'])] });
+    expect(item).toMatchObject({ assignment_id: 'r7', state: 'sent', changed: false });
+  });
+
+  it('a vendor who was told a booth and removed is owed one release notice; one never told gets nothing', () => {
+    const plan = planBoothTexts({ rows: [], booths, log: [told('a', 'r1', ['V7', 'V8']), told('b', 'r2', ['V1'], { status: 'failed' })] });
+    expect(plan).toEqual([expect.objectContaining({ producer_id: 'a', type: 'release', assignment_id: 'r1', booth_ids: [], booth_labels: ['V7', 'V8'], state: 'owed' })]);
+  });
+
+  it('a delivered release is `sent`, a failed one is `failed`, and a vendor seated again afterwards is owed a new text', () => {
+    const log = [told('a', 'r1', ['V7']), released('a', 'r1', ['V7'], { created_at: T(3) })];
+    expect(planBoothTexts({ rows: [], booths, log })).toEqual([expect.objectContaining({ type: 'release', state: 'sent' })]);
+    const failed = [told('a', 'r1', ['V7']), released('a', 'r1', ['V7'], { created_at: T(3), status: 'failed' })];
+    expect(planBoothTexts({ rows: [], booths, log: failed })).toEqual([expect.objectContaining({ type: 'release', assignment_id: 'r1', state: 'failed' })]);
+    const [again] = planBoothTexts({ rows: [row('r5', 'a', 'V7', T(6))], booths, log });
+    expect(again).toMatchObject({ type: 'assignment', assignment_id: 'r5', state: 'owed', changed: true });
+  });
+});
+
+describe('boothTextsSettled / boothTextsAllowedAt', () => {
+  const state = (extra: Record<string, unknown>) => assignmentCycleFromData({ approved_at: new Date('2026-09-22T15:00:00Z'), ...extra });
+  const SENT = new Date('2026-09-22T15:00:01Z');
+
+  it('nothing is owed before approval', () => {
+    expect(boothTextsSettled(assignmentCycleFromData({}))).toBe(true);
+    expect(boothTextsSettled(assignmentCycleFromData(null))).toBe(true);
+  });
+
+  it('an approved cycle is owed its first pass, and is settled once it ran', () => {
+    expect(boothTextsSettled(state({}))).toBe(false);
+    expect(boothTextsSettled(state({ booth_texts_sent_at: SENT }))).toBe(true); // a cycle nobody changed carries no token at all
+    expect(boothTextsSettled(state({ booth_texts_sent_at: SENT, assignments_rev: 'a', booth_texts_rev: 'a' }))).toBe(true);
+  });
+
+  it('a staff change (a new assignments_rev) makes it owed again, sent or not', () => {
+    expect(boothTextsSettled(state({ booth_texts_sent_at: SENT, assignments_rev: 'b', booth_texts_rev: 'a' }))).toBe(false);
+    expect(boothTextsSettled(state({ booth_texts_sent_at: SENT, assignments_rev: 'b' }))).toBe(false);
+  });
+
+  it('a recorded conflict or a started target is settled until the assignments change; a cancelled target is re-checked', () => {
+    expect(boothTextsSettled(state({ booth_texts_blocked: 'conflict', assignments_rev: 'a', booth_texts_rev: 'a' }))).toBe(true);
+    expect(boothTextsSettled(state({ booth_texts_blocked: 'conflict', assignments_rev: 'b', booth_texts_rev: 'a' }))).toBe(false);
+    expect(boothTextsSettled(state({ booth_texts_blocked: 'started' }))).toBe(true);
+    expect(boothTextsSettled(state({ booth_texts_blocked: 'cancelled' }))).toBe(false);
+    expect(boothTextsSettled(state({ booth_texts_blocked: 'cancelled', booth_texts_sent_at: SENT }))).toBe(false);
+  });
+
+  it('texts wait for the end of quiet hours, counted from the approval and from now', () => {
+    const market = { quiet_hours: { start: '21:00', end: '08:00' }, timezone: 'America/Chicago' };
+    const morning = new Date('2026-09-22T15:00:00Z'); // 10:00 CDT
+    const night = new Date('2026-09-23T03:30:00Z'); // 22:30 CDT
+    const eight = new Date('2026-09-23T13:00:00Z');
+    expect(boothTextsAllowedAt(morning, morning, market)).toEqual(morning);
+    expect(boothTextsAllowedAt(night, night, market)).toEqual(eight);
+    expect(boothTextsAllowedAt(morning, night, market)).toEqual(eight); // approved in the morning, retried at night
+    expect(boothTextsAllowedAt(night, new Date('2026-09-23T14:00:00Z'), market)).toEqual(new Date('2026-09-23T14:00:00Z'));
+  });
+});
+
+describe('seasonOpenerOf', () => {
+  const version = (vid: string, start: string, end: string) => ({
+    id: vid, effective_from: start, season_start: start, season_end: end, days_of_week: ['saturday' as const], start_time: '08:00', end_time: '12:00', created_at: D, created_by: 't',
+  });
+  const md = (date: string, status = 'collecting') =>
+    marketDateFromData(`wlrfm_${date}`, { market_id: 'wlrfm', date, status, start_at: new Date(`${date}T13:00:00Z`), end_at: new Date(`${date}T17:00:00Z`), actions: {} });
+  const dates = [md('2026-10-24'), md('2026-10-31'), md('2027-04-03', 'cancelled'), md('2027-04-10'), md('2027-04-17')];
+  const schedule = { versions: [version('v26', '2026-04-04', '2026-10-31'), version('v27', '2027-04-03', '2027-11-27')], skipped_dates: [], special_dates: [] };
+
+  it('is the earliest non-cancelled date of the season the market names', () => {
+    const market = { schedule, season: { label: '2027', application_open: null, application_close: null, schedule_version_id: 'v27' } };
+    expect(seasonOpenerOf(market, dates)?.id).toBe('wlrfm_2027-04-10'); // Apr 3 is cancelled
+    expect(seasonOpenerOf({ ...market, season: { ...market.season, schedule_version_id: 'v26' } }, dates)?.id).toBe('wlrfm_2026-10-24');
+  });
+
+  it('falls back to the version that starts last, and is null with no schedule version or no date in the season', () => {
+    expect(seasonOpenerOf({ schedule, season: null }, dates)?.id).toBe('wlrfm_2027-04-10');
+    expect(seasonOpenerOf({ schedule: { versions: [], skipped_dates: [], special_dates: [] }, season: null }, dates)).toBeNull();
+    expect(seasonOpenerOf({ schedule, season: null }, dates.slice(0, 2))).toBeNull();
   });
 });

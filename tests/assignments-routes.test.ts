@@ -4,6 +4,9 @@ import { marketDateRoutes } from '../src/routes/market-dates.js';
 import { fakeDb } from './helpers/fake-db.js';
 import { tokenFor } from './helpers/staff-auth.js';
 import { DEFAULT_WORKFLOW, DEFAULT_QUIET_HOURS } from '../src/services/markets.js';
+import type { FarmersMarket } from '../src/services/markets.js';
+import { marketDateFromData } from '../src/services/market-dates.js';
+import { applyAssignmentChanges } from '../src/services/booth-assignments.js';
 import type { Env } from '../src/config/env.js';
 
 vi.mock('../src/middleware/rbac.js', () => ({
@@ -268,20 +271,41 @@ describe('POST /api/market-dates/:id/assignments/draft', () => {
     expect(Object.keys(db.dump('workflow_locks'))).toEqual([`${SOURCE}__drafts`]);
   });
 
-  it('409s with a reason and writes nothing when there is nothing to draft', async () => {
+  it('409s with a reason and writes nothing when there is nothing to draft onto', async () => {
     const noTarget = seed({ target: false });
     expect((await draft(await buildApp(noTarget))).json()).toMatchObject({ error: 'No upcoming market date to assign', reason: 'no_next_date' });
     const noBooths = seed({ booths: false });
-    expect((await draft(await buildApp(noBooths))).json().reason).toBe('no_booths');
-    const noOne = seed({ attendees: false });
-    const res = await draft(await buildApp(noOne));
+    const res = await draft(await buildApp(noBooths));
     expect(res.statusCode).toBe(409);
-    expect(res.json().reason).toBe('no_attendees');
-    for (const db of [noTarget, noBooths, noOne]) {
+    expect(res.json().reason).toBe('no_booths');
+    for (const db of [noTarget, noBooths]) {
       expect(db.count('booth_assignments')).toBe(0);
       expect(db.count('workflow_locks')).toBe(0);
       expect((db.dump('market_dates')[SOURCE] as any).actions.drafts_generated_at).toBeNull();
     }
+  });
+
+  it('drafts an empty list when nobody said they are attending, so staff can add vendors by hand', async () => {
+    const db = seed({ attendees: false });
+    const app = await buildApp(db);
+    const res = await draft(app);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().draft).toMatchObject({ skipped: null, target_date_id: TARGET, vendors_placed: 0, rows_written: 0 });
+    expect(db.count('booth_assignments')).toBe(0);
+    const actions = (db.dump('market_dates')[SOURCE] as any).actions;
+    expect(actions.assignments_target_date_id).toBe(TARGET);
+    expect(actions.drafts_generated_at).toEqual(T_MORNING);
+    const view = res.json().assignments;
+    expect(view.attending).toEqual([]);
+    expect(view.can_add.map((v: any) => [v.producer_id, v.reason])).toEqual([
+      ['p1', 'no_answer'], ['p2', 'no_answer'], ['p4', 'not_attending'], ['p5', 'no_answer'], ['p3', 'no_answer'], ['p6', 'no_answer'],
+    ]);
+
+    const added = await app.inject({
+      method: 'PATCH', url: `/api/market-dates/${SOURCE}/assignments`, headers: auth('mgr_w'), payload: { changes: [{ producer_id: 'p5', booth_ids: ['wlrfm_v5'] }] },
+    });
+    expect(added.statusCode).toBe(200);
+    expect(added.json().assignments.attending).toEqual([expect.objectContaining({ producer_id: 'p5', booth_ids: ['wlrfm_v5'], added_by_staff: true })]);
   });
 
   it('refuses once approved, a cancelled date, an unknown date and a manager of another market', async () => {
@@ -347,7 +371,8 @@ describe('PATCH /api/market-dates/:id/assignments', () => {
     expect(boothsOf(rows, 'p3')).toEqual([]);
     expect(boothsOf(rows, 'p2')).toEqual(['wlrfm_v3', 'wlrfm_v4']);
     const view = (await app.inject({ method: 'GET', url: `/api/market-dates/${SOURCE}/status`, headers: auth('mgr_w') })).json().assignments;
-    expect(view.unassigned.map((u: any) => u.producer_id)).toEqual(['p3']);
+    // Free booths remain, so this is not a shortage: the vendor is simply not placed.
+    expect(view.unassigned).toEqual([{ producer_id: 'p3', business_name: 'Gamma Farm', reason: 'not_placed' }]);
     expect(view.summary.assigned).toBe(3);
   });
 
@@ -359,17 +384,72 @@ describe('PATCH /api/market-dates/:id/assignments', () => {
     expect(db.count('booth_assignments')).toBe(before);
   });
 
-  it('400s an unknown booth, a retired booth, a vendor who is not attending, and a repeated producer; writes nothing', async () => {
+  it('400s an unknown booth, a retired booth, a producer outside the rotation, and a repeated producer; writes nothing', async () => {
     const { db, app } = await drafted();
+    // p4 leaves the rotation (inactive membership); p5 has only a previous-season membership; p9 does not exist.
+    await db.collection('producer_memberships').doc('p4_wlrfm').update({ status: 'inactive' });
+    await db.collection('producer_memberships').doc('p5_wlrfm').update({ season: '2025' });
     const before = JSON.stringify(db.dump('booth_assignments'));
     expect((await patch(app, [{ producer_id: 'p3', booth_ids: ['nope'] }])).statusCode).toBe(400);
     expect((await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v8'] }])).statusCode).toBe(400);
-    expect((await patch(app, [{ producer_id: 'p4', booth_ids: ['wlrfm_v6'] }])).statusCode).toBe(400);
+    const outside = await patch(app, [{ producer_id: 'p4', booth_ids: ['wlrfm_v6'] }]);
+    expect(outside.statusCode).toBe(400);
+    expect(outside.json().error).toBe('That producer is not an active vendor of this market this season');
     expect((await patch(app, [{ producer_id: 'p5', booth_ids: ['wlrfm_v6'] }])).statusCode).toBe(400);
+    expect((await patch(app, [{ producer_id: 'p9', booth_ids: ['wlrfm_v6'] }])).statusCode).toBe(400);
     expect((await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v6'] }, { producer_id: 'p3', booth_ids: [] }])).statusCode).toBe(400);
     expect((await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v6', 'wlrfm_v6'] }])).statusCode).toBe(400);
     expect((await patch(app, [])).statusCode).toBe(400);
+    expect((await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v5', 'wlrfm_v6', 'wlrfm_v7'] }])).statusCode).toBe(400); // at most two booths
     expect(JSON.stringify(db.dump('booth_assignments'))).toBe(before);
+    expect(db.count('workflow_locks')).toBe(1); // the drafts lock only: a refused change leaves no mutex behind
+  });
+
+  it('lets staff add a current-season vendor with no attending check-in by hand (manual, marked as added by staff)', async () => {
+    const { db, app } = await drafted();
+    // p4 answered "not attending", p5 never answered.
+    const res = await patch(app, [{ producer_id: 'p4', booth_ids: ['wlrfm_v5'] }, { producer_id: 'p5', booth_ids: ['wlrfm_v6'] }]);
+    expect(res.statusCode).toBe(200);
+    const rows = currentRows(db);
+    expect(rows.find((r) => r.producer_id === 'p4')).toMatchObject({ booth_id: 'wlrfm_v5', source: 'manual', assigned_by: 'mgr_w' });
+    expect(rows.find((r) => r.producer_id === 'p5')).toMatchObject({ booth_id: 'wlrfm_v6', source: 'manual' });
+    const view = res.json().assignments;
+    expect(view.attending.map((v: any) => [v.producer_id, v.added_by_staff])).toEqual([
+      ['p1', false], ['p2', false], ['p4', true], ['p5', true], ['p3', false], ['p6', false],
+    ]);
+    expect(view.can_add).toEqual([]);
+    expect(view.not_attending).toEqual([]); // they hold a booth now
+    expect(view.no_answer).toEqual([]);
+    expect(view.summary).toMatchObject({ assigned: 6, unassigned: 0 });
+    // Taking the booth away again puts them back on the "can add" list.
+    const back = await patch(app, [{ producer_id: 'p4', booth_ids: [] }]);
+    expect(back.json().assignments.can_add.map((v: any) => [v.producer_id, v.reason])).toEqual([['p4', 'not_attending']]);
+    expect(back.json().assignments.not_attending.map((v: any) => v.producer_id)).toEqual(['p4']);
+  });
+
+  it('two simultaneous changes cannot both land: one is saved, the other is told to retry', async () => {
+    const { db, app } = await drafted();
+    // The service is called directly: two awaits race step by step (requests through inject() run one after the other).
+    const market = { id: 'wlrfm', ...(db.dump('farmers_markets').wlrfm as any) } as FarmersMarket;
+    const date = marketDateFromData(SOURCE, db.dump('market_dates')[SOURCE] as any);
+    const [a, b] = await Promise.all([
+      applyAssignmentChanges(db as never, market, date, [{ producer_id: 'p3', booth_ids: ['wlrfm_v6'] }], 'mgr_w', T_MORNING),
+      applyAssignmentChanges(db as never, market, date, [{ producer_id: 'p4', booth_ids: ['wlrfm_v6'] }], 'admin1', T_MORNING),
+    ]);
+    expect([a.ok, b.ok].sort()).toEqual([false, true]);
+    expect(a.ok ? b : a).toMatchObject({ ok: false, status: 409, code: 'in_progress' });
+    expect(currentRows(db).filter((r) => r.booth_id === 'wlrfm_v6')).toHaveLength(1);
+    expect(Object.keys(db.dump('workflow_locks'))).toEqual([`${SOURCE}__drafts`]); // the mutex is released
+
+    // A change whose request died leaves its mutex behind: refused while fresh (409 in_progress), taken over once stale.
+    await db.collection('workflow_locks').doc(`${SOURCE}__assignments_change`).set({ market_date_id: SOURCE, key: 'assignments_change', claimed_at: T_MORNING, run_id: 'dead', created_at: T_MORNING });
+    const held = await patch(app, [{ producer_id: 'p2', booth_ids: ['wlrfm_v4'] }]);
+    expect(held.statusCode).toBe(409);
+    expect(held.json()).toMatchObject({ code: 'in_progress', reason: 'in_progress' });
+    expect((db.dump('workflow_locks')[`${SOURCE}__assignments_change`] as any).run_id).toBe('dead'); // a refused request never deletes another's lock
+    vi.setSystemTime(new Date(T_MORNING.getTime() + 4 * 60_000));
+    expect((await patch(app, [{ producer_id: 'p2', booth_ids: ['wlrfm_v4'] }])).statusCode).toBe(200);
+    expect(db.dump('workflow_locks')[`${SOURCE}__assignments_change`]).toBeUndefined();
   });
 
   it('409s before any draft exists', async () => {
@@ -378,7 +458,7 @@ describe('PATCH /api/market-dates/:id/assignments', () => {
     expect((await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v6'] }])).statusCode).toBe(409);
   });
 
-  it('allows a change after approval with a warning, and refuses once the booth texts have gone out', async () => {
+  it('allows a change after approval and after the booth texts went out, with a warning (the vendor is texted the new booth)', async () => {
     const { db, app } = await drafted();
     // Approve in quiet hours so the texts are deferred and the date is approved but unsent.
     vi.setSystemTime(new Date('2026-09-23T03:00:00Z'));
@@ -389,11 +469,15 @@ describe('PATCH /api/market-dates/:id/assignments', () => {
     const warned = await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v6'] }]);
     expect(warned.statusCode).toBe(200);
     expect(warned.json().warning).toBe('approved');
+    const rev = (db.dump('market_dates')[SOURCE] as any).actions.assignments_rev;
+    expect(rev).toMatch(/^[0-9a-f]{32}$/); // a fresh token per change: what makes the engine look again
 
-    await db.collection('market_dates').doc(SOURCE).update({ 'actions.booth_texts_sent_at': new Date('2026-09-23T13:00:00Z') });
-    const closed = await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v7'] }]);
-    expect(closed.statusCode).toBe(409);
-    expect(closed.json().reason).toBe('texts_sent');
+    await db.collection('market_dates').doc(SOURCE).update({ 'actions.booth_texts_sent_at': new Date('2026-09-23T13:00:00Z'), 'actions.booth_texts_rev': rev });
+    const after = await patch(app, [{ producer_id: 'p3', booth_ids: ['wlrfm_v7'] }]);
+    expect(after.statusCode).toBe(200); // no longer refused with `texts_sent`
+    expect(after.json().warning).toBe('approved');
+    expect((db.dump('market_dates')[SOURCE] as any).actions.assignments_rev).not.toBe(rev);
+    expect((db.dump('market_dates')[SOURCE] as any).actions.booth_texts_sent_at).toEqual(new Date('2026-09-23T13:00:00Z')); // untouched
   });
 
   it('403s a manager of another market', async () => {
@@ -472,6 +556,8 @@ describe('GET /api/market-dates/:id/status — assignments', () => {
     expect(before.assignments.drafted_at).toBeNull();
     expect(before.assignments.booths.every((b: any) => b.assignment === null)).toBe(true);
     expect(before.assignments.attending.map((v: any) => v.producer_id)).toEqual(['p1', 'p2', 'p3', 'p6']);
+    expect(before.assignments.unassigned.map((u: any) => u.reason)).toEqual(['not_placed', 'not_placed', 'not_placed', 'not_placed']); // nothing drafted yet, booths are free
+    expect(before.assignments.texts).toEqual([]);
 
     await draft(app);
     const after = (await app.inject({ method: 'GET', url: `/api/market-dates/${SOURCE}/status`, headers: auth('mgr_w') })).json();
@@ -482,6 +568,49 @@ describe('GET /api/market-dates/:id/status — assignments', () => {
     const bare = seed({ booths: false });
     const none = (await (await buildApp(bare)).inject({ method: 'GET', url: `/api/market-dates/${SOURCE}/status`, headers: auth('mgr_w') })).json();
     expect(none.next_due.action).toBe('none');
+  });
+
+  describe('next_due once the deadline is over (an idle engine never recorded a reminder slot)', () => {
+    const nextDue = async (db: ReturnType<typeof fakeDb>) =>
+      (await (await buildApp(db)).inject({ method: 'GET', url: `/api/market-dates/${SOURCE}/status`, headers: auth('mgr_w') })).json().next_due;
+    const NO_REMINDERS = { reminder_state: {} };
+
+    it('a processed deadline is never followed by an unrecorded reminder: the drafts step is announced', async () => {
+      expect(await nextDue(seed({ sourceActions: NO_REMINDERS }))).toEqual({ action: 'drafts', at: '2026-09-22T18:00:00.000Z' });
+      expect(await nextDue(seed({ sourceActions: NO_REMINDERS, booths: false }))).toEqual({ action: 'none', at: null });
+    });
+
+    it('the summary, then the booth texts, are not hidden behind that reminder either', async () => {
+      const db = seed({ sourceActions: { ...NO_REMINDERS, summary_sent_at: null } });
+      expect((await nextDue(db)).action).toBe('summary');
+
+      const approved = seed({ sourceActions: NO_REMINDERS });
+      const app = await buildApp(approved);
+      await draft(app);
+      vi.setSystemTime(new Date('2026-09-23T03:00:00Z')); // approve at 22:00: the texts wait for 08:00
+      await app.inject({ method: 'POST', url: `/api/market-dates/${SOURCE}/assignments/approve`, headers: auth('mgr_w'), payload: {} });
+      expect(await nextDue(approved)).toEqual({ action: 'booth_texts', at: '2026-09-23T13:00:00.000Z' });
+    });
+
+    it('a deadline that has passed but was not processed is next, not a reminder or the check-in text', async () => {
+      vi.setSystemTime(new Date('2026-09-22T17:30:00Z')); // 30 min after the deadline
+      const idle = seed({ sourceActions: { ...NO_REMINDERS, deadline_processed_at: null, summary_sent_at: null } });
+      expect(await nextDue(idle)).toEqual({ action: 'deadline', at: '2026-09-22T17:00:00.000Z' });
+      const neverTexted = seed({ sourceActions: { ...NO_REMINDERS, checkin_sent_at: null, deadline_processed_at: null, summary_sent_at: null } });
+      expect((await nextDue(neverTexted)).action).toBe('deadline');
+    });
+
+    it('an early admin close ends the check-in text too', async () => {
+      const closed = seed({ sourceActions: { ...NO_REMINDERS, checkin_sent_at: null, deadline_processed_at: new Date('2026-09-22T14:00:00Z'), summary_skipped: 'notify_false', summary_sent_at: null } });
+      expect((await nextDue(closed)).action).toBe('drafts');
+    });
+
+    it('before the deadline an unrecorded reminder is still what comes next', async () => {
+      const open = seed({ sourceActions: { ...NO_REMINDERS, deadline_processed_at: null, summary_sent_at: null } });
+      expect(await nextDue(open)).toEqual({ action: 'reminder', at: '2026-09-20T17:00:00.000Z', offset_min: 1440 });
+      const fresh = seed({ sourceActions: { ...NO_REMINDERS, checkin_sent_at: null, deadline_processed_at: null, summary_sent_at: null } });
+      expect((await nextDue(fresh)).action).toBe('checkin');
+    });
   });
 
   it('explains why a vendor is unplaced', async () => {

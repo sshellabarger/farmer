@@ -232,7 +232,10 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     expect(r5.errors).toEqual([]);
     const booth = rowsOfKind(db, 'booth');
     expect(booth).toHaveLength(1);
-    expect(booth[0]).toMatchObject({ id: `booth:${D2}:p1`, producer_id: 'p1', to: APPLICANT_PHONE, market_date_id: D2 });
+    expect(booth[0]).toMatchObject({ producer_id: 'p1', to: APPLICANT_PHONE, market_date_id: D2, segments: 1 });
+    // Keyed on the target date, the producer and the producer's newest current assignment row.
+    expect(String(booth[0]!.id)).toMatch(new RegExp(`^booth:${D2}:p1:[0-9a-f-]{36}$`));
+    expect(current.map((a) => a.id)).toContain(String(booth[0]!.id).split(':')[3]);
     expect(String(booth[0]!.body)).toContain('V12 and V13');
 
     // ── A later tick and a second approve change nothing ──

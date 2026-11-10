@@ -59,7 +59,7 @@ export interface MarketDateActions {
   checkin_failed?: number;
   summary_sent_at?: Date | null;
   summary_skipped?: 'no_recipients' | 'notify_false' | null;
-  /** keys: 'checkin' | `reminder_${offset_min}` | 'deadline' | 'summary' | 'drafts' | 'approve' | 'booth_texts' | `redraft_<n>` — never count toward isDateDecided. */
+  /** keys: 'checkin' | `reminder_${offset_min}` | 'deadline' | 'summary' | 'drafts' | 'approve' | 'booth_texts' | `booth_texts_<assignments_rev>` | `redraft_<n>`, and the same booth keys prefixed `opener_` — never count toward isDateDecided. */
   claims?: Record<string, Date>;
   // Phase 4 (contract §2.9) — booth drafts, approval and booth texts. Absent on every doc written before Phase 4.
   /** Latest draft or redraft of the booth assignments. */
@@ -69,9 +69,47 @@ export interface MarketDateActions {
   drafts_skipped?: DraftSkipReason | null;
   approved_by?: string | null;
   booth_summary?: { assigned: number; unassigned: number; booths_total: number; booths_free: number } | null;
+  /** Counts of the FIRST booth-text pass; later corrective texts are read from `messages`. */
   booth_text_recipients?: number;
   booth_text_failed?: number;
   booth_text_excluded?: number;
+  // Phase 4 fix (booth side). All written as field paths, like everything above.
+  /** Why the booth texts are held back, as the booth-text step last found it; null once they go out. */
+  booth_texts_blocked?: BoothTextsBlocked | null;
+  /** A fresh token on every staff change to the assignments (written before the rows move and again after). */
+  assignments_rev?: string | null;
+  /** The `assignments_rev` the last booth-text pass acted on: equal means no text is owed (see `boothTextsSettled`). */
+  booth_texts_rev?: string | null;
+  /**
+   * The season opener's own cycle: the first market date of a season has no
+   * earlier market of that season to collect "attending next" answers, so its
+   * draft / approval / booth-text state lives here, on its own document, and it
+   * is its own target. The fields above stay what they are on every date: the
+   * cycle that assigns the NEXT market. Lock keys of this cycle are prefixed
+   * `opener_`. Absent on every date staff never drafted as an opener.
+   */
+  opener?: AssignmentCycleState | null;
+}
+
+/** Why approved booth texts are not going out: two vendors on one booth, a cancelled target date still ahead, or a target whose start time has passed (final). */
+export type BoothTextsBlocked = 'conflict' | 'cancelled' | 'started';
+
+/** One booth-assignment cycle (draft, approval, texts) as stored: `actions.*` for the next market, `actions.opener.*` for a season opener. */
+export interface AssignmentCycleState {
+  drafts_generated_at: Date | null;
+  assignments_draft_at: Date | null;
+  assignments_target_date_id: string | null;
+  drafts_skipped: DraftSkipReason | null;
+  approved_at: Date | null;
+  approved_by: string | null;
+  booth_texts_sent_at: Date | null;
+  booth_summary: { assigned: number; unassigned: number; booths_total: number; booths_free: number } | null;
+  booth_text_recipients?: number;
+  booth_text_failed?: number;
+  booth_text_excluded?: number;
+  booth_texts_blocked: BoothTextsBlocked | null;
+  assignments_rev: string | null;
+  booth_texts_rev: string | null;
 }
 
 export interface MarketDateDoc {
@@ -244,11 +282,40 @@ function claimsFromData(raw: unknown): Record<string, Date> | undefined {
   return out;
 }
 
-function boothSummaryFromData(raw: unknown): MarketDateActions['booth_summary'] {
+function boothSummaryFromData(raw: unknown): AssignmentCycleState['booth_summary'] {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const n = (v: unknown) => (typeof v === 'number' ? v : 0);
   return { assigned: n(r.assigned), unassigned: n(r.unassigned), booths_total: n(r.booths_total), booths_free: n(r.booths_free) };
+}
+
+function draftSkipFromData(raw: unknown): DraftSkipReason | null {
+  return raw === 'no_next_date' || raw === 'no_booths' || raw === 'no_attendees' ? raw : null;
+}
+
+function boothTextsBlockedFromData(raw: unknown): BoothTextsBlocked | null {
+  return raw === 'conflict' || raw === 'cancelled' || raw === 'started' ? raw : null;
+}
+
+/** A stored assignment cycle (the `actions` map itself, or `actions.opener`), every date through `toDate`. */
+export function assignmentCycleFromData(raw: unknown): AssignmentCycleState {
+  const a = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  return {
+    drafts_generated_at: toDate(a.drafts_generated_at),
+    assignments_draft_at: toDate(a.assignments_draft_at),
+    assignments_target_date_id: typeof a.assignments_target_date_id === 'string' ? a.assignments_target_date_id : null,
+    drafts_skipped: draftSkipFromData(a.drafts_skipped),
+    approved_at: toDate(a.approved_at),
+    approved_by: typeof a.approved_by === 'string' ? a.approved_by : null,
+    booth_texts_sent_at: toDate(a.booth_texts_sent_at),
+    booth_summary: boothSummaryFromData(a.booth_summary),
+    booth_text_recipients: typeof a.booth_text_recipients === 'number' ? a.booth_text_recipients : undefined,
+    booth_text_failed: typeof a.booth_text_failed === 'number' ? a.booth_text_failed : undefined,
+    booth_text_excluded: typeof a.booth_text_excluded === 'number' ? a.booth_text_excluded : undefined,
+    booth_texts_blocked: boothTextsBlockedFromData(a.booth_texts_blocked),
+    assignments_rev: typeof a.assignments_rev === 'string' ? a.assignments_rev : null,
+    booth_texts_rev: typeof a.booth_texts_rev === 'string' ? a.booth_texts_rev : null,
+  };
 }
 
 export function marketDateFromData(id: string, data: Record<string, unknown>): MarketDateDoc {
@@ -278,6 +345,10 @@ export function marketDateFromData(id: string, data: Record<string, unknown>): M
     booth_text_recipients: typeof a.booth_text_recipients === 'number' ? a.booth_text_recipients : undefined,
     booth_text_failed: typeof a.booth_text_failed === 'number' ? a.booth_text_failed : undefined,
     booth_text_excluded: typeof a.booth_text_excluded === 'number' ? a.booth_text_excluded : undefined,
+    booth_texts_blocked: boothTextsBlockedFromData(a.booth_texts_blocked),
+    assignments_rev: typeof a.assignments_rev === 'string' ? a.assignments_rev : null,
+    booth_texts_rev: typeof a.booth_texts_rev === 'string' ? a.booth_texts_rev : null,
+    opener: a.opener && typeof a.opener === 'object' ? assignmentCycleFromData(a.opener) : null,
   };
   return {
     ...(data as Omit<MarketDateDoc, 'id'>),
