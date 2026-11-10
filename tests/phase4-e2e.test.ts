@@ -7,15 +7,22 @@
 // the engine (injected) and the routes (they read `new Date()`, faked here).
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { fakeStorage } from './helpers/fake-storage.js';
-import { DRAFT_ID, PDF_BYTES, adminAuth, boot, env, multipart, rowsOfKind, seed, validSubmission, APPLICANT_PHONE } from './helpers/a1-fixtures.js';
-import { processMarketDates } from '../src/services/checkin-workflow.js';
+import { DRAFT_ID, PDF_BYTES, adminAuth, boot, env, market, multipart, rowsOfKind, seed, validSubmission, APPLICANT_PHONE } from './helpers/a1-fixtures.js';
+import { DEDUPE_KEYS, TEMPLATES, processMarketDates } from '../src/services/checkin-workflow.js';
+import { ACCEPTANCE_MAX_SEGMENTS, TEMPLATES_A1 } from '../src/services/invites.js';
+import { splitMessage } from '../src/services/sms.js';
 import { generateMarketDates } from '../src/services/market-dates.js';
 import { membershipDocId } from '../src/services/seasons.js';
 import type { FarmersMarket } from '../src/services/markets.js';
 
 vi.mock('../src/services/error-notify.js', () => ({ notifyError: vi.fn(async () => {}) }));
 
-const T_SETUP = new Date('2026-12-15T18:00:00Z'); // applications are open (opened 2026-12-01)
+// Tue 12:00 CST: applications are open (opened 2026-12-01) and it is outside the market's
+// quiet hours, so the staff-triggered acceptance text goes out with the approval.
+const T_SETUP = new Date('2026-12-15T18:00:00Z');
+// The market's own insurance sentence (legal.insurance_requirements_text): market data, not code.
+const INSURANCE_TEXT = 'Test policy: one million per occurrence, the market named as additional insured.';
+const MARKET_NAME = 'West Little Rock Farmers Market';
 // First 2027 Saturday is 2027-04-03 (08:00-12:00 CDT = 13:00-17:00Z); CDT is UTC-5 by then.
 const D1 = 'wlrfm_2027-04-03';
 const D2 = 'wlrfm_2027-04-10'; // the target date the booths are drafted for
@@ -48,7 +55,13 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     const smsPrints = () => log.mock.calls.filter((c) => String(c[0]).startsWith('[sms:console]'));
 
     // ── Seed: 2026 + 2027 versions, label 2027, defaults for fees, no booths yet ──
-    const db = seed({ booths: {} }, { season: { label: '2027', application_open: '2026-12-01', application_close: null, schedule_version_id: 'v27' } });
+    const db = seed(
+      { booths: {} },
+      {
+        season: { label: '2027', application_open: '2026-12-01', application_close: null, schedule_version_id: 'v27' },
+        legal: { ...(market().legal as Record<string, unknown>), insurance_requirements_text: INSURANCE_TEXT },
+      },
+    );
     const storage = fakeStorage();
     const app = await boot(db, storage);
     const p1Before = JSON.stringify(db.dump('producer_memberships').p1_wlrfm);
@@ -66,6 +79,9 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     const config = await app.inject({ method: 'GET', url: '/api/applications/config?market=wlrfm' });
     expect(config.statusCode).toBe(200);
     expect(config.json().season).toMatchObject({ label: '2027', market_count: 35, start: '2027-04-03', end: '2027-11-27', open_now: true });
+    // The consent wording the applicant agrees to is versioned, and the insurance sentence is the market's.
+    expect(config.json().legal).toMatchObject({ sms_consent_version: 'sjca-sms-1', insurance_requirements_text: INSURANCE_TEXT });
+    const consentVersion = config.json().legal.sms_consent_version as string;
 
     // ── The booth map: V1-V11 west, V12-V22 east, a food truck slot; V12-V14 powered ──
     const labels = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => `V${a + i}`);
@@ -115,6 +131,14 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
       permits: { dairy: { status: 'uploaded', upload_id: uploadId, note: '' } },
       booth: { rate: 'seasonal', frequency: null, months: [], spaces: 2, electric: true, pay_in_full: true, stall_preference: ['wlrfm_v12'], food_truck: false },
     });
+    expect(submission.sms_consent_version).toBe(consentVersion);
+
+    // A form loaded before the consent wording changed is refused and stores nothing.
+    const stale = await app.inject({ method: 'POST', url: '/api/applications', payload: { ...submission, sms_consent_version: 'sjca-sms-0' } });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().code).toBe('sms_consent_changed');
+    expect(db.dump('applications')).toEqual({});
+
     const submit = await app.inject({ method: 'POST', url: '/api/applications', payload: submission });
     expect(submit.statusCode).toBe(201);
     const applicationId = submit.json().id as string;
@@ -140,7 +164,11 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     expect(approve.statusCode).toBe(200);
     const memberId = membershipDocId('p1', 'wlrfm', '2027');
     expect(memberId).toBe('p1_wlrfm_2027');
-    expect(db.dump('producers').p1).toMatchObject({ phone: APPLICANT_PHONE, sms_consent: { status: 'opted_in', source: 'application' } });
+    expect(approve.json().sends).toMatchObject({ sms: 'simulated', email: true });
+    expect(db.dump('producers').p1).toMatchObject({
+      phone: APPLICANT_PHONE,
+      sms_consent: { status: 'opted_in', source: 'application', text_version: consentVersion, at: T_SETUP },
+    });
     expect(db.dump('producer_memberships')[memberId]).toMatchObject({ season: '2027', status: 'approved', spaces: 2, electric: true, usual_booth_id: 'wlrfm_v12', fee_plan: 'seasonal' });
     expect(JSON.stringify(db.dump('producer_memberships').p1_wlrfm)).toBe(p1Before); // the 2026 row is untouched
     const acceptance = rowsOfKind(db, 'acceptance');
@@ -148,6 +176,31 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     expect(acceptance[0]).toMatchObject({ id: `acceptance:${applicationId}`, to: APPLICANT_PHONE, producer_id: 'p1' });
     expect(String(acceptance[0]!.body)).toContain('/agreement?t=');
     const agreementToken = tokenOf(String(acceptance[0]!.body), '/agreement');
+    // The acceptance text, exactly: the news and where the details are in the first SMS, the
+    // agreement link and the opt-out line in the second. No amounts and no payment link.
+    const acceptanceBody = String(acceptance[0]!.body);
+    expect(acceptanceBody).toBe(
+      TEMPLATES_A1.acceptance({
+        season: '2027',
+        market_name: MARKET_NAME,
+        first_name: 'Terry',
+        agreement_link: `${env.APP_URL}/agreement?t=${agreementToken}`,
+        details_in_email: true,
+      }),
+    );
+    expect(splitMessage(acceptanceBody)).toEqual([
+      `SJCA Markets: your 2027 ${MARKET_NAME} application is approved, Terry! Details are in your email.`,
+      `Sign your Hold Harmless agreement: ${env.APP_URL}/agreement?t=${agreementToken}\nReply STOP to opt out.`,
+    ]);
+    expect(acceptance[0]!.segments).toBe(ACCEPTANCE_MAX_SEGMENTS);
+    expect(acceptanceBody).not.toMatch(/\$|pay\.test\.example/);
+    // The amounts, the payment link and the market's insurance sentence travel in the email.
+    expect(emailPrints()).toHaveLength(2);
+    const acceptanceEmail = emailPrints()[1]!.map(String).join('\n');
+    expect(acceptanceEmail).toContain('application is approved');
+    expect(acceptanceEmail).toContain(INSURANCE_TEXT);
+    expect(acceptanceEmail).toContain('https://pay.test.example/booth');
+    expect(acceptanceEmail).toContain('Booth fee: $1250 for the season.');
 
     // ── The Hold Harmless e-sign: approved -> active ──
     const agreementGet = await app.inject({ method: 'GET', url: `/api/agreements/${agreementToken}` });
@@ -164,6 +217,18 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     const fee = await app.inject({ method: 'PATCH', url: `/api/applications/${applicationId}`, ...authed, payload: { action: 'fee', status: 'paid', reference: 'zeffy-1' } });
     expect(fee.statusCode).toBe(200);
     expect(db.dump('applications')[applicationId]).toMatchObject({ fee: { status: 'paid' } });
+
+    // ── The certificate of insurance arrives: its last valid day is a calendar date ──
+    const oldPage = await app.inject({ method: 'PATCH', url: `/api/memberships/${memberId}/insurance`, ...authed, payload: { status: 'on_file', expires_at: '2027-12-31T00:00:00.000Z' } });
+    expect(oldPage.statusCode).toBe(400);
+    expect(oldPage.json().code).toBe('expires_on_required');
+    const insured = await app.inject({ method: 'PATCH', url: `/api/memberships/${memberId}/insurance`, ...authed, payload: { status: 'on_file', expires_on: '2027-12-31' } });
+    expect(insured.statusCode).toBe(200);
+    // Valid through Dec 31 in the market's zone: the instant is the local midnight that ends it (CST, UTC-6).
+    expect(db.dump('producer_memberships')[memberId]).toMatchObject({
+      status: 'active',
+      insurance: { status: 'on_file', expires_on: '2027-12-31', expires_at: new Date('2028-01-01T06:00:00Z'), verified_by: 'admin1' },
+    });
 
     // ── First Saturday of 2027: the Phase 3 check-in link goes to p1 ──
     now(T_CHECKIN);
@@ -237,6 +302,15 @@ describe('Phase 4 end-to-end — invite, prefilled application, approval, agreem
     expect(String(booth[0]!.id)).toMatch(new RegExp(`^booth:${D2}:p1:[0-9a-f-]{36}$`));
     expect(current.map((a) => a.id)).toContain(String(booth[0]!.id).split(':')[3]);
     expect(String(booth[0]!.body)).toContain('V12 and V13');
+    // The key and the wording, exactly: one segment, greeted by first name, no opt-out line.
+    const newest = current.find((a) => a.id === String(booth[0]!.id).split(':')[3])!;
+    expect(booth[0]!.id).toBe(DEDUPE_KEYS.booth(D2, 'p1', String(newest.id)));
+    expect(booth[0]!.body).toBe(TEMPLATES.booth({ market_name: MARKET_NAME, date_short: 'Sat Apr 10', labels: ['V12', 'V13'], first_name: 'Terry' }));
+    expect(booth[0]!.body).toBe(`SJCA Markets: Terry, your booth at ${MARKET_NAME} on Sat Apr 10 is V12 and V13. Please check in at the table when you arrive.`);
+    expect(String(booth[0]!.body)).not.toContain('STOP');
+    expect(splitMessage(String(booth[0]!.body))).toHaveLength(1);
+    // Both sides of the fix round on one timeline: the acceptance row is still the only one of its kind.
+    expect(rowsOfKind(db, 'acceptance').map((m) => m.id)).toEqual([`acceptance:${applicationId}`]);
 
     // ── A later tick and a second approve change nothing ──
     const messageCount = db.count('messages');
