@@ -279,7 +279,7 @@ describe('purgeUnattachedUploads', () => {
     // The nightly run, 49 hours after the first two uploads.
     const now = new Date(T_OPEN.getTime() + 49 * HOUR);
     const result = await purgeUnattachedUploads(db as never, app.fake, now);
-    expect(result).toEqual({ scanned: 2, deleted: 1, kept: 1, failed: 0 });
+    expect(result).toEqual({ scanned: 2, deleted: 1, kept: 1, reattached: 0, failed: 0 });
 
     const docs = db.dump('application_uploads');
     expect(Object.keys(docs).sort()).toEqual([attachedId, freshId].sort());
@@ -292,7 +292,7 @@ describe('purgeUnattachedUploads', () => {
 
     // A year on, the attached upload is still there: it is part of the application's record.
     const later = await purgeUnattachedUploads(db as never, app.fake, new Date(T_OPEN.getTime() + 365 * 24 * HOUR));
-    expect(later).toEqual({ scanned: 1, deleted: 1, kept: 0, failed: 0 }); // the fresh one aged out
+    expect(later).toEqual({ scanned: 1, deleted: 1, kept: 0, reattached: 0, failed: 0 }); // the fresh one aged out
     expect(Object.keys(db.dump('application_uploads'))).toEqual([attachedId]);
     expect(app.fake.dump().size).toBe(1);
   });
@@ -321,14 +321,14 @@ describe('purgeUnattachedUploads', () => {
     };
     const now = new Date(T_OPEN.getTime() + 72 * HOUR);
     const result = await purgeUnattachedUploads(db as never, flaky, now);
-    expect(result).toEqual({ scanned: 2, deleted: 1, kept: 0, failed: 1 });
+    expect(result).toEqual({ scanned: 2, deleted: 1, kept: 0, reattached: 0, failed: 1 });
     expect(Object.keys(db.dump('application_uploads'))).toEqual([a]); // still there for the retry
     expect(error).toHaveBeenCalledTimes(1);
     expect(String(error.mock.calls[0]![0])).toContain(a);
     expect(String(error.mock.calls[0]![0])).not.toContain('permit.pdf'); // never the file name
 
     // The next run, with storage back, finishes the job.
-    expect(await purgeUnattachedUploads(db as never, app.fake, now)).toEqual({ scanned: 1, deleted: 1, kept: 0, failed: 0 });
+    expect(await purgeUnattachedUploads(db as never, app.fake, now)).toEqual({ scanned: 1, deleted: 1, kept: 0, reattached: 0, failed: 0 });
     expect(db.count('application_uploads')).toBe(0);
     expect(app.fake.dump().size).toBe(0);
     void b;
@@ -336,6 +336,67 @@ describe('purgeUnattachedUploads', () => {
 
   it('with nothing to do it reports zeros', async () => {
     const db = seed();
-    expect(await purgeUnattachedUploads(db as never, fakeStorage(), T_OPEN)).toEqual({ scanned: 0, deleted: 0, kept: 0, failed: 0 });
+    expect(await purgeUnattachedUploads(db as never, fakeStorage(), T_OPEN)).toEqual({ scanned: 0, deleted: 0, kept: 0, reattached: 0, failed: 0 });
+  });
+
+  // A submission is two writes: the application, then the mark on each of its uploads. A request
+  // that dies in between leaves an application whose files still read "unattached".
+  describe('an upload an application names is never purged, whatever its flag says', () => {
+    const dairy = { type: 'dairy', items: ['cheese'], practices: [], description: '', details: {} };
+
+    /** Submits an application with one permit, then puts the upload back the way an interrupted request leaves it. */
+    async function interrupted() {
+      const db = seed();
+      const app = await boot(db);
+      const uploadId = (await upload(app)).json().upload_id as string;
+      const sub = await submit(app, { products: [dairy], permits: { dairy: { status: 'uploaded', upload_id: uploadId } } });
+      expect(sub.statusCode).toBe(201);
+      await db.collection('application_uploads').doc(uploadId).update({ application_id: null, attached_at: null });
+      return { db, app, uploadId, applicationId: sub.json().id as string };
+    }
+
+    it('the purge marks it attached and keeps the file', async () => {
+      const { db, app, uploadId, applicationId } = await interrupted();
+      const abandoned = (await upload(app, 'wlrfm', '7d6c5b4a-3f2e-4d1c-9b8a-7f6e5d4c3b2a')).json().upload_id as string;
+      const now = new Date(T_OPEN.getTime() + 72 * HOUR);
+
+      const result = await purgeUnattachedUploads(db as never, app.fake, now);
+      expect(result).toEqual({ scanned: 2, deleted: 1, kept: 0, reattached: 1, failed: 0 });
+      expect(Object.keys(db.dump('application_uploads'))).toEqual([uploadId]);
+      expect(db.dump('application_uploads')[uploadId]).toMatchObject({ application_id: applicationId, attached_at: now });
+      expect([...app.fake.dump().keys()].some((p) => p.includes(uploadId))).toBe(true);
+      expect([...app.fake.dump().keys()].some((p) => p.includes(abandoned))).toBe(false);
+
+      // It is an attached upload from now on: later runs do not even look at it.
+      expect(await purgeUnattachedUploads(db as never, app.fake, new Date(T_OPEN.getTime() + 400 * 24 * HOUR))).toEqual({ scanned: 0, deleted: 0, kept: 0, reattached: 0, failed: 0 });
+    });
+
+    it('also when the application has since been declined: its record keeps its files', async () => {
+      const { db, app, uploadId, applicationId } = await interrupted();
+      await db.collection('applications').doc(applicationId).update({ status: 'declined' });
+      const result = await purgeUnattachedUploads(db as never, app.fake, new Date(T_OPEN.getTime() + 72 * HOUR));
+      expect(result).toMatchObject({ deleted: 0, reattached: 1 });
+      expect(app.fake.dump().size).toBe(1);
+      expect(db.dump('application_uploads')[uploadId]).toMatchObject({ application_id: applicationId });
+    });
+
+    it('an upload of the same draft that the application does NOT name is still purged', async () => {
+      const { db, app, uploadId } = await interrupted();
+      const extra = (await upload(app)).json().upload_id as string; // same draft, a second file the applicant removed before submitting
+      const result = await purgeUnattachedUploads(db as never, app.fake, new Date(T_OPEN.getTime() + 72 * HOUR));
+      expect(result).toEqual({ scanned: 2, deleted: 1, kept: 0, reattached: 1, failed: 0 });
+      expect(Object.keys(db.dump('application_uploads'))).toEqual([uploadId]);
+      expect([...app.fake.dump().keys()].some((p) => p.includes(extra))).toBe(false);
+    });
+
+    it('repeating the submission marks the uploads at once, so staff can open them before any purge runs', async () => {
+      const { db, app, uploadId, applicationId } = await interrupted();
+      const again = await submit(app, { products: [dairy], permits: { dairy: { status: 'uploaded', upload_id: uploadId } } });
+      expect(again.statusCode).toBe(201);
+      expect(again.json().id).toBe(applicationId);
+      expect(db.dump('application_uploads')[uploadId]).toMatchObject({ application_id: applicationId });
+      expect(db.count('applications')).toBe(1);
+      expect(await purgeUnattachedUploads(db as never, app.fake, new Date(T_OPEN.getTime() + 72 * HOUR))).toEqual({ scanned: 0, deleted: 0, kept: 0, reattached: 0, failed: 0 });
+    });
   });
 });

@@ -178,6 +178,31 @@ export async function saveApplicationUpload(args: SaveUploadArgs): Promise<Saved
   return { upload_id: id, kind, bytes: buffer.length, mime, original_name };
 }
 
+/* ── Attaching uploads to the application that names them ── */
+
+/**
+ * Marks the uploads an application names (`upload_ids`) as attached to it.
+ * Idempotent and safe to repeat: an upload is touched only when it exists,
+ * belongs to the application's draft and is not attached to anything yet.
+ * Returns how many were attached on this call.
+ *
+ * The submission calls this right after it creates the application, and again
+ * whenever the same submission is repeated: a request that died between the
+ * two writes left the application without its files marked, and without this
+ * the nightly purge would later take them for abandoned.
+ */
+export async function attachUploads(db: Firestore, args: { application_id: string; draft_id: string; upload_ids: string[]; now: Date }): Promise<number> {
+  let attached = 0;
+  for (const uploadId of args.upload_ids) {
+    const ref = db.collection('application_uploads').doc(uploadId);
+    const data = (await ref.get()).data() as Record<string, unknown> | undefined;
+    if (!data || data.draft_id !== args.draft_id || data.application_id) continue;
+    await ref.update({ application_id: args.application_id, attached_at: args.now });
+    attached += 1;
+  }
+  return attached;
+}
+
 /* ── Nightly purge of uploads nobody attached ── */
 
 export interface PurgeResult {
@@ -187,6 +212,8 @@ export interface PurgeResult {
   deleted: number;
   /** Unattached but younger than the TTL: left alone. */
   kept: number;
+  /** Not marked attached, but an application names it: marked now and kept (see `purgeUnattachedUploads`). */
+  reattached: number;
   /** A delete threw; the upload stays and the next run retries it. */
   failed: number;
 }
@@ -197,16 +224,42 @@ export interface PurgeResult {
  * than `UPLOAD_LIMITS.unattached_ttl_hours`. An attached upload is never
  * touched here, whatever its age: it is part of an application's record.
  *
- * One equality query; the age filter is in memory. The object goes first and
- * the document second, so a failure in between leaves a document that the
- * next run finds again (deleting a missing object is not an error). A single
- * failed delete is counted and logged without the file name, and the run
- * carries on: this never throws for one bad upload.
+ * Before anything is deleted the applications of the upload's draft are
+ * asked: an application that lists the upload in `upload_ids` owns it,
+ * whatever the flag on the upload says (a submission interrupted between
+ * creating the application and marking its files leaves exactly that state).
+ * Such an upload is marked attached and kept, never deleted: a permit or an
+ * insurance certificate that belongs to an application cannot be recovered.
+ *
+ * One equality query for the uploads and one per draft for its applications;
+ * the age filter is in memory. The object goes first and the document second,
+ * so a failure in between leaves a document that the next run finds again
+ * (deleting a missing object is not an error). A single failed upload is
+ * counted and logged without the file name, and the run carries on: this
+ * never throws for one bad upload.
  */
 export async function purgeUnattachedUploads(db: Firestore, storage: StoragePort, now: Date): Promise<PurgeResult> {
   const cutoff = now.getTime() - UPLOAD_LIMITS.unattached_ttl_hours * HOUR_MS;
   const snap = await db.collection('application_uploads').where('application_id', '==', null).get();
-  const result: PurgeResult = { scanned: 0, deleted: 0, kept: 0, failed: 0 };
+  const result: PurgeResult = { scanned: 0, deleted: 0, kept: 0, reattached: 0, failed: 0 };
+
+  /** upload id -> the application of that draft that names it. One query per draft. */
+  const ownersByDraft = new Map<string, Map<string, string>>();
+  const ownerOf = async (uploadId: string, draftId: unknown): Promise<string | null> => {
+    if (typeof draftId !== 'string' || !draftId) return null;
+    let owners = ownersByDraft.get(draftId);
+    if (!owners) {
+      owners = new Map<string, string>();
+      const apps = await db.collection('applications').where('draft_id', '==', draftId).get();
+      for (const a of apps.docs) {
+        const ids = (a.data() as Record<string, unknown>).upload_ids;
+        for (const id of Array.isArray(ids) ? ids : []) if (typeof id === 'string' && !owners.has(id)) owners.set(id, a.id);
+      }
+      ownersByDraft.set(draftId, owners);
+    }
+    return owners.get(uploadId) ?? null;
+  };
+
   for (const doc of snap.docs) {
     result.scanned += 1;
     const data = doc.data() as Record<string, unknown>;
@@ -218,12 +271,18 @@ export async function purgeUnattachedUploads(db: Firestore, storage: StoragePort
       continue;
     }
     try {
+      const owner = await ownerOf(doc.id, data.draft_id);
+      if (owner) {
+        await doc.ref.update({ application_id: owner, attached_at: now });
+        result.reattached += 1;
+        continue;
+      }
       if (typeof data.storage_path === 'string' && data.storage_path) await storage.delete(data.storage_path);
       await doc.ref.delete();
       result.deleted += 1;
     } catch (err) {
       result.failed += 1;
-      console.error(`purgeUnattachedUploads: could not delete upload ${doc.id}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`purgeUnattachedUploads: could not purge upload ${doc.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return result;

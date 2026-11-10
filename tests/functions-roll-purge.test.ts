@@ -115,7 +115,7 @@ describe('rollMarketDates (nightly)', () => {
     await run();
 
     expect(logs.some((l) => l.startsWith('rollMarketDates: 1 markets'))).toBe(true);
-    expect(logs).toContain('purgeUnattachedUploads: scanned=2 deleted=1 kept=1 failed=0');
+    expect(logs).toContain('purgeUnattachedUploads: scanned=2 deleted=1 kept=1 reattached=0 failed=0');
     expect(Object.keys(db.dump('application_uploads')).sort()).toEqual(['fresh_unattached', 'old_attached']);
     expect([...storage.dump().keys()].sort()).toEqual([
       'application-uploads/2026/draft-fresh_unattached/fresh_unattached.pdf',
@@ -159,7 +159,7 @@ describe('rollMarketDates (nightly)', () => {
     holder.storage = broken;
 
     await expect(run()).resolves.toBeUndefined();
-    expect(logs).toContain('purgeUnattachedUploads: scanned=2 deleted=0 kept=1 failed=1');
+    expect(logs).toContain('purgeUnattachedUploads: scanned=2 deleted=0 kept=1 reattached=0 failed=1');
     expect(Object.keys(db.dump('application_uploads')).sort()).toEqual(['fresh_unattached', 'old_attached', 'old_unattached']);
     expect(holder.notify).toEqual([]);
   });

@@ -103,7 +103,7 @@ export const rollMarketDates = onSchedule(
         const { purgeUnattachedUploads } = await import('./services/application-uploads.js');
         const { firebaseStoragePort } = await import('./services/storage-port.js');
         const purge = await purgeUnattachedUploads(db, firebaseStoragePort(env), new Date());
-        console.log(`purgeUnattachedUploads: scanned=${purge.scanned} deleted=${purge.deleted} kept=${purge.kept} failed=${purge.failed}`);
+        console.log(`purgeUnattachedUploads: scanned=${purge.scanned} deleted=${purge.deleted} kept=${purge.kept} reattached=${purge.reattached} failed=${purge.failed}`);
       } catch (purgeErr) {
         const { notifyError } = await import('./services/error-notify.js');
         await notifyError({ env, err: purgeErr, source: 'scheduler:purgeUnattachedUploads' }).catch(() => {});

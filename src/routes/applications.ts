@@ -47,6 +47,7 @@ import {
   DRAFT_ID_RE,
   UPLOAD_LIMITS,
   UploadError,
+  attachUploads,
   saveApplicationUpload,
   utcDay,
   type UploadMeta,
@@ -314,8 +315,21 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
     const links = marketPaymentLinks(market);
     const marketCount = summarizeSeason(market).summary.market_count;
 
-    /** What the first, accepted POST of a submission answered; a repeat of it gets the same body. */
-    const originalResult = (applicationId: string, a: Rec) => {
+    /**
+     * What the first, accepted POST of a submission answered; a repeat of it gets the same body.
+     * The repeat also finishes what the first may not have: if that request died after creating the
+     * application and before marking its uploads, they are marked now (attachUploads is idempotent),
+     * so the nightly purge never mistakes an application's files for abandoned ones.
+     */
+    const originalResult = async (applicationId: string, a: Rec) => {
+      const namedUploads = (Array.isArray(a.upload_ids) ? a.upload_ids : []).filter((x): x is string => typeof x === 'string');
+      if (namedUploads.length > 0) {
+        try {
+          await attachUploads(app.db, { application_id: applicationId, draft_id: input.draft_id, upload_ids: namedUploads, now });
+        } catch (err) {
+          app.log.error(err, 'Could not re-attach the uploads of a repeated submission');
+        }
+      }
       const fee = rec(a.fee);
       return {
         id: applicationId,
@@ -349,7 +363,7 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       const a = d.data() as Rec;
       if (a.season !== season || !isLiveApplication(a)) continue;
       if (normalizeEmail(String(rec(a.contact).email ?? '')) !== email) continue;
-      if (isThisSubmission(a)) return reply.status(201).send(originalResult(d.id, a));
+      if (isThisSubmission(a)) return reply.status(201).send(await originalResult(d.id, a));
       // The other application's id is nobody else's business: anyone can type an email address here.
       return duplicate();
     }
@@ -379,7 +393,7 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       if (data.application_id) {
         const owner = typeof data.application_id === 'string' ? await app.db.collection('applications').doc(data.application_id).get() : null;
         const ownerData = owner?.exists ? (owner.data() as Rec) : null;
-        if (owner && ownerData && isThisSubmission(ownerData)) return reply.status(201).send(originalResult(owner.id, ownerData));
+        if (owner && ownerData && isThisSubmission(ownerData)) return reply.status(201).send(await originalResult(owner.id, ownerData));
         return uploadNotFound();
       }
     }
@@ -396,7 +410,7 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
     const keyArgs = { market_id: market.id, season, email, application_id: id };
     const claim = await claimApplicationKey(app.db, { ...keyArgs, now });
     if (!claim.ok) {
-      if (claim.holder && isThisSubmission(claim.holder)) return reply.status(201).send(originalResult(claim.holder_id, claim.holder));
+      if (claim.holder && isThisSubmission(claim.holder)) return reply.status(201).send(await originalResult(claim.holder_id, claim.holder));
       if (claim.holder) return duplicate();
       return reply.status(409).send({ error: 'Your application is already being submitted. Please wait a moment and try again.' });
     }
@@ -449,9 +463,7 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       throw err;
     }
 
-    for (const uploadId of uploadIds) {
-      await app.db.collection('application_uploads').doc(uploadId).update({ application_id: id, attached_at: now });
-    }
+    await attachUploads(app.db, { application_id: id, draft_id: input.draft_id, upload_ids: [...uploadIds], now });
     if (input.prefill_token) await markPurposeTokenUsed(app.db, input.prefill_token, now, { application_id: id });
 
     return reply.status(201).send({
