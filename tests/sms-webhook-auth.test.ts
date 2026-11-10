@@ -96,13 +96,21 @@ function withFlakyOutboundLog(db: ReturnType<typeof fakeDb>, failures: number) {
   return db;
 }
 
+// The inbound handler reads the clock: the 24-hour courtesy-reply window, an open
+// check-in's deadline and (through seasons.ts) each market's current season. Pinned,
+// so `Date.now() - 1 h` in a fixture and `new Date()` in the handler agree exactly.
+const NOW = new Date('2026-11-10T16:00:00Z');
+
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   voipms.mockClear();
   voipms.mockImplementation(async () => 'msg-id');
   vi.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -306,6 +314,35 @@ describe('stopgap inbound handler', () => {
     expect(outbound(db)).toHaveLength(1);
     expect(outbound(db)[0]).toMatchObject({ status: 'sent', provider_message_id: 'msg-id', kind: 'help' });
     expect(voipms).toHaveBeenCalledTimes(1);
+  });
+
+  // Restored (it was dropped when D29 stopped answering unknown numbers): the one-per-24-hours
+  // rule must hold even when the log update after a successful send fails once. The courtesy
+  // reply only goes to a known producer now, so that is who texts here.
+  it('a courtesy reply that sent but whose first status update failed is recorded as sent and is not re-sent within 24 hours', async () => {
+    const db = withFlakyOutboundLog(seededDb({ producers: { p1: { business_name: 'Test Farm', phone: USER_PHONE } } }), 1);
+    const { app } = await buildApp(REAL, db);
+    const res = await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('first')}` });
+
+    expect(res.statusCode).toBe(200);
+    expect(voipms).toHaveBeenCalledTimes(1);
+    expect(outbound(db)).toHaveLength(1);
+    expect(outbound(db)[0]).toMatchObject({ to: USER_PHONE, body: REPLIES.received, status: 'sent', provider_message_id: 'msg-id', kind: 'auto_reply' });
+
+    // A second text an hour later, and one at 23 h 59 min: logged, never answered again.
+    vi.setSystemTime(new Date(NOW.getTime() + 60 * 60 * 1000));
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('second')}` });
+    vi.setSystemTime(new Date(NOW.getTime() + (24 * 60 - 1) * 60 * 1000));
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('third')}` });
+    expect(voipms).toHaveBeenCalledTimes(1);
+    expect(outbound(db)).toHaveLength(1);
+    expect(inboundRows(db)).toHaveLength(3);
+
+    // Once the window has passed the producer is answered again.
+    vi.setSystemTime(new Date(NOW.getTime() + (24 * 60 + 1) * 60 * 1000));
+    await app.inject({ method: 'GET', url: `/voipms/inbound?${inbound('fourth')}` });
+    expect(voipms).toHaveBeenCalledTimes(2);
+    expect(outbound(db).filter((m) => m.kind === 'auto_reply')).toHaveLength(2);
   });
 
   it('a text that sent but could not be marked after a retry is never recorded as failed and still returns 200', async () => {

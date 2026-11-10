@@ -56,11 +56,16 @@ export const collections = {
   application_uploads: 'application_uploads',
   // Phase 4 (A1). Doc id = `${market_id}_${season}_${producer_id}`; created atomically — the invite-to-reapply lock.
   application_invites: 'application_invites',
+  // Phase 4 fix. Doc id = `${market_id}_${season}_${sha256(lower-cased email)}`; created atomically BEFORE the
+  // application it names (`application_id`), so one address has at most one live application per market and season.
+  application_keys: 'application_keys',
   // Phase 2/3. Doc id = `${market_date_id}_${producer_id}`.
   checkins: 'checkins',
   // Phase 3 (contract §2.1). Doc id = the token itself.
   link_tokens: 'link_tokens',
   // Phase 3 fix. Doc id = `${market_date_id}__${step}` (checkin | reminder_<offset> | deadline | summary); created atomically by the engine's claim(), never cleared.
+  // Phase 4 also keeps `agreement__<membership_id>`, `application_approve__<application_id>` and
+  // `producer_identity__<sha256(email)>` here (staff and producer actions that must not overlap).
   workflow_locks: 'workflow_locks',
   // Phase 4 (A2). Doc id = `${market_id}_<label slug>`; created atomically so a label is unique per market.
   booths: 'booths',

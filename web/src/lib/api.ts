@@ -1,4 +1,4 @@
-import type { ApplicationDoc, ApplicationListItem, BoothDoc, UploadMeta } from './phase4-types';
+import type { ApplicationDoc, ApplicationListItem, BoothDoc, InsuranceUpdate, InviteBatchExtras, UploadMeta } from './phase4-types';
 import type {
   ApplicationAction,
   ApplicationInvite,
@@ -16,7 +16,6 @@ import type {
   DashboardCard,
   FeePlan,
   GenerateResult,
-  InsuranceUpdateInput,
   InviteBatchResult,
   Market,
   MarketDate,
@@ -58,10 +57,13 @@ function getToken(): string | null {
 /** Contract §6.2: `request<T>` throws `ApiError` so callers can branch on `.status` (404 / 410 / …). */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** The parsed JSON error body (`code`, `quiet_until`, ...); empty when the response had none. */
+  readonly body: Record<string, unknown>;
+  constructor(message: string, status: number, body: Record<string, unknown> = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -80,7 +82,7 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.error || body.message || `API error ${res.status}`, res.status);
+    throw new ApiError(body.error || body.message || `API error ${res.status}`, res.status, body && typeof body === 'object' ? body : {});
   }
   // Handle empty bodies (e.g. 204 No Content from DELETE) — res.json() would
   // throw on an empty body, which previously made successful deletes look failed.
@@ -265,14 +267,15 @@ export const api = {
   getApplicationUploadUrl: (id: string, uploadId: string) =>
     request<{ url: string; expires_at: string }>(`/applications/${id}/uploads/${uploadId}/url`),
   patchApplication: (id: string, data: ApplicationAction) =>
-    request<{ application: ApplicationDoc; producer?: Producer; membership?: Membership; sends?: { sms: string; email: boolean } }>(`/applications/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    request<{ application: ApplicationDoc; producer?: Producer; membership?: Membership; sends?: { sms: string; email: boolean; quiet_until?: string | null } }>(`/applications/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  /** `completed`: an earlier invite had its missing text or email sent now. `quiet_until`: the text is held until then. A 409 carries `code` and `quiet_until` on `ApiError.body`. */
   inviteProducer: (id: string, market_id: string, force = false) =>
-    request<{ invite: ApplicationInvite; url: string }>(`/producers/${id}/invite${qs({ market_id, force: force ? 'true' : undefined })}`, { method: 'POST' }),
+    request<{ invite: ApplicationInvite; url: string; completed?: boolean; quiet_until?: string | null }>(`/producers/${id}/invite${qs({ market_id, force: force ? 'true' : undefined })}`, { method: 'POST' }),
   inviteMarket: (id: string, data: { season?: string; force?: boolean; dry_run?: boolean }) =>
-    request<InviteBatchResult>(`/markets/${id}/invite-reapply`, { method: 'POST', body: JSON.stringify(data) }),
+    request<InviteBatchResult & InviteBatchExtras>(`/markets/${id}/invite-reapply`, { method: 'POST', body: JSON.stringify(data) }),
   membershipItems: (id: string, data: { action: 'approve' | 'decline'; request_id: string } | { action: 'add'; items: string[] }) =>
     request<{ membership: Membership }>(`/memberships/${id}/items`, { method: 'POST', body: JSON.stringify(data) }),
-  updateInsurance: (id: string, data: InsuranceUpdateInput) =>
+  updateInsurance: (id: string, data: InsuranceUpdate) =>
     request<{ membership: Membership }>(`/memberships/${id}/insurance`, { method: 'PATCH', body: JSON.stringify(data) }),
   sendAgreementLink: (id: string, send = true) =>
     request<{ url: string; expires_at: string; sms: string }>(`/memberships/${id}/agreement-link`, { method: 'POST', body: JSON.stringify({ send }) }),

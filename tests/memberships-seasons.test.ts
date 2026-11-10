@@ -220,7 +220,7 @@ describe('POST /api/memberships/:id/items', () => {
     expect((await post(app, { action: 'approve', request_id: 'nope' })).statusCode).toBe(404);
   });
 
-  it('staff can add items directly', async () => {
+  it('an admin can add items directly', async () => {
     const db = setup();
     const app = await boot(db);
     const res = await post(app, { action: 'add', items: ['eggs', 'Tomatoes'] });
@@ -230,10 +230,30 @@ describe('POST /api/memberships/:id/items', () => {
     expect((await post(app, { action: 'shrug' })).statusCode).toBe(400);
   });
 
+  it('adding items directly is admin only: a market manager gets 403 and nothing changes (fix X9)', async () => {
+    const db = setup();
+    const app = await boot(db);
+    const asManager = authFor('mgr_w', 'market_manager');
+    const res = await post(app, { action: 'add', items: ['eggs'] }, asManager);
+    expect(res.statusCode).toBe(403);
+    expect((db.dump('producer_memberships').p1_wlrfm_2027 as Record<string, unknown>).approved_items).toEqual(['tomatoes']);
+    expect(db.dump('producers').p1!.products).toEqual(['tomatoes']);
+    expect(Object.values(db.dump('audit_log')).filter((a) => a.action === 'application.items.approve')).toHaveLength(0);
+    // A malformed add from a manager is a 400 like anyone else's; the role check does not hide validation.
+    expect((await post(app, { action: 'add', items: [] }, asManager)).statusCode).toBe(400);
+
+    // The manager's own job, reviewing what a vendor asked for, still works.
+    const approved = await post(app, { action: 'approve', request_id: 'r1' }, asManager);
+    expect(approved.statusCode).toBe(200);
+    expect(approved.json().membership.approved_items).toEqual(['tomatoes', 'Honey']);
+    expect((await post(app, { action: 'decline', request_id: 'r2' }, asManager)).statusCode).toBe(200);
+  });
+
   it('is scoped to the membership\'s market', async () => {
     const app = await boot(setup());
+    expect((await post(app, { action: 'approve', request_id: 'r1' }, authFor('mgr1', 'market_manager'))).statusCode).toBe(403);
     expect((await post(app, { action: 'add', items: ['eggs'] }, authFor('mgr1', 'market_manager'))).statusCode).toBe(403);
-    expect((await post(app, { action: 'add', items: ['eggs'] }, authFor('mgr_w', 'market_manager'))).statusCode).toBe(200);
+    expect((await post(app, { action: 'approve', request_id: 'r1' }, authFor('mgr_w', 'market_manager'))).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/memberships/nope/items', headers: adminAuth(), payload: { action: 'add', items: ['x'] } })).statusCode).toBe(404);
   });
 });

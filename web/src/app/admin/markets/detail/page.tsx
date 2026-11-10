@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import type { BoothDoc } from '@/lib/phase4-types';
+import type { BoothDoc, InviteBatchExtras } from '@/lib/phase4-types';
 import {
   DAYS_OF_WEEK,
   type DayOfWeek,
@@ -985,8 +985,8 @@ function InviteReturning({ market }: { market: Market }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [preview, setPreview] = useState<InviteBatchResult | null>(null);
-  const [result, setResult] = useState<InviteBatchResult | null>(null);
+  const [preview, setPreview] = useState<(InviteBatchResult & InviteBatchExtras) | null>(null);
+  const [result, setResult] = useState<(InviteBatchResult & InviteBatchExtras) | null>(null);
 
   const label = market.season?.label || '';
 
@@ -1021,13 +1021,17 @@ function InviteReturning({ market }: { market: Market }) {
   }
 
   const shown = result || preview;
+  // What a real run would send now: first invitations plus texts or emails an earlier run could not send.
+  const toSend = preview ? preview.invited + (preview.completed ?? 0) : 0;
+  const closed = preview?.applications_open === false;
 
   return (
     <div className="pt-4 mt-2 border-t border-earth-100 space-y-3">
       <div className="text-sm font-semibold text-earth-800">Invite returning vendors to apply for {label}</div>
       <p className="text-xs text-earth-500 m-0">
         Every producer with a membership in another season gets a link to a prefilled application, by email and by text when they have a phone and have not opted out.
-        Preview first; nothing is sent until you confirm.
+        Preview first; nothing is sent until you confirm. Invitations go out only while applications are open. During the market&apos;s quiet hours the emails go and the
+        texts wait: run the invitation again after quiet hours and only the missing texts are sent.
       </p>
       {error && <Notice kind="error">{error}</Notice>}
       <CheckboxField label="Also resend to producers who were already invited" checked={force} onChange={(c) => { setForce(c); setPreview(null); }} />
@@ -1035,11 +1039,11 @@ function InviteReturning({ market }: { market: Market }) {
         <SecondaryButton small onClick={() => run(true)} disabled={busy}>{busy && !preview ? 'Checking...' : 'Preview (dry run)'}</SecondaryButton>
         {preview && (
           <ConfirmButton
-            label={`Send ${preview.invited} invitation${preview.invited === 1 ? '' : 's'}`}
+            label={`Send ${toSend} invitation${toSend === 1 ? '' : 's'}`}
             confirmLabel="Yes, send them"
             danger={false}
             busy={busy}
-            disabled={preview.invited === 0}
+            disabled={toSend === 0 || closed}
             onConfirm={() => run(false)}
           />
         )}
@@ -1051,7 +1055,19 @@ function InviteReturning({ market }: { market: Market }) {
             {result ? 'Sent' : 'Dry run'} for season {shown.season}
           </div>
           <div>Candidates: {shown.candidates}</div>
+          {shown.applications_open === false && (
+            <div className="text-xs" style={{ color: '#B45309' }}>Applications are not open today, so nothing can be sent yet. Check the application dates above.</div>
+          )}
           <div>{result ? 'Invited' : 'Would be invited'}: {shown.invited}</div>
+          {(shown.completed ?? 0) > 0 && (
+            <div>{result ? 'Earlier invitations completed (the missing text or email was sent)' : 'Earlier invitations that would be completed'}: {shown.completed}</div>
+          )}
+          {(shown.held_quiet_hours ?? 0) > 0 && (
+            <div className="text-xs" style={{ color: '#B45309' }}>
+              {shown.held_quiet_hours} text{shown.held_quiet_hours === 1 ? ' is' : 's are'} held for quiet hours
+              {shown.quiet_until ? ` until ${new Date(shown.quiet_until).toLocaleString()}` : ''}. Run the invitation again after that to send {shown.held_quiet_hours === 1 ? 'it' : 'them'}; emails are not repeated.
+            </div>
+          )}
           <div>Already invited: {shown.skipped_already} - already applied: {shown.skipped_applied} - no contact on file: {shown.skipped_no_contact}</div>
           <div className="text-xs text-earth-500">Email: {tally(shown.results.map((r) => r.email_status))}</div>
           <div className="text-xs text-earth-500">Text: {tally(shown.results.map((r) => r.sms_status))}</div>
@@ -1085,6 +1101,7 @@ function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: 
     hold_harmless_markdown: market.legal?.hold_harmless_markdown || '',
     hold_harmless_version: market.legal?.hold_harmless_version || '',
     insurance_help_url: market.legal?.insurance_help_url || '',
+    insurance_requirements_text: market.legal?.insurance_requirements_text || '',
     adh_guidelines_url: market.legal?.adh_guidelines_url || '',
     food_freedom_url: market.legal?.food_freedom_url || '',
     sms_consent_text: market.legal?.sms_consent_text || '',
@@ -1110,6 +1127,7 @@ function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: 
         hold_harmless_markdown: v.hold_harmless_markdown,
         hold_harmless_version: v.hold_harmless_version.trim(),
         insurance_help_url: v.insurance_help_url.trim() || null,
+        insurance_requirements_text: v.insurance_requirements_text.trim(),
         adh_guidelines_url: v.adh_guidelines_url.trim() || null,
         food_freedom_url: v.food_freedom_url.trim() || null,
         sms_consent_text: v.sms_consent_text,
@@ -1140,6 +1158,18 @@ function LegalSection({ market, readOnly, onSave }: { market: Market; readOnly: 
         <Field label="Insurance information sheet" value={v.insurance_help_url} onChange={set('insurance_help_url')} disabled={readOnly} placeholder="https://" />
         <Field label="ADH farmers market guidelines" value={v.adh_guidelines_url} onChange={set('adh_guidelines_url')} disabled={readOnly} placeholder="https://" />
         <Field label="Food Freedom guide" value={v.food_freedom_url} onChange={set('food_freedom_url')} disabled={readOnly} placeholder="https://" />
+      </div>
+      <div className="mt-5">
+        <BigTextArea
+          label="Insurance requirement (one or two sentences: the amount and who must be named as additional insured)"
+          value={v.insurance_requirements_text}
+          onChange={set('insurance_requirements_text')}
+          rows={3}
+          disabled={readOnly}
+        />
+        <p className="text-xs text-earth-500 mt-1 mb-0">
+          Plain text. Shown on the application above the insurance question and in the acceptance email. Leave it empty and neither says anything about insurance requirements.
+        </p>
       </div>
       <div className="mt-5">
         <BigTextArea label="Text message consent wording" value={v.sms_consent_text} onChange={set('sms_consent_text')} rows={4} disabled={readOnly} />

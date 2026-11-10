@@ -1,6 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import { toDate, toDateOrEpoch } from '../utils/dates.js';
-import { utcToLocalDate } from '../utils/tz.js';
+import { addDays, localToUtc, parseDate, utcToLocalDate } from '../utils/tz.js';
 import type { MembershipStatus } from './producers.js';
 
 /**
@@ -8,9 +8,10 @@ import type { MembershipStatus } from './producers.js';
  * re-applies each season, so a membership belongs to exactly one season) and
  * the one place that answers "which season is this market in right now?".
  *
- * SHARED VERBATIM: executor A1 owns this file; executor A2 copies it
- * byte-for-byte. Do not reformat or extend it here — put extensions in your
- * own module and import from this one.
+ * Written as one byte-identical module for the two Phase 4 backend
+ * executors; since the merge there is a single copy. The fix round added, at
+ * the end of the file, the insurance calendar date (`expires_on`, X11) and
+ * the staff views (`membershipViewFor`, X8).
  *
  * Firestore access stays inside the fake-db envelope (one equality filter per
  * query, everything else in memory) and every date field is read through
@@ -37,6 +38,14 @@ export type ItemRequestStatus = 'pending' | 'approved' | 'declined';
 
 export interface MembershipInsurance {
   status: InsuranceStatus;
+  /**
+   * The last day the certificate is valid, 'YYYY-MM-DD' in the market's own
+   * calendar: the stored truth (fix X11). null on a document written before
+   * the field existed — `insuranceExpiresOn` derives it from `expires_at`
+   * with the market's timezone, and `membershipViewFor` fills it in.
+   */
+  expires_on: string | null;
+  /** Derived from `expires_on`: the instant the certificate stops being valid (market-local midnight at the start of the next day). */
   expires_at: Date | null;
   upload_id: string | null;
   verified_by: string | null;
@@ -152,11 +161,22 @@ export function normalizeFeePlan(raw: unknown): FeePlan {
   }
 }
 
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    parseDate(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function insuranceFromData(raw: unknown): MembershipInsurance {
   const i = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const status = i.status;
   return {
     status: status === 'on_file' || status === 'expired' || status === 'waived' ? status : 'missing',
+    expires_on: isCalendarDate(i.expires_on) ? i.expires_on : null,
     expires_at: toDate(i.expires_at),
     upload_id: typeof i.upload_id === 'string' ? i.upload_id : null,
     verified_by: typeof i.verified_by === 'string' ? i.verified_by : null,
@@ -275,4 +295,81 @@ export async function findMembership(db: Firestore, producerId: string, marketId
 /** A vendor in the rotation: receives check-in texts and is drafted into booths. */
 export function isVendorOfRecord(m: Pick<MembershipView, 'status'>): boolean {
   return m.status === 'active';
+}
+
+/* ── Insurance expiry as a calendar date (Phase 4 fix X11) ── */
+
+/**
+ * "Valid through D" as an instant: market-local midnight at the start of the
+ * day after D. `insuranceStatusAt` compares against it, so a certificate is
+ * still good for the whole of D and expired from the first moment of D + 1,
+ * in the market's own timezone (DST included: the instant is resolved by
+ * `localToUtc`, never by adding 24 hours).
+ */
+export function insuranceExpiryInstant(expiresOn: string, timeZone: string): Date {
+  return localToUtc(addDays(expiresOn, 1), '00:00', timeZone || 'UTC');
+}
+
+/**
+ * The last valid day of a certificate. The stored `expires_on` when there is
+ * one; for a document that only has the instant, the market-local date of
+ * the moment just before it (so both "start of D + 1" and the older "23:59
+ * on D" read as D). Showing `expires_at.slice(0, 10)` instead is the UTC date
+ * of the NEXT day, and saving that back moved the date forward by a day on
+ * every unchanged save.
+ */
+export function insuranceExpiresOn(insurance: Pick<MembershipInsurance, 'expires_on' | 'expires_at'>, timeZone: string): string | null {
+  if (insurance.expires_on) return insurance.expires_on;
+  if (!insurance.expires_at) return null;
+  return utcToLocalDate(new Date(insurance.expires_at.getTime() - 1), timeZone || 'UTC');
+}
+
+/* ── What staff see of a membership (Phase 4 fix X8) ── */
+
+/** The signature as a market manager sees it: who signed, when, which version. The IP address and the token are evidence for admins only. */
+export type HoldHarmlessSummary = Pick<HoldHarmless, 'signed_at' | 'name' | 'version'>;
+
+export type MembershipStaffView = Omit<MembershipView, 'hold_harmless'> & { hold_harmless: HoldHarmless | HoldHarmlessSummary | null };
+
+/**
+ * The one way a membership leaves the API on a staff route. Admins get every
+ * field; a market manager gets the signature without `ip` and `token`. For
+ * everyone, `insurance.expires_on` is resolved in the market's `timezone`
+ * (stored, or derived for an older document).
+ */
+export function membershipViewFor(viewer: { role: string }, membership: MembershipView, opts: { timezone: string }): MembershipStaffView {
+  const insurance: MembershipInsurance = { ...membership.insurance, expires_on: insuranceExpiresOn(membership.insurance, opts.timezone) };
+  const signed = membership.hold_harmless;
+  const hold_harmless = !signed ? null : viewer.role === 'admin' ? signed : { signed_at: signed.signed_at, name: signed.name, version: signed.version };
+  return { ...membership, insurance, hold_harmless };
+}
+
+/**
+ * A per-request lookup of market timezones for `membershipViewFor`: each
+ * market document is read once however many memberships name it. 'UTC' for a
+ * market that is gone or carries no timezone.
+ */
+export function marketTimezones(db: Firestore): (marketId: string) => Promise<string> {
+  const cache = new Map<string, Promise<string>>();
+  return (marketId: string) => {
+    let hit = cache.get(marketId);
+    if (!hit) {
+      hit = (async () => {
+        if (!marketId || marketId.includes('/')) return 'UTC';
+        const doc = await db.collection('farmers_markets').doc(marketId).get();
+        const tz = doc.exists ? (doc.data() as Record<string, unknown>).timezone : null;
+        return typeof tz === 'string' && tz ? tz : 'UTC';
+      })();
+      cache.set(marketId, hit);
+    }
+    return hit;
+  };
+}
+
+/** `membershipViewFor` over a list, each in its own market's timezone. */
+export async function membershipViewsFor(db: Firestore, viewer: { role: string }, memberships: MembershipView[]): Promise<MembershipStaffView[]> {
+  const timezoneOf = marketTimezones(db);
+  const out: MembershipStaffView[] = [];
+  for (const m of memberships) out.push(membershipViewFor(viewer, m, { timezone: await timezoneOf(m.market_id) }));
+  return out;
 }

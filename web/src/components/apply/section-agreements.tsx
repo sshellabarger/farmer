@@ -10,6 +10,7 @@ type RuleAck = Exclude<keyof AcknowledgementsInput, 'own_booth_only'>;
 export function SectionAgreements({ values, update, config, draftId }: SectionProps & { draftId: string }) {
   const ins = values.insurance;
   const legal = config.legal;
+  const insuranceRequirements = (legal.insurance_requirements_text || '').trim();
   const setIns = (patch: Partial<typeof ins>) => update((v) => ({ ...v, insurance: { ...v.insurance, ...patch } }));
   const setAck = (key: RuleAck, on: boolean) => update((v) => ({ ...v, acknowledgements: { ...v.acknowledgements, [key]: on } }));
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -20,16 +21,18 @@ export function SectionAgreements({ values, update, config, draftId }: SectionPr
       <SectionHeading title="Insurance and agreements" />
 
       <div className="space-y-3">
-        <NoteBox>
-          All vendors must carry $1,000,000 in general liability insurance naming KBK-Breck, The WLRFM and ALFN as additional insureds. Proof is
-          required before your first market day.
-          {legal.insurance_help_url && (
-            <>
-              {' '}
-              <ExternalLink href={legal.insurance_help_url}>Insurance information sheet</ExternalLink>
-            </>
-          )}
-        </NoteBox>
+        {/* What insurance the market asks for is the market's own wording (legal.insurance_requirements_text); with none set, nothing is claimed here. */}
+        {(insuranceRequirements || legal.insurance_help_url) && (
+          <NoteBox>
+            {insuranceRequirements}
+            {legal.insurance_help_url && (
+              <>
+                {insuranceRequirements ? ' ' : ''}
+                <ExternalLink href={legal.insurance_help_url}>Insurance information sheet</ExternalLink>
+              </>
+            )}
+          </NoteBox>
+        )}
 
         <RadioGroup<InsuranceAnswer>
           legend="Your liability insurance"
@@ -50,6 +53,7 @@ export function SectionAgreements({ values, update, config, draftId }: SectionPr
               id="insurance_file"
               label="Certificate of insurance (optional now, required before your first market)"
               kind="insurance"
+              marketId={config.market.id}
               draftId={draftId}
               limits={config.limits}
               value={ins.certificate_upload_id ? { upload_id: ins.certificate_upload_id, name: ins.certificate_name || 'certificate' } : null}

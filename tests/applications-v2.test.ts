@@ -39,7 +39,7 @@ const smsPrints = () => log.mock.calls.filter((c) => String(c[0]).startsWith('[s
 
 /** Upload a PDF for a draft through the real route; returns its id. */
 async function upload(app: FastifyInstance, draft = DRAFT_ID, kind = 'permit') {
-  const mp = multipart({ draft_id: draft, kind }, { name: 'permit.pdf', type: 'application/pdf', data: PDF_BYTES });
+  const mp = multipart({ market: 'wlrfm', draft_id: draft, kind }, { name: 'permit.pdf', type: 'application/pdf', data: PDF_BYTES });
   const res = await app.inject({ method: 'POST', url: '/api/applications/uploads', headers: mp.headers, payload: mp.payload });
   expect(res.statusCode).toBe(201);
   return res.json().upload_id as string;
@@ -215,12 +215,14 @@ describe('POST /api/applications — validation', () => {
 });
 
 describe('POST /api/applications — one application per email and season', () => {
-  it('409s a second application for the same email, with the first one\'s id', async () => {
+  it('409s a second application for the same email, without naming the first one', async () => {
     const app = await boot(seed());
     const first = await submit(app);
     const second = await submit(app, { draft_id: '9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d' });
     expect(second.statusCode).toBe(409);
-    expect(second.json()).toEqual({ error: 'We already have an application for this email this season', application_id: first.json().id });
+    // The other application's id stays private: anyone can type an email address into the form.
+    expect(second.json()).toEqual({ error: 'We already have an application for this email this season' });
+    expect(second.body).not.toContain(first.json().id);
   });
 
   it('matches the email after normalisation', async () => {
@@ -601,7 +603,10 @@ describe('PATCH /api/applications/:id approve', () => {
     });
     expect(membership.approved_items).toEqual(['Tomatoes', 'peppers', 'eggs']); // flattened, de-duplicated
     expect(membership.insurance).toMatchObject({ status: 'on_file', upload_id: permitId, verified_by: null });
-    expect((membership.insurance as { expires_at: Date }).expires_at.toISOString()).toBe('2028-01-01T05:59:00.000Z'); // 23:59 on the 31st in Chicago
+    // Valid through 2027-12-31: the date is stored as typed, the instant is the start of Jan 1 in Chicago (fix X11).
+    expect((membership.insurance as { expires_on: string }).expires_on).toBe('2027-12-31');
+    expect((membership.insurance as { expires_at: Date }).expires_at.toISOString()).toBe('2028-01-01T06:00:00.000Z');
+    expect(body.membership.insurance).toMatchObject({ status: 'on_file', expires_on: '2027-12-31' });
     expect((membership.history as unknown[])[0]).toMatchObject({ from: null, to: 'approved', by: 'admin1', note: 'Welcome back' });
     expect(JSON.stringify(db.dump('producer_memberships').p1_wlrfm)).toBe(before2026);
     expect(body.membership).toMatchObject({ id: mid, season: '2027', status: 'approved' });
@@ -621,18 +626,24 @@ describe('PATCH /api/applications/:id approve', () => {
     const texts = rowsOfKind(db, 'acceptance');
     expect(texts).toHaveLength(1);
     expect(texts[0]).toMatchObject({ id: `acceptance:${id}`, to: APPLICANT_PHONE, producer_id: 'p1', status: 'simulated', application_id: id, membership_id: mid });
-    expect(String(texts[0]!.body)).toContain(`https://test.example/agreement?t=${tokens[0]!.token}`);
-    expect(String(texts[0]!.body)).toContain('Booth fee: $1250. Pay here: https://pay.test.example/booth');
-    expect(String(texts[0]!.body)).toContain('Terry');
+    // The text carries the news, the agreement link and where the details are; the amounts and the
+    // payment link are in the email (fix X14: with them the text was three SMS).
+    expect(String(texts[0]!.body)).toBe(
+      `SJCA Markets: your 2027 West Little Rock Farmers Market application is approved, Terry! Details are in your email.\nSign your Hold Harmless agreement: https://test.example/agreement?t=${tokens[0]!.token as string}\nReply STOP to opt out.`,
+    );
+    expect(String(texts[0]!.body)).not.toMatch(/Booth fee|pay\.test\.example|\$/);
+    expect(texts[0]!.segments).toBe(2);
     expect(String(texts[0]!.body)).toMatch(/^[\x20-\x7e\n]+$/); // ASCII only
-    expect(body.sends).toEqual({ sms: 'simulated', email: true });
+    expect(body.sends).toEqual({ sms: 'simulated', email: true, quiet_until: null });
 
     // One acceptance email.
     expect(emailPrints()).toHaveLength(1);
     const email = printed(log);
     expect(email).toContain('[SJCA Markets] Your 2027 West Little Rock Farmers Market application is approved');
     expect(email).toContain('Booth fee: $1250 for the season');
-    expect(email).toContain('KBK-Breck, LLC c/o Kelley Commercial Partners');
+    expect(email).toContain('Step 2 - pay your booth fee: <a href="https://pay.test.example/booth">https://pay.test.example/booth</a>');
+    // This market has not written an insurance requirement: the email names no landlord and no amount (fix X7).
+    expect(email).not.toMatch(/KBK|additional insured|1,000,000/);
     expect(email).toContain('https://help.test.example/insurance');
     expect(email).toContain('2027-04-03');
     expect(email).toContain('https://test.example/rules?market=wlrfm');
@@ -640,6 +651,27 @@ describe('PATCH /api/applications/:id approve', () => {
     // Audit trail.
     const actions = Object.values(db.dump('audit_log')).map((a) => a.action);
     expect(actions).toEqual(expect.arrayContaining(['producer.update', 'membership.create', 'application.approve']));
+  });
+
+  it('the acceptance email carries the market\'s own insurance requirement, escaped, and nothing when there is none (fix X7)', async () => {
+    const wording = 'Vendors must carry $1,000,000 in general liability insurance naming Example Landlord, LLC & "The Market" as additional insureds.';
+    const legal = { ...(market().legal as Record<string, unknown>), insurance_requirements_text: wording };
+    const db = seed({}, { legal });
+    const app = await boot(db);
+    const id = (await submit(app)).json().id;
+    expect((await approve(app, id)).statusCode).toBe(200);
+    const email = String(emailPrints()[0]![3]);
+    expect(email).toContain('Vendors must carry $1,000,000 in general liability insurance naming Example Landlord, LLC &amp; &quot;The Market&quot; as additional insureds.');
+    expect(email).toContain('Insurance information: <a href="https://help.test.example/insurance">');
+    expect(email).not.toContain('KBK');
+
+    // No wording and no help link: the email says nothing about insurance at all.
+    const bare = seed({}, { legal: { ...(market().legal as Record<string, unknown>), insurance_help_url: null } });
+    const bareApp = await boot(bare);
+    const bareId = (await submit(bareApp)).json().id;
+    log.mockClear();
+    expect((await approve(bareApp, bareId)).statusCode).toBe(200);
+    expect(String(emailPrints()[0]![3])).not.toMatch(/insur/i);
   });
 
   it('a second approval is refused and sends nothing more', async () => {
@@ -666,7 +698,10 @@ describe('PATCH /api/applications/:id approve', () => {
     expect(producerId).not.toBe('p1');
     expect(db.dump('producers')[producerId]).toMatchObject({ business_name: 'Newbie Gardens', contact_name: 'Nora Newbie', phone: APPLICANT_PHONE, email: 'newbie@example.test', emails: ['newbie@example.test'], active: true, source: 'application' });
     expect(db.dump('producer_memberships')[`${producerId}_wlrfm_2027`]).toMatchObject({ fee_plan: 'daily', spaces: 1 });
-    expect(rowsOfKind(db, 'acceptance')[0]!.body).toContain('per market');
+    // The per-market amount is in the email; the text only points there.
+    expect(String(emailPrints()[0]![3])).toContain('Booth fee: $25 per market.');
+    expect(rowsOfKind(db, 'acceptance')[0]!.body).toContain('Details are in your email.');
+    expect(rowsOfKind(db, 'acceptance')[0]!.body).not.toContain('per market');
   });
 
   it('a different business name for a known email becomes an alias; names never match', async () => {
@@ -757,7 +792,7 @@ describe('PATCH /api/applications/:id approve', () => {
     const id = (await submit(app)).json().id;
     const res = await approve(app, id, { send: false });
     expect(res.statusCode).toBe(200);
-    expect(res.json().sends).toEqual({ sms: 'skipped_not_requested', email: false });
+    expect(res.json().sends).toEqual({ sms: 'skipped_not_requested', email: false, quiet_until: null });
     expect(rowsOfKind(db, 'acceptance')).toHaveLength(0);
     expect(emailPrints()).toHaveLength(0);
     expect(smsPrints()).toHaveLength(0);
@@ -781,7 +816,7 @@ describe('PATCH /api/applications/:id approve', () => {
 
     const quiet = await approve(app, id, { send: false });
     expect(quiet.statusCode).toBe(200);
-    expect(quiet.json().sends).toEqual({ sms: 'skipped_not_requested', email: false });
+    expect(quiet.json().sends).toEqual({ sms: 'skipped_not_requested', email: false, quiet_until: null });
     expect((db.dump('applications')[id] as Record<string, unknown>).status).toBe('approved');
   });
 

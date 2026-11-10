@@ -15,6 +15,8 @@ import {
   extraQuestionSchema,
   DEFAULT_WORKFLOW,
   DEFAULT_QUIET_HOURS,
+  MARKET_SLUG_RE,
+  applicationsOpen,
   marketFees,
   marketPaymentLinks,
   marketLegal,
@@ -97,10 +99,14 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   // ─── GET /api/markets/:id/rules (public, Phase 4 §3.1) ───
+  // The id comes straight from a public URL: anything that is not a market slug is a 404
+  // before it reaches Firestore (an id with an encoded slash makes the admin SDK throw, which
+  // would be a 500 and an alert for a stranger's typo). An inactive market publishes nothing.
   app.get('/:id/rules', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
     const { id } = request.params as { id: string };
+    if (!MARKET_SLUG_RE.test(id)) return reply.status(404).send({ error: 'Market not found' });
     const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
+    if (!market || market.active !== true) return reply.status(404).send({ error: 'Market not found' });
     const legal = marketLegal(market);
     if (legal.rules_markdown === '' && legal.rules_url === null) {
       return reply.status(404).send({ error: 'The rules for this market are not published yet' });
@@ -462,9 +468,20 @@ export async function marketRoutes(app: FastifyInstance) {
 
     // Applications are taken for the market's configured season only, so that is the season an invite can be for.
     const label = market.season?.label;
-    if (!label) return reply.status(409).send({ error: 'Applications are not open: set the season for this market first' });
+    if (!label) {
+      return reply.status(409).send({ error: 'Applications are not open: set the season for this market first', code: 'applications_not_open' });
+    }
     const season = input.season ?? label;
     if (season !== label) return reply.status(409).send({ error: `Applications are open for ${label}, not ${season}` });
+    // The invitation says "applications are open": outside the window nothing is sent (fix X5).
+    // A dry run still answers, so the list can be reviewed before the window opens.
+    const now = new Date();
+    if (!input.dry_run && !applicationsOpen(market, now)) {
+      return reply.status(409).send({
+        error: `Applications for the ${label} season are not open today; the invitation would say they are. Check the application dates of this market.`,
+        code: 'applications_not_open',
+      });
+    }
 
     const result = await inviteReapply({
       db: app.db,
@@ -474,7 +491,7 @@ export async function marketRoutes(app: FastifyInstance) {
       actor: user.id,
       force: input.force,
       dryRun: input.dry_run,
-      now: new Date(),
+      now,
     });
 
     if (!input.dry_run) {
@@ -488,6 +505,8 @@ export async function marketRoutes(app: FastifyInstance) {
           force: input.force,
           candidates: result.candidates,
           invited: result.invited,
+          completed: result.completed,
+          held_quiet_hours: result.held_quiet_hours,
           skipped_already: result.skipped_already,
           skipped_applied: result.skipped_applied,
           skipped_no_contact: result.skipped_no_contact,

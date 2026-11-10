@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import type { BoothDoc, ProductEntry } from '@/lib/phase4-types';
+import type { BoothDoc, InsuranceCalendarDate, ProductEntry } from '@/lib/phase4-types';
 import {
   MEMBERSHIP_TRANSITIONS,
   type Checkin,
@@ -48,6 +48,15 @@ interface InviteOutcome {
   url: string;
   email: string;
   sms: string;
+  /** An earlier invitation had its missing text or email sent now. */
+  completed: boolean;
+  quietUntil: string | null;
+}
+
+/** A text outcome in plain words; a text held for the market's quiet hours says until when. */
+function textOutcome(status: string, quietUntil?: string | null): string {
+  if (status === 'skipped_quiet_hours') return `held for quiet hours${quietUntil ? ` until ${formatStamp(quietUntil)}` : ''}`;
+  return status.replace(/_/g, ' ');
 }
 
 function ProducerDetail() {
@@ -69,7 +78,7 @@ function ProducerDetail() {
   const [error, setError] = useState('');
   const [flash, setFlash] = useState('');
   const [inviteOutcome, setInviteOutcome] = useState<InviteOutcome | null>(null);
-  const [inviteConflict, setInviteConflict] = useState<string | null>(null);
+  const [inviteConflict, setInviteConflict] = useState<{ marketId: string; quietUntil: string | null } | null>(null);
   const [inviting, setInviting] = useState(false);
 
   const reload = useCallback(async () => {
@@ -158,12 +167,13 @@ function ProducerDetail() {
     setInviteConflict(null);
     try {
       const r = await api.inviteProducer(producer.id, marketId, force);
-      setInviteOutcome({ marketId, url: r.url, email: r.invite.email_status, sms: r.invite.sms_status });
+      setInviteOutcome({ marketId, url: r.url, email: r.invite.email_status, sms: r.invite.sms_status, completed: r.completed === true, quietUntil: r.quiet_until ?? null });
       await copyText(r.url);
       await reload();
     } catch (err: any) {
-      if (err instanceof ApiError && err.status === 409 && /already invited/i.test(err.message)) setInviteConflict(marketId);
-      else setError(err?.message || 'Could not send the invitation');
+      if (err instanceof ApiError && err.status === 409 && (err.body.code === 'already_invited' || /already invited/i.test(err.message))) {
+        setInviteConflict({ marketId, quietUntil: typeof err.body.quiet_until === 'string' ? err.body.quiet_until : null });
+      } else setError(err?.message || 'Could not send the invitation');
     } finally {
       setInviting(false);
     }
@@ -222,7 +232,9 @@ function ProducerDetail() {
       {inviteOutcome && (
         <div className="mb-4">
           <Notice kind="success">
-            Invitation for {marketName(inviteOutcome.marketId)}: email {inviteOutcome.email.replace(/_/g, ' ')}, text {inviteOutcome.sms.replace(/_/g, ' ')}. The link was copied:{' '}
+            {inviteOutcome.completed ? 'Invitation completed' : 'Invitation'} for {marketName(inviteOutcome.marketId)}: email {inviteOutcome.email.replace(/_/g, ' ')}, text{' '}
+            {textOutcome(inviteOutcome.sms, inviteOutcome.quietUntil)}.
+            {inviteOutcome.sms === 'skipped_quiet_hours' && ' Invite again after quiet hours to send the text; the email is not repeated.'} The link was copied:{' '}
             <span className="font-mono text-[12px] break-all">{inviteOutcome.url}</span>
           </Notice>
         </div>
@@ -230,8 +242,9 @@ function ProducerDetail() {
       {inviteConflict && (
         <div className="mb-4">
           <Notice kind="warning">
-            {producer.business_name} was already invited for {marketName(inviteConflict)}.{' '}
-            <ConfirmButton label="Resend the invitation" confirmLabel="Resend" danger={false} busy={inviting} onConfirm={() => sendInvite(inviteConflict, true)} />
+            {producer.business_name} was already invited for {marketName(inviteConflict.marketId)}.{' '}
+            {inviteConflict.quietUntil && `The text is held for quiet hours until ${formatStamp(inviteConflict.quietUntil)}; invite again after that to send it. `}
+            <ConfirmButton label="Resend the invitation" confirmLabel="Resend" danger={false} busy={inviting} onConfirm={() => sendInvite(inviteConflict.marketId, true)} />
           </Notice>
         </div>
       )}
@@ -271,7 +284,8 @@ function ProducerDetail() {
               if (send) await reload();
               return r;
             } catch (err: any) {
-              setError(err?.message || 'Could not create the agreement link');
+              const until = err instanceof ApiError && err.body.code === 'quiet_hours' && typeof err.body.quiet_until === 'string' ? err.body.quiet_until : null;
+              setError(`${err?.message || 'Could not create the agreement link'}${until ? ` Quiet hours end ${formatStamp(until)}.` : ''}`);
               return null;
             }
           }}
@@ -725,9 +739,19 @@ function MembershipCard({
 
       <InsuranceBlock m={m} allowed={allowed} isAdmin={isAdmin} onInsurance={onInsurance} onError={onError} />
       <AgreementBlock m={m} allowed={allowed} onAgreementLink={onAgreementLink} />
-      <ItemsBlock m={m} allowed={allowed} onItems={onItems} />
+      <ItemsBlock m={m} allowed={allowed} isAdmin={isAdmin} onItems={onItems} />
     </div>
   );
+}
+
+/**
+ * The last day the certificate is valid, as the server gives it (`expires_on`,
+ * a calendar date in the market's own calendar). Never `expires_at.slice(0, 10)`:
+ * that instant is the first moment of the NEXT day, so its UTC date is one day
+ * late, and saving it back moved the date forward on every save.
+ */
+function expiresOn(m: Membership): string {
+  return (m.insurance as (Membership['insurance'] & InsuranceCalendarDate) | undefined)?.expires_on || '';
 }
 
 function effectiveInsurance(m: Membership): InsuranceStatus {
@@ -752,14 +776,14 @@ function InsuranceBlock({
 }) {
   const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState<InsuranceStatus>(m.insurance?.status ?? 'missing');
-  const [expires, setExpires] = useState((m.insurance?.expires_at || '').slice(0, 10));
+  const [expires, setExpires] = useState(expiresOn(m));
   const [note, setNote] = useState(m.insurance?.note || '');
   const [saving, setSaving] = useState(false);
   const [opening, setOpening] = useState(false);
 
   useEffect(() => {
     setStatus(m.insurance?.status ?? 'missing');
-    setExpires((m.insurance?.expires_at || '').slice(0, 10));
+    setExpires(expiresOn(m));
     setNote(m.insurance?.note || '');
   }, [m.insurance]);
 
@@ -792,7 +816,7 @@ function InsuranceBlock({
       <div className="flex items-center gap-2 flex-wrap text-sm">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Insurance</span>
         <StatusChip status={eff} />
-        {m.insurance?.expires_at && <span className="text-[12px] text-text-muted">expires {m.insurance.expires_at.slice(0, 10)}</span>}
+        {expiresOn(m) && <span className="text-[12px] text-text-muted">valid through {expiresOn(m)}</span>}
         {m.insurance?.note && <span className="text-[12px] text-text-soft">{m.insurance.note}</span>}
         <span className="ml-auto flex items-center gap-2">
           {isAdmin && uploadId && m.application_id && (
@@ -814,7 +838,7 @@ function InsuranceBlock({
               { value: 'waived', label: 'Waived' },
             ]}
           />
-          <DateField label="Expires" value={expires} onChange={setExpires} />
+          <DateField label="Valid through (last day)" value={expires} onChange={setExpires} />
           <Field label="Note" value={note} onChange={setNote} />
           <div className="flex gap-2">
             <PrimaryButton
@@ -822,7 +846,7 @@ function InsuranceBlock({
               disabled={saving}
               onClick={async () => {
                 setSaving(true);
-                const ok = await onInsurance(m, { status, expires_at: expires || null, upload_id: m.insurance?.upload_id ?? null, note: note.trim() });
+                const ok = await onInsurance(m, { status, expires_on: expires || null, upload_id: m.insurance?.upload_id ?? null, note: note.trim() });
                 setSaving(false);
                 if (ok) setEditing(false);
               }}
@@ -885,7 +909,7 @@ function AgreementBlock({
       </div>
       {result && (
         <div className="mt-2 text-[12px] text-text-soft">
-          {result.sent ? `Text: ${result.sms.replace(/_/g, ' ')}. ` : copied ? 'Link copied. ' : ''}
+          {result.sent ? `Text: ${textOutcome(result.sms)}. ` : copied ? 'Link copied. ' : ''}
           <span className="font-mono break-all">{result.url}</span>
         </div>
       )}
@@ -893,7 +917,8 @@ function AgreementBlock({
   );
 }
 
-function ItemsBlock({ m, allowed, onItems }: { m: Membership; allowed: boolean; onItems: (m: Membership, data: ItemsPayload) => Promise<boolean> }) {
+/** Reviewing a vendor's request is open to the market's staff; adding items directly is an admin action (the server answers 403 otherwise). */
+function ItemsBlock({ m, allowed, isAdmin, onItems }: { m: Membership; allowed: boolean; isAdmin: boolean; onItems: (m: Membership, data: ItemsPayload) => Promise<boolean> }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const requests = (m.item_requests || []).filter((r) => r.status === 'pending');
@@ -959,7 +984,7 @@ function ItemsBlock({ m, allowed, onItems }: { m: Membership; allowed: boolean; 
           ))}
         </div>
       )}
-      {allowed && (
+      {allowed && isAdmin && (
         <div className="flex gap-2">
           <input
             value={draft}

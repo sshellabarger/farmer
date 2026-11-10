@@ -8,6 +8,7 @@ import { mintPurposeToken, purposeTokenUrl } from './purpose-tokens.js';
 import type { PurposeTokenDoc } from './purpose-tokens.js';
 import { membershipFromData } from './seasons.js';
 import type { MembershipView } from './seasons.js';
+import { quietUntil } from './markets.js';
 import type { FarmersMarket } from './markets.js';
 import { CLAIM_TTL_MS } from './checkin-workflow.js';
 
@@ -200,12 +201,15 @@ export type AgreementSmsOutcome =
   | 'skipped_no_phone'
   | 'skipped_invalid_phone'
   | 'skipped_opted_out'
-  | 'skipped_inactive_producer';
+  | 'skipped_inactive_producer'
+  | 'skipped_quiet_hours';
 
 /**
  * Mints a fresh agreement token (earlier links keep working until they expire)
  * and, when `send`, texts it. Deliberately carries NO dedupe key: this is a staff
- * resend, an intentional extra text.
+ * resend, an intentional extra text. Never inside the market's quiet hours
+ * (`skipped_quiet_hours`); the route refuses that case before calling this, so
+ * the check here is the backstop for any other caller.
  */
 export async function issueAgreementLink(
   db: Firestore,
@@ -234,6 +238,7 @@ export async function issueAgreementLink(
     else if (!phone) sms = 'skipped_no_phone';
     else if (!E164_RE.test(phone)) sms = 'skipped_invalid_phone';
     else if (producer.sms_opt_out_at) sms = 'skipped_opted_out';
+    else if (quietUntil(market, opts.now)) sms = 'skipped_quiet_hours';
     else {
       const result = await trySendSms({
         env,

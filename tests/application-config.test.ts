@@ -77,7 +77,7 @@ describe('GET /api/applications/config', () => {
     expect(body.legal.sms_consent_version).toBe('sjca-sms-1');
     expect(body.legal.rules_markdown).toBeUndefined();
     expect(body.legal.hold_harmless_markdown).toBeUndefined();
-    expect(body.limits).toEqual({ upload_max_bytes: 10 * 1024 * 1024, upload_mimes: ['application/pdf', 'image/jpeg', 'image/png', 'image/heic', 'image/heif'], stall_preference_max: 3 });
+    expect(body.limits).toEqual({ upload_max_bytes: 10 * 1024 * 1024, upload_mimes: ['application/pdf', 'image/jpeg', 'image/png', 'image/heic', 'image/heif'], stall_preference_max: 3, upload_retention_hours: 48 });
     expect(body.payment_links.application_fee_url).toContain('{email}'); // the template; the submit response fills it
   });
 
@@ -128,6 +128,41 @@ describe('GET /api/markets/:id/rules', () => {
     const res = await get(db, '/api/markets/wlrfm/rules');
     expect(res.statusCode).toBe(200);
     expect(res.json().rules_url).toBe('https://rules.test.example/2027.pdf');
+  });
+
+  it('404s an inactive market even when it has rules', async () => {
+    const db = seed({ farmers_markets: { wlrfm: market(), gone: market({ slug: 'gone', active: false }) } });
+    expect((await get(db, '/api/markets/gone/rules')).statusCode).toBe(404);
+    expect((await get(db, '/api/markets/wlrfm/rules')).statusCode).toBe(200);
+  });
+
+  it('404s an id that is not a market slug without asking Firestore (the admin SDK throws on such ids)', async () => {
+    const db = seed();
+    // What the real SDK does with a document id that is empty, has a slash, or is reserved.
+    const collection = db.collection.bind(db);
+    const asked: string[] = [];
+    db.collection = ((name: string) => {
+      const col = collection(name);
+      if (name !== 'farmers_markets') return col;
+      const doc = col.doc.bind(col);
+      col.doc = ((id?: string) => {
+        asked.push(String(id));
+        if (!id || id.includes('/') || id === '.' || id === '..' || /^__.*__$/.test(id)) {
+          throw new Error(`Value for argument "documentPath" is not a valid resource path: "${id}"`);
+        }
+        return doc(id);
+      }) as never;
+      return col;
+    }) as never;
+    const app = await boot(db);
+    for (const bad of ['a%2Fb', 'wlrfm%2Fsecret', '%2Fwlrfm', 'a%2F%2E%2E%2Fb', '__name__', 'WLRFM', 'has%20space', 'x', 'a'.repeat(40), '%00']) {
+      const res = await app.inject({ method: 'GET', url: `/api/markets/${bad}/rules` });
+      expect(res.statusCode, bad).toBe(404);
+    }
+    expect(asked).toEqual([]);
+    // A well-formed id still reaches the database.
+    expect((await app.inject({ method: 'GET', url: '/api/markets/wlrfm/rules' })).statusCode).toBe(200);
+    expect(asked).toEqual(['wlrfm']);
   });
 });
 
@@ -190,6 +225,29 @@ describe('PATCH /api/markets/:id — season, fees, payment links, legal texts, b
     const audit = Object.values(db.dump('audit_log')).find((a) => a.action === 'market.update')!;
     expect(JSON.stringify(audit)).not.toContain('New rules text.');
     expect((audit.after as { legal: Record<string, unknown> }).legal).toMatchObject({ rules_version: '2027-2', rules_markdown_length: 15 });
+  });
+
+  it('the insurance requirement is market data: empty by default, set through PATCH, served on the public config (fix X7)', async () => {
+    const db = seed();
+    const app = await boot(db);
+    const config = async () => (await app.inject({ method: 'GET', url: '/api/applications/config?market=wlrfm' })).json();
+    // A market that has not set it says nothing.
+    expect((await config()).legal.insurance_requirements_text).toBe('');
+
+    const wording = '  All vendors must carry $1,000,000 in general liability insurance naming Example Landlord, LLC as additional insured.  ';
+    const res = await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: wording } } });
+    expect(res.statusCode).toBe(200);
+    const legal = db.dump('farmers_markets').wlrfm!.legal as Record<string, unknown>;
+    expect(legal.insurance_requirements_text).toBe(wording.trim());
+    expect(legal).toMatchObject({ rules_version: '2027-1', hold_harmless_version: '2027-1' }); // the other legal fields are kept
+    expect((await config()).legal.insurance_requirements_text).toBe(wording.trim());
+    expect(res.json().market.legal.insurance_requirements_text).toBe(wording.trim());
+
+    // It can be cleared again, and it is bounded.
+    expect((await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: '' } } })).statusCode).toBe(200);
+    expect((await config()).legal.insurance_requirements_text).toBe('');
+    expect((await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: 'x'.repeat(2001) } } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'PATCH', url: '/api/markets/wlrfm', headers: adminAuth(), payload: { legal: { insurance_requirements_text: 7 } } })).statusCode).toBe(400);
   });
 
   it('categories and product types are validated as whole arrays, keys unique and cross-referenced', async () => {

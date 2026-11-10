@@ -4,7 +4,7 @@ import { authenticate, requireRole } from '../middleware/rbac.js';
 import { requireStaff, canAccessMarket, type ScopedUser } from '../middleware/market-scope.js';
 import { writeAudit } from '../services/audit.js';
 import { canTransition, createMembership, feePlanInputSchema, isActiveBooth, type MembershipStatus } from '../services/producers.js';
-import { currentSeason, findMembership, membershipFromData, normalizeFeePlan, SEASON_LABEL_RE } from '../services/seasons.js';
+import { currentSeason, findMembership, marketTimezones, membershipFromData, membershipViewFor, normalizeFeePlan, SEASON_LABEL_RE } from '../services/seasons.js';
 import type { FarmersMarket } from '../services/markets.js';
 
 const MEMBERSHIP_STATUSES = ['applied', 'under_review', 'approved', 'active', 'inactive'] as const;
@@ -94,11 +94,16 @@ export async function membershipRoutes(app: FastifyInstance) {
     if (hasProducer && scoped.role !== 'admin') views = views.filter((m) => canAccessMarket(scoped, m.market_id));
     if (season && season !== 'all') views = views.filter((m) => m.season === season);
 
+    // Every membership leaves through membershipViewFor (fix X8): no signature IP or token for a market manager.
+    const timezoneOf = marketTimezones(app.db);
     const memberships = await Promise.all(
       views.map(async (m) => {
         const producerDoc = await app.db.collection('producers').doc(m.producer_id).get();
         const producerData = producerDoc.data();
-        return { ...m, producer: { id: m.producer_id, business_name: producerData?.business_name ?? '' } };
+        return {
+          ...membershipViewFor(scoped, m, { timezone: await timezoneOf(m.market_id) }),
+          producer: { id: m.producer_id, business_name: producerData?.business_name ?? '' },
+        };
       }),
     );
 
@@ -158,7 +163,7 @@ export async function membershipRoutes(app: FastifyInstance) {
       after: created.doc,
     });
 
-    return reply.status(201).send({ membership: membershipFromData(created.id, created.doc) });
+    return reply.status(201).send({ membership: membershipViewFor(user, membershipFromData(created.id, created.doc), { timezone: market.timezone || 'UTC' }) });
   });
 
   // PATCH /api/memberships/:id
@@ -223,7 +228,8 @@ export async function membershipRoutes(app: FastifyInstance) {
       after: { status: after.status },
     });
 
-    return { membership: membershipFromData(doc.id, after as Record<string, unknown>) };
+    const timezone = await marketTimezones(app.db)(String(before.market_id ?? ''));
+    return { membership: membershipViewFor(scoped, membershipFromData(doc.id, after as Record<string, unknown>), { timezone }) };
   });
 
   // POST /api/memberships/:id/items — approve / decline a vendor's request to add products, or add items directly
@@ -240,6 +246,11 @@ export async function membershipRoutes(app: FastifyInstance) {
     const parsed = itemsSchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0]!.message });
     const input = parsed.data;
+    // Adding items directly skips the vendor's request and the review of it: admins only (contract 3.3, fix X9).
+    // A market manager approves or declines what a vendor asked for.
+    if (input.action === 'add' && scoped.role !== 'admin') {
+      return reply.status(403).send({ error: 'Forbidden: only an admin can add items directly' });
+    }
     const view = membershipFromData(doc.id, stored);
     const now = new Date();
 
@@ -290,6 +301,7 @@ export async function membershipRoutes(app: FastifyInstance) {
     });
 
     const after = (await ref.get()).data() as Record<string, unknown>;
-    return { membership: membershipFromData(doc.id, after) };
+    const timezone = await marketTimezones(app.db)(view.market_id);
+    return { membership: membershipViewFor(scoped, membershipFromData(doc.id, after), { timezone }) };
   });
 }

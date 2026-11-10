@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { DAYS_OF_WEEK, isValidTimeZone, parseDate, utcToLocalDate } from '../utils/tz.js';
 import type { DayOfWeek } from '../utils/tz.js';
+import { nextAllowedInstant } from '../utils/quiet-hours.js';
 import { SEASON_LABEL_RE } from './seasons.js';
 
 /**
@@ -89,6 +90,13 @@ export interface MarketLegal {
   hold_harmless_markdown: string;
   hold_harmless_version: string;
   insurance_help_url: string | null;
+  /**
+   * The market's own sentence about the insurance a vendor must carry (the
+   * amount, who must be named as additional insured). Plain text, shown on the
+   * application and in the acceptance email; '' = say nothing. Market data,
+   * never wording in code (Phase 4 fix X7).
+   */
+  insurance_requirements_text: string;
   adh_guidelines_url: string | null;
   food_freedom_url: string | null;
   sms_consent_text: string;
@@ -244,8 +252,16 @@ const websiteSchema = z.object({
 
 const mailchimpSchema = z.object({ audience_id: z.string(), template_id: z.string() });
 
+/**
+ * A market id is its slug. Public routes test an id against this BEFORE using
+ * it as a document id: the admin SDK throws (a 500 and an alert) on an id
+ * that contains a slash, is empty, or is `.`/`..`, and none of those can be a
+ * market.
+ */
+export const MARKET_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+
 export const createMarketSchema = z.object({
-  slug: z.string().regex(/^[a-z0-9][a-z0-9-]{1,31}$/),
+  slug: z.string().regex(MARKET_SLUG_RE),
   name: z.string().min(1),
   location: z.object({ name: z.string().min(1), address: z.string().optional().default('') }),
   timezone: timezoneString.default('America/Chicago'),
@@ -324,6 +340,7 @@ export const legalSchema = z.object({
   hold_harmless_markdown: z.string().max(50_000),
   hold_harmless_version: z.string().max(40),
   insurance_help_url: httpUrl.nullable(),
+  insurance_requirements_text: z.string().trim().max(2000),
   adh_guidelines_url: httpUrl.nullable(),
   food_freedom_url: httpUrl.nullable(),
   sms_consent_text: z.string().min(1).max(2000),
@@ -413,6 +430,7 @@ export const DEFAULT_LEGAL: MarketLegal = {
   hold_harmless_markdown: '',
   hold_harmless_version: '',
   insurance_help_url: null,
+  insurance_requirements_text: '',
   adh_guidelines_url: null,
   food_freedom_url: null,
   sms_consent_text:
@@ -646,4 +664,25 @@ export function applicationsOpen(market: Pick<FarmersMarket, 'season' | 'timezon
   if (s.application_open && today < s.application_open) return false;
   if (s.application_close && today > s.application_close) return false;
   return true;
+}
+
+/**
+ * When a text that STAFF trigger for this market (an invitation to re-apply,
+ * an acceptance, an agreement link) may next go out: null when the market is
+ * outside its quiet hours right now, else the instant the quiet window ends
+ * (market-local, `src/utils/quiet-hours.ts`). The engine defers its own texts
+ * the same way; a staff action cannot be deferred, so the caller sends the
+ * email, skips the text and says so (Phase 4 fix X5). A market document with
+ * no (or an unreadable) `quiet_hours` falls back to DEFAULT_QUIET_HOURS, as
+ * the engine does.
+ */
+export function quietUntil(market: Pick<FarmersMarket, 'quiet_hours' | 'timezone'>, now: Date): Date | null {
+  const tz = market.timezone || 'UTC';
+  let next: Date;
+  try {
+    next = nextAllowedInstant(now, market.quiet_hours ?? DEFAULT_QUIET_HOURS, tz);
+  } catch {
+    next = nextAllowedInstant(now, DEFAULT_QUIET_HOURS, tz);
+  }
+  return next.getTime() > now.getTime() ? next : null;
 }

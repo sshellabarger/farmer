@@ -3,7 +3,9 @@ import type { FastifyInstance } from 'fastify';
 import { P1_PHONE, T_OPEN, adminAuth, authFor, boot, printed, rowsOfKind, seed, type Db } from './helpers/a1-fixtures.js';
 import { mintPurposeToken, resolvePurposeToken } from '../src/services/purpose-tokens.js';
 import { mintCheckinToken } from '../src/services/link-tokens.js';
-import { TEMPLATES_A1 } from '../src/services/invites.js';
+import { ACCEPTANCE_MAX_SEGMENTS, TEMPLATES_A1 } from '../src/services/invites.js';
+import { AGREEMENT_TEMPLATES } from '../src/services/agreements.js';
+import { splitMessage } from '../src/services/sms.js';
 
 let log: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
@@ -334,6 +336,50 @@ describe('POST /api/markets/:id/invite-reapply', () => {
     expect(rowsOfKind(db, 'application_invite')).toHaveLength(2); // p2 twice: the first keyed, the resend not
   });
 
+  it('skips a returning producer who already applied WITHOUT the prefill link: the application is matched by its contact email (fix X12)', async () => {
+    const db = crowd();
+    // p2 typed the public form from scratch, from a second address the market has on file for them:
+    // the application names no producer at all.
+    await db.collection('producers').doc('p2').update({ emails: ['bravo@example.test', 'bravo.office@example.test'] });
+    await db.collection('applications').doc('a_direct').set({
+      market_id: 'wlrfm',
+      season: '2027',
+      status: 'under_review',
+      producer_id: null,
+      prefill_producer_id: null,
+      contact: { email: ' Bravo.Office@Example.test ', name: 'Bravo Owner' },
+      schema_version: 2,
+    });
+    const app = await boot(db);
+
+    const dry = await bulk(app, { dry_run: true });
+    expect(dry.json()).toMatchObject({ candidates: 5, invited: 2, skipped_applied: 2, skipped_no_contact: 1 });
+    expect(dry.json().results.map((r: { producer_id: string }) => r.producer_id)).toEqual(['p1', 'p3', 'p7']);
+
+    const res = await bulk(app);
+    expect(res.json()).toMatchObject({ candidates: 5, invited: 2, skipped_applied: 2, skipped_no_contact: 1 });
+    expect(Object.keys(db.dump('application_invites')).sort()).toEqual(['wlrfm_2027_p1', 'wlrfm_2027_p7']);
+    expect(rowsOfKind(db, 'application_invite')).toHaveLength(0); // p2 was the only textable producer
+    expect(emailPrints()).toHaveLength(2);
+    expect(printed(log)).not.toContain('bravo');
+  });
+
+  it('an email match counts only for a live application of this market and season', async () => {
+    const db = crowd();
+    const direct = (over: Record<string, unknown>) => ({ market_id: 'wlrfm', season: '2027', status: 'new', producer_id: null, prefill_producer_id: null, contact: { email: 'bravo@example.test' }, schema_version: 2, ...over });
+    await db.collection('applications').doc('declined').set(direct({ status: 'declined' }));
+    await db.collection('applications').doc('withdrawn').set(direct({ status: 'withdrawn' }));
+    await db.collection('applications').doc('last_year').set(direct({ season: '2026' }));
+    await db.collection('applications').doc('elsewhere').set(direct({ market_id: 'other' }));
+    await db.collection('applications').doc('no_contact').set(direct({ contact: null }));
+    await db.collection('applications').doc('bad_email').set(direct({ contact: { email: 'not an address' } }));
+    const app = await boot(db);
+    const res = await bulk(app);
+    // Exactly as without those applications: p2 is still invited.
+    expect(res.json()).toMatchObject({ candidates: 5, invited: 3, skipped_applied: 1, skipped_no_contact: 1 });
+    expect(Object.keys(db.dump('application_invites')).sort()).toEqual(['wlrfm_2027_p1', 'wlrfm_2027_p2', 'wlrfm_2027_p7']);
+  });
+
   it('only the configured season can be invited, and only once it is set', async () => {
     const app = await boot(crowd());
     expect((await bulk(app, { season: '2028' })).statusCode).toBe(409);
@@ -371,13 +417,95 @@ describe('GET /api/producers/:id — the re-apply link', () => {
 });
 
 describe('TEMPLATES_A1', () => {
-  it('the acceptance text omits the pay sentence when the market has no booth-fee link', () => {
-    const body = TEMPLATES_A1.acceptance({ season: '2027', market_name: 'WLRFM', first_name: 'Terry', agreement_link: 'https://x.test/agreement?t=a', total: 30, per_market: true, booth_fee_url: null });
-    expect(body).toBe('SJCA Markets: your 2027 WLRFM application is approved, Terry! Please sign the Hold Harmless agreement here: https://x.test/agreement?t=a\nBooth fee: $30 per market.\nReply STOP to opt out.');
+  // Production-shaped values: APP_URL https://farmlink.us and a 43-character token.
+  const LINK = `https://farmlink.us/agreement?t=${'A1b2C3d4-'.repeat(5).slice(0, 43)}`;
+  const acceptance = (over: Partial<Parameters<typeof TEMPLATES_A1.acceptance>[0]> = {}) =>
+    TEMPLATES_A1.acceptance({ season: '2027', market_name: 'West Little Rock Farmers Market', first_name: 'Terry', agreement_link: LINK, details_in_email: true, ...over });
+
+  it('the acceptance text: the news, the agreement link, where the details are, the opt-out line; no amounts, no payment link', () => {
+    expect(LINK).toHaveLength(75);
+    expect(acceptance()).toBe(
+      `SJCA Markets: your 2027 West Little Rock Farmers Market application is approved, Terry! Details are in your email.\nSign your Hold Harmless agreement: ${LINK}\nReply STOP to opt out.`,
+    );
+    expect(acceptance()).not.toMatch(/\$|Booth fee|Pay here/);
+    expect(acceptance()).toMatch(/^[\x20-\x7e\n]+$/);
   });
 
-  it('copes with a missing first name', () => {
-    expect(TEMPLATES_A1.acceptance({ season: '2027', market_name: 'WLRFM', first_name: '', agreement_link: 'L', total: 700, per_market: false, booth_fee_url: 'P' })).toContain('application is approved! Please');
+  it('is two SMS with the production-shaped values that used to make three (336 characters), and the link is whole in the second', () => {
+    const segments = splitMessage(acceptance());
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toBe('SJCA Markets: your 2027 West Little Rock Farmers Market application is approved, Terry! Details are in your email.');
+    expect(segments[1]).toBe(`Sign your Hold Harmless agreement: ${LINK}\nReply STOP to opt out.`);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(153);
+  });
+
+  it('is at most two SMS with a 40-character market name', () => {
+    const market_name = 'Northwest Arkansas Regional Farm Market!'.slice(0, 40);
+    expect(market_name).toHaveLength(40);
+    const body = acceptance({ market_name });
+    const segments = splitMessage(body);
+    expect(segments).toHaveLength(ACCEPTANCE_MAX_SEGMENTS);
+    expect(body).toContain(market_name);
+    expect(body).toContain(', Terry!');
+    expect(segments[1]).toContain(LINK);
+    expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
+    // Also without the email sentence and with a qualified season label.
+    expect(splitMessage(acceptance({ market_name, details_in_email: false }))).toHaveLength(2);
+    expect(splitMessage(acceptance({ market_name, season: '2027-winter' }))).toHaveLength(2);
+  });
+
+  it('stays at two SMS for long names by dropping the first name, then shortening the market name; the link and the opt-out line are never touched', () => {
+    // A very long first name: the greeting goes, the market name stays whole.
+    const longFirst = acceptance({ first_name: 'Bartholomew-Maximilian-Alexander-Christopher-Montgomery-Fitzgerald' });
+    expect(splitMessage(longFirst)).toHaveLength(2);
+    expect(longFirst).toContain('West Little Rock Farmers Market application is approved! Details are in your email.');
+    expect(longFirst).not.toContain('Bartholomew');
+    // A first name that still fits is kept, however unusual.
+    expect(acceptance({ first_name: 'Bartholomew-Maximilian' })).toContain(', Bartholomew-Maximilian!');
+
+    // A market name no segment can hold: shortened until the text fits.
+    const market_name = 'The Greater Central Arkansas River Valley Farmers, Ranchers and Artisans Cooperative Saturday Market';
+    const longMarket = acceptance({ market_name });
+    const segments = splitMessage(longMarket);
+    expect(segments).toHaveLength(2);
+    expect(segments[0]!.length).toBeLessThanOrEqual(153);
+    expect(segments[0]).toMatch(/^SJCA Markets: your 2027 The Greater Central Arkansas River Valley Farmers.* application is approved! Details are in your email\.$/);
+    expect(segments[1]).toBe(`Sign your Hold Harmless agreement: ${LINK}\nReply STOP to opt out.`);
+
+    // Every market-name length from 1 to 120 characters, with and without a first name: never a third segment.
+    for (let n = 1; n <= 120; n += 1) {
+      const name = 'Market Name Words '.repeat(8).slice(0, n).trimEnd() || 'M';
+      for (const first_name of ['', 'Terry', 'Christopher-James']) {
+        const body = acceptance({ market_name: name, first_name });
+        const parts = splitMessage(body);
+        expect(parts.length, `${n} ${first_name}`).toBe(2);
+        // The break is the line break: the first text is the whole first sentence pair, the second the link and the opt-out line.
+        expect(parts[0], `${n} ${first_name}`).toMatch(/ application is approved(, [A-Za-z-]+)?! Details are in your email\.$/);
+        expect(parts[1], `${n} ${first_name}`).toBe(`Sign your Hold Harmless agreement: ${LINK}\nReply STOP to opt out.`);
+      }
+    }
+  });
+
+  it('leaves the email sentence out when no email went with it, and copes with a missing first name', () => {
+    expect(acceptance({ details_in_email: false, market_name: 'WLRFM', first_name: '' })).toBe(
+      `SJCA Markets: your 2027 WLRFM application is approved!\nSign your Hold Harmless agreement: ${LINK}\nReply STOP to opt out.`,
+    );
     expect(TEMPLATES_A1.application_invite({ season: '2027', market_name: 'WLRFM', first_name: '', link: 'L' })).toContain('open. Your returning-vendor application');
+  });
+
+  it('when nothing can fit (a link longer than a segment) the full wording is sent, not a mangled one', () => {
+    const hugeLink = `https://${'very-long-preview-host-name.'.repeat(5)}example.test/agreement?t=${'x'.repeat(43)}`;
+    const body = acceptance({ agreement_link: hugeLink });
+    expect(body).toContain('West Little Rock Farmers Market application is approved, Terry!');
+    expect(body).toContain(hugeLink);
+  });
+
+  it('the invitation and the agreement-link texts are two SMS as well with a 40-character market name', () => {
+    const market_name = 'Northwest Arkansas Regional Farm Market!';
+    const invite = TEMPLATES_A1.application_invite({ season: '2027', market_name, first_name: 'Terry', link: `https://farmlink.us/apply?t=${'x'.repeat(43)}` });
+    expect(splitMessage(invite)).toHaveLength(2);
+    const agreement = AGREEMENT_TEMPLATES.agreement_link({ season: '2027', market_name, first_name: 'Terry', link: LINK });
+    expect(splitMessage(agreement)).toHaveLength(2);
+    expect(splitMessage(agreement)[1]).toContain(LINK);
   });
 });
