@@ -448,3 +448,23 @@ export interface InviteBatchExtras {
   held_quiet_hours?: number;
   quiet_until?: string | null;
 }
+
+/* ── Phase 4 fixes, application side (the insurance expiry is a calendar date) ── */
+
+/**
+ * PATCH /api/memberships/:id/insurance body. `expires_on` is the last day the
+ * certificate is valid, 'YYYY-MM-DD' in the market's own calendar; the server
+ * derives the instant (`insurance.expires_at`) from it. Never send
+ * `expires_at`: its first ten characters are the UTC date of the NEXT day.
+ */
+export interface InsuranceUpdate {
+  status: 'missing' | 'on_file' | 'expired' | 'waived';
+  expires_on: string | null;
+  upload_id: string | null;
+  note: string;
+}
+
+/** What every staff route adds to `membership.insurance`: the last valid day, stored or derived by the server. */
+export interface InsuranceCalendarDate {
+  expires_on?: string | null;
+}

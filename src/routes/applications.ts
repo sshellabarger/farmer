@@ -18,7 +18,6 @@ import { normalizeEmail } from '../services/identity.js';
 import { normalizePhone } from './sms.js';
 import { byDateDesc } from '../utils/sort.js';
 import { toDate } from '../utils/dates.js';
-import { localToUtc } from '../utils/tz.js';
 import type { FarmersMarket, ProductTypeConfig } from '../services/markets.js';
 import { applicationsOpen, marketCategories, marketFees, marketLegal, marketPaymentLinks, marketProductTypes } from '../services/markets.js';
 import {
@@ -52,7 +51,15 @@ import {
   utcDay,
   type UploadMeta,
 } from '../services/application-uploads.js';
-import { currentSeason, findMembership, listMembershipsForProducer, membershipFromData } from '../services/seasons.js';
+import {
+  currentSeason,
+  findMembership,
+  insuranceExpiryInstant,
+  listMembershipsForProducer,
+  membershipFromData,
+  membershipViewFor,
+  type MembershipStaffView,
+} from '../services/seasons.js';
 import { markPurposeTokenUsed, mintPurposeToken, purposeTokenUrl, resolvePurposeToken } from '../services/purpose-tokens.js';
 import { AGREEMENT_TOKEN_DAYS, sendAcceptance } from '../services/invites.js';
 
@@ -582,14 +589,16 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
     if (!producerId && typeof data.prefill_producer_id === 'string') producerId = data.prefill_producer_id;
     if (!producerId) producerId = await findProducerByEmail(app.db, String(rec(data.contact).email ?? ''));
     let producer: { id: string; business_name: string } | null = null;
-    let prior: ReturnType<typeof membershipFromData>[] = [];
+    let prior: MembershipStaffView[] = [];
     if (producerId) {
       const pd = await app.db.collection('producers').doc(producerId).get();
       if (pd.exists) {
         producer = { id: pd.id, business_name: String((pd.data() as Rec).business_name ?? '') };
+        const market = typeof data.market_id === 'string' && MARKET_ID_RE.test(data.market_id) ? await loadMarket(app.db, data.market_id) : null;
         prior = (await listMembershipsForProducer(app.db, pd.id))
           .filter((m) => m.market_id === data.market_id)
-          .sort((a, b) => b.season.localeCompare(a.season));
+          .sort((a, b) => b.season.localeCompare(a.season))
+          .map((m) => membershipViewFor(request.authUser!, m, { timezone: market?.timezone || 'UTC' }));
       }
     }
     return { application, uploads, producer, prior_memberships: prior };
@@ -866,9 +875,11 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
         trial_period: input.trial_period,
         approved_items: flattenItems(before.products),
         application_id: doc.id,
+        // The calendar date is the stored truth; the instant is derived from it, exactly as PATCH .../insurance does (fix X11).
         insurance: {
           status: certificateId ? ('on_file' as const) : ('missing' as const),
-          expires_at: expiresOn ? localToUtc(expiresOn, '23:59', market.timezone) : null,
+          expires_on: expiresOn,
+          expires_at: expiresOn ? insuranceExpiryInstant(expiresOn, market.timezone) : null,
           upload_id: certificateId,
         },
         source: 'application' as const,
@@ -994,7 +1005,7 @@ export async function applicationRoutes(app: FastifyInstance, opts: ApplicationR
       return {
         application: await reread(),
         producer: { id: producerId, ...((await app.db.collection('producers').doc(producerId).get()).data() as Rec) },
-        membership: membershipFromData(membershipId, membershipDoc.data() as Rec),
+        membership: membershipViewFor(user, membershipFromData(membershipId, membershipDoc.data() as Rec), { timezone: market.timezone }),
         sends,
       };
     } finally {

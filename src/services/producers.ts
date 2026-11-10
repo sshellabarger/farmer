@@ -282,6 +282,29 @@ export async function isActiveBooth(db: Firestore, marketId: string, boothId: st
   return doc.exists && !!b && b.market_id === marketId && b.active !== false;
 }
 
+/* ── What staff see of a producer (Phase 4 fix X8) ── */
+
+/**
+ * The one way a producer document leaves the API on a staff route. Admins
+ * get every field. A market manager does not get:
+ *   - `notes` (admin notes, as before);
+ *   - `address` (the street address the application collected);
+ *   - `sms_consent.ip` (the address the consent was given from: evidence,
+ *     kept for admins; the status, date, source and wording version stay).
+ */
+export function producerViewFor(viewer: { role: string }, id: string, data: Record<string, unknown>): Record<string, unknown> {
+  const view: Record<string, unknown> = { id, ...data };
+  if (viewer.role === 'admin') return view;
+  delete view.notes;
+  delete view.address;
+  const consent = view.sms_consent;
+  if (consent && typeof consent === 'object' && !Array.isArray(consent)) {
+    const { ip: _ip, ...rest } = consent as Record<string, unknown>;
+    view.sms_consent = rest;
+  }
+  return view;
+}
+
 /** Accepted fee-plan spellings on a membership write (Phase 2 and Phase 4 vocabulary). */
 export const feePlanInputSchema = feePlanInput;
 
@@ -301,7 +324,8 @@ export interface NewMembershipInput {
   trial_period: boolean;
   approved_items: string[];
   application_id: string | null;
-  insurance?: { status: 'missing' | 'on_file'; expires_at: Date | null; upload_id: string | null };
+  /** `expires_on` is the last valid day (market-local, 'YYYY-MM-DD'); `expires_at` is the instant derived from it (`insuranceExpiryInstant`). */
+  insurance?: { status: 'missing' | 'on_file'; expires_on: string | null; expires_at: Date | null; upload_id: string | null };
   source: 'application' | 'admin' | 'import';
   actor: string;
   note: string | null;
@@ -325,6 +349,7 @@ export function buildMembershipDoc(input: NewMembershipInput, now: Date): Record
     approved_by: settled ? input.actor : null,
     insurance: {
       status: input.insurance?.status ?? 'missing',
+      expires_on: input.insurance?.expires_on ?? null,
       expires_at: input.insurance?.expires_at ?? null,
       upload_id: input.insurance?.upload_id ?? null,
       verified_by: null,

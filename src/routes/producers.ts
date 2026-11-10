@@ -5,12 +5,12 @@ import { authenticate, requireRole } from '../middleware/rbac.js';
 import { requireStaff, canAccessMarket, type ScopedUser } from '../middleware/market-scope.js';
 import { writeAudit } from '../services/audit.js';
 import { normalizeEmail, nameKey } from '../services/identity.js';
-import { createMembership, createProducerSchema, findProducerByPhone, updateProducerSchema } from '../services/producers.js';
+import { createMembership, createProducerSchema, findProducerByPhone, producerViewFor, updateProducerSchema } from '../services/producers.js';
 import { byStringAsc } from '../utils/sort.js';
 import { toDate } from '../utils/dates.js';
 import { z } from 'zod';
 import { applicationsOpen, quietUntil, type FarmersMarket } from '../services/markets.js';
-import { currentSeason, membershipFromData, normalizeFeePlan, type MembershipView } from '../services/seasons.js';
+import { currentSeason, marketTimezones, membershipFromData, membershipViewFor, membershipViewsFor, normalizeFeePlan, type MembershipView } from '../services/seasons.js';
 import { inviteDocId, inviteFromData, inviteProducer } from '../services/invites.js';
 import { purposeTokenUrl } from '../services/purpose-tokens.js';
 
@@ -102,13 +102,11 @@ export async function producerRoutes(app: FastifyInstance) {
       });
     }
 
-    const isAdmin = scoped.role === 'admin';
-    const producers = docs.map((d) => {
-      const data = d.data();
-      const result: Record<string, unknown> = { id: d.id, ...data, memberships: membershipsByProducer.get(d.id) ?? [] };
-      if (!isAdmin) delete result.notes;
-      return result;
-    });
+    // One view for every staff route (fix X8): a market manager does not get notes, the street address or the consent IP.
+    const producers = docs.map((d) => ({
+      ...producerViewFor(scoped, d.id, d.data() as Record<string, unknown>),
+      memberships: membershipsByProducer.get(d.id) ?? [],
+    }));
 
     return { producers: byStringAsc(producers, 'business_name') };
   });
@@ -159,13 +157,10 @@ export async function producerRoutes(app: FastifyInstance) {
       if (t && (!last || t > last)) last = t;
     }
 
-    const data = doc.data()!;
-    const result: Record<string, unknown> = { id: doc.id, ...data };
-    if (scoped.role !== 'admin') delete result.notes;
-
     return {
-      producer: result,
-      memberships,
+      producer: producerViewFor(scoped, doc.id, doc.data() as Record<string, unknown>),
+      // Signature evidence (ip, token) is for admins; everyone gets the insurance date as a calendar day.
+      memberships: await membershipViewsFor(app.db, scoped, memberships),
       current_season_by_market: currentSeasonByMarket,
       invite,
       checkins_summary: { count, last_submitted_at: last },
@@ -233,6 +228,7 @@ export async function producerRoutes(app: FastifyInstance) {
 
     // Memberships belong to the market's current season (D33).
     const memberships: Record<string, unknown>[] = [];
+    const timezoneOf = marketTimezones(app.db);
     for (const m of input.memberships ?? []) {
       const season = seasonOf(await loadMarketDoc(app.db, m.market_id), now);
       const created = await createMembership(
@@ -264,10 +260,10 @@ export async function producerRoutes(app: FastifyInstance) {
         target: { collection: 'producer_memberships', id: created.id },
         after: created.doc,
       });
-      memberships.push({ ...membershipFromData(created.id, created.doc) });
+      memberships.push({ ...membershipViewFor(user, membershipFromData(created.id, created.doc), { timezone: await timezoneOf(m.market_id) }) });
     }
 
-    return reply.status(201).send({ producer: { id, ...producer }, memberships });
+    return reply.status(201).send({ producer: producerViewFor(user, id, producer), memberships });
   });
 
   // PATCH /api/producers/:id
@@ -355,7 +351,7 @@ export async function producerRoutes(app: FastifyInstance) {
       after,
     });
 
-    return { producer: { id: doc.id, ...after } };
+    return { producer: producerViewFor(user, doc.id, after) };
   });
 
   // POST /api/producers/:id/invite?market_id=&force= — invite one returning vendor to re-apply (D30/D33)

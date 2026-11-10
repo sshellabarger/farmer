@@ -603,7 +603,10 @@ describe('PATCH /api/applications/:id approve', () => {
     });
     expect(membership.approved_items).toEqual(['Tomatoes', 'peppers', 'eggs']); // flattened, de-duplicated
     expect(membership.insurance).toMatchObject({ status: 'on_file', upload_id: permitId, verified_by: null });
-    expect((membership.insurance as { expires_at: Date }).expires_at.toISOString()).toBe('2028-01-01T05:59:00.000Z'); // 23:59 on the 31st in Chicago
+    // Valid through 2027-12-31: the date is stored as typed, the instant is the start of Jan 1 in Chicago (fix X11).
+    expect((membership.insurance as { expires_on: string }).expires_on).toBe('2027-12-31');
+    expect((membership.insurance as { expires_at: Date }).expires_at.toISOString()).toBe('2028-01-01T06:00:00.000Z');
+    expect(body.membership.insurance).toMatchObject({ status: 'on_file', expires_on: '2027-12-31' });
     expect((membership.history as unknown[])[0]).toMatchObject({ from: null, to: 'approved', by: 'admin1', note: 'Welcome back' });
     expect(JSON.stringify(db.dump('producer_memberships').p1_wlrfm)).toBe(before2026);
     expect(body.membership).toMatchObject({ id: mid, season: '2027', status: 'approved' });

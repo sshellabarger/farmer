@@ -1,4 +1,4 @@
-import type { ApplicationDoc, ApplicationListItem, BoothDoc, InviteBatchExtras, UploadMeta } from './phase4-types';
+import type { ApplicationDoc, ApplicationListItem, BoothDoc, InsuranceUpdate, InviteBatchExtras, UploadMeta } from './phase4-types';
 import type {
   ApplicationAction,
   ApplicationInvite,
@@ -16,7 +16,6 @@ import type {
   DashboardCard,
   FeePlan,
   GenerateResult,
-  InsuranceUpdateInput,
   InviteBatchResult,
   Market,
   MarketDate,
@@ -276,7 +275,7 @@ export const api = {
     request<InviteBatchResult & InviteBatchExtras>(`/markets/${id}/invite-reapply`, { method: 'POST', body: JSON.stringify(data) }),
   membershipItems: (id: string, data: { action: 'approve' | 'decline'; request_id: string } | { action: 'add'; items: string[] }) =>
     request<{ membership: Membership }>(`/memberships/${id}/items`, { method: 'POST', body: JSON.stringify(data) }),
-  updateInsurance: (id: string, data: InsuranceUpdateInput) =>
+  updateInsurance: (id: string, data: InsuranceUpdate) =>
     request<{ membership: Membership }>(`/memberships/${id}/insurance`, { method: 'PATCH', body: JSON.stringify(data) }),
   sendAgreementLink: (id: string, send = true) =>
     request<{ url: string; expires_at: string; sms: string }>(`/memberships/${id}/agreement-link`, { method: 'POST', body: JSON.stringify({ send }) }),

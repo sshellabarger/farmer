@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import type { BoothDoc, ProductEntry } from '@/lib/phase4-types';
+import type { BoothDoc, InsuranceCalendarDate, ProductEntry } from '@/lib/phase4-types';
 import {
   MEMBERSHIP_TRANSITIONS,
   type Checkin,
@@ -739,9 +739,19 @@ function MembershipCard({
 
       <InsuranceBlock m={m} allowed={allowed} isAdmin={isAdmin} onInsurance={onInsurance} onError={onError} />
       <AgreementBlock m={m} allowed={allowed} onAgreementLink={onAgreementLink} />
-      <ItemsBlock m={m} allowed={allowed} onItems={onItems} />
+      <ItemsBlock m={m} allowed={allowed} isAdmin={isAdmin} onItems={onItems} />
     </div>
   );
+}
+
+/**
+ * The last day the certificate is valid, as the server gives it (`expires_on`,
+ * a calendar date in the market's own calendar). Never `expires_at.slice(0, 10)`:
+ * that instant is the first moment of the NEXT day, so its UTC date is one day
+ * late, and saving it back moved the date forward on every save.
+ */
+function expiresOn(m: Membership): string {
+  return (m.insurance as (Membership['insurance'] & InsuranceCalendarDate) | undefined)?.expires_on || '';
 }
 
 function effectiveInsurance(m: Membership): InsuranceStatus {
@@ -766,14 +776,14 @@ function InsuranceBlock({
 }) {
   const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState<InsuranceStatus>(m.insurance?.status ?? 'missing');
-  const [expires, setExpires] = useState((m.insurance?.expires_at || '').slice(0, 10));
+  const [expires, setExpires] = useState(expiresOn(m));
   const [note, setNote] = useState(m.insurance?.note || '');
   const [saving, setSaving] = useState(false);
   const [opening, setOpening] = useState(false);
 
   useEffect(() => {
     setStatus(m.insurance?.status ?? 'missing');
-    setExpires((m.insurance?.expires_at || '').slice(0, 10));
+    setExpires(expiresOn(m));
     setNote(m.insurance?.note || '');
   }, [m.insurance]);
 
@@ -806,7 +816,7 @@ function InsuranceBlock({
       <div className="flex items-center gap-2 flex-wrap text-sm">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Insurance</span>
         <StatusChip status={eff} />
-        {m.insurance?.expires_at && <span className="text-[12px] text-text-muted">expires {m.insurance.expires_at.slice(0, 10)}</span>}
+        {expiresOn(m) && <span className="text-[12px] text-text-muted">valid through {expiresOn(m)}</span>}
         {m.insurance?.note && <span className="text-[12px] text-text-soft">{m.insurance.note}</span>}
         <span className="ml-auto flex items-center gap-2">
           {isAdmin && uploadId && m.application_id && (
@@ -828,7 +838,7 @@ function InsuranceBlock({
               { value: 'waived', label: 'Waived' },
             ]}
           />
-          <DateField label="Expires" value={expires} onChange={setExpires} />
+          <DateField label="Valid through (last day)" value={expires} onChange={setExpires} />
           <Field label="Note" value={note} onChange={setNote} />
           <div className="flex gap-2">
             <PrimaryButton
@@ -836,7 +846,7 @@ function InsuranceBlock({
               disabled={saving}
               onClick={async () => {
                 setSaving(true);
-                const ok = await onInsurance(m, { status, expires_at: expires || null, upload_id: m.insurance?.upload_id ?? null, note: note.trim() });
+                const ok = await onInsurance(m, { status, expires_on: expires || null, upload_id: m.insurance?.upload_id ?? null, note: note.trim() });
                 setSaving(false);
                 if (ok) setEditing(false);
               }}
@@ -907,7 +917,8 @@ function AgreementBlock({
   );
 }
 
-function ItemsBlock({ m, allowed, onItems }: { m: Membership; allowed: boolean; onItems: (m: Membership, data: ItemsPayload) => Promise<boolean> }) {
+/** Reviewing a vendor's request is open to the market's staff; adding items directly is an admin action (the server answers 403 otherwise). */
+function ItemsBlock({ m, allowed, isAdmin, onItems }: { m: Membership; allowed: boolean; isAdmin: boolean; onItems: (m: Membership, data: ItemsPayload) => Promise<boolean> }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const requests = (m.item_requests || []).filter((r) => r.status === 'pending');
@@ -973,7 +984,7 @@ function ItemsBlock({ m, allowed, onItems }: { m: Membership; allowed: boolean; 
           ))}
         </div>
       )}
-      {allowed && (
+      {allowed && isAdmin && (
         <div className="flex gap-2">
           <input
             value={draft}
