@@ -320,10 +320,4 @@ export const api = {
     request<{ booth: BoothDoc }>(`/markets/${marketId}/booths/${boothId}`, { method: 'DELETE' }),
   reorderBooths: (marketId: string, rows: { row: string; booth_ids: string[] }[]) =>
     request<{ booths: BoothDoc[] }>(`/markets/${marketId}/booths/reorder`, { method: 'PUT', body: JSON.stringify({ rows }) }),
-  draftAssignments: (dateId: string, redraft = false) =>
-    request<{ draft: unknown; assignments: AssignmentsView }>(`/market-dates/${dateId}/assignments/draft`, { method: 'POST', body: JSON.stringify({ redraft }) }),
-  updateAssignments: (dateId: string, changes: { producer_id: string; booth_ids: string[] }[]) =>
-    request<{ assignments: AssignmentsView; warning?: string }>(`/market-dates/${dateId}/assignments`, { method: 'PATCH', body: JSON.stringify({ changes }) }),
-  approveAssignments: (dateId: string) =>
-    request<{ assignments: AssignmentsView; texts: { attempted: boolean; sent: number; failed: number; excluded: number; deferred_until: string | null } }>(`/market-dates/${dateId}/assignments/approve`, { method: 'POST', body: '{}' }),
 };

@@ -180,13 +180,22 @@ export function computeWindow(market: FarmersMarket, scope: 'window' | 'season',
   return { from, to };
 }
 
-function actionTimestampSet(actions: MarketDateActions): boolean {
+/**
+ * True once anything has happened on the date that a schedule change must not
+ * silently undo — including the season opener's own booth cycle (a drafted,
+ * approved or texted opening day is as decided as a texted check-in).
+ */
+export function actionTimestampSet(actions: MarketDateActions): boolean {
+  const opener = actions.opener;
   return !!(
     actions.checkin_sent_at ||
     actions.deadline_processed_at ||
     actions.drafts_generated_at ||
     actions.approved_at ||
-    actions.booth_texts_sent_at
+    actions.booth_texts_sent_at ||
+    opener?.drafts_generated_at ||
+    opener?.approved_at ||
+    opener?.booth_texts_sent_at
   ) || actions.reminders_sent.length > 0;
 }
 

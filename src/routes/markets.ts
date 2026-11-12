@@ -4,7 +4,7 @@ import { v4 as uuid } from 'uuid';
 import { authenticate, requireRole } from '../middleware/rbac.js';
 import { requireStaff, requireMarketAccess, marketIdFromParams, accessibleMarketIds } from '../middleware/market-scope.js';
 import { writeAudit } from '../services/audit.js';
-import { generateMarketDates, marketDateFromData } from '../services/market-dates.js';
+import { actionTimestampSet, generateMarketDates, marketDateFromData } from '../services/market-dates.js';
 import type { MarketDateDoc } from '../services/market-dates.js';
 import {
   createMarketSchema,
@@ -566,8 +566,8 @@ export async function marketRoutes(app: FastifyInstance) {
       after.status = 'cancelled';
     } else if (input.status === 'collecting') {
       if (existing.status !== 'cancelled') return reply.status(409).send({ error: 'Date is not cancelled' });
-      const decided = existing.actions.checkin_sent_at || existing.actions.deadline_processed_at || existing.actions.drafts_generated_at ||
-        existing.actions.approved_at || existing.actions.booth_texts_sent_at || existing.actions.reminders_sent.length > 0;
+      // Same rule as the generator, the season opener's booth cycle included.
+      const decided = actionTimestampSet(existing.actions);
       if (decided || existing.end_at.getTime() < now.getTime()) {
         return reply.status(409).send({ error: 'Cannot un-cancel a decided or past date' });
       }

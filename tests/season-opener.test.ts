@@ -5,9 +5,13 @@
 // approval and texts then follow the same rules as every other date.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEDUPE_KEYS } from '../src/services/checkin-workflow.js';
+import { generateMarketDates, isDateDecided, marketDateFromData } from '../src/services/market-dates.js';
+import type { FarmersMarket } from '../src/services/markets.js';
+import Fastify from 'fastify';
+import { marketRoutes } from '../src/routes/markets.js';
 import { fakeDb } from './helpers/fake-db.js';
 import {
-  D0, PRODUCERS, USERS, actionsOf, boothMessages, boothsOf, buildApp, checkin, currentRows, dateDoc, marketDoc, newestRowId, routes, standardBooths, tick,
+  D0, PRODUCERS, env, USERS, actionsOf, boothMessages, boothsOf, buildApp, checkin, currentRows, dateDoc, marketDoc, newestRowId, routes, standardBooths, tick,
 } from './helpers/booth-fixtures.js';
 import type { Db } from './helpers/booth-fixtures.js';
 
@@ -105,6 +109,15 @@ async function draftedOpener() {
   const res = await ctx.opener.draft();
   expect(res.statusCode).toBe(200);
   return { ...ctx, draft: res.json() };
+}
+
+async function approvedOpener() {
+  const ctx = await draftedOpener();
+  await ctx.opener.patch([{ producer_id: 'p4', booth_ids: ['wlrfm_v5'] }]);
+  vi.setSystemTime(T_FEB_QUIET);
+  const res = await ctx.opener.approve();
+  expect(res.statusCode).toBe(200);
+  return { ...ctx, approval: res.json() };
 }
 
 const textsTo = (db: Db, producer: string) => boothMessages(db).filter((m) => m.producer_id === producer);
@@ -255,15 +268,6 @@ describe('drafting the opener by hand', () => {
 });
 
 describe('approving and texting the opener', () => {
-  async function approvedOpener() {
-    const ctx = await draftedOpener();
-    await ctx.opener.patch([{ producer_id: 'p4', booth_ids: ['wlrfm_v5'] }]);
-    vi.setSystemTime(T_FEB_QUIET);
-    const res = await ctx.opener.approve();
-    expect(res.statusCode).toBe(200);
-    return { ...ctx, approval: res.json() };
-  }
-
   it('approved in quiet hours, the engine texts at 08:00 although opening day is months outside the 7-day window', async () => {
     const { db, opener, approval } = await approvedOpener();
     expect(approval.texts).toEqual({ attempted: false, sent: 0, failed: 0, excluded: 0, deferred_until: T_FEB_0800.toISOString() });
@@ -442,5 +446,51 @@ describe('the dates around the opener', () => {
     expect((await routes(app, OPENER, 'opener').draft()).json()).toMatchObject({ reason: 'not_opener' });
     // And without an opener the last 2026 date simply targets the next date again.
     expect((await routes(app, LAST_2026).view()).target_date).toMatchObject({ id: OPENER });
+  });
+});
+
+// Residual closed at integration: the opener's own cycle freezes the date like any other decision,
+// so a schedule change cannot move or cancel an opening day whose booths were drafted, approved or texted.
+describe('a drafted opening day is a decided date', () => {
+  async function skipOpeningDay(db: Db) {
+    const ref = db.collection('farmers_markets').doc('wlrfm');
+    const data = (await ref.get()).data() as Record<string, any>;
+    const schedule = { ...data.schedule, skipped_dates: [{ date: '2027-04-03', reason: 'moved' }] };
+    await ref.update({ schedule });
+    const market = { id: 'wlrfm', ...data, schedule } as unknown as FarmersMarket;
+    return generateMarketDates(db as any, market, { scope: 'season', actor: 'test', now: T_FEB });
+  }
+
+  it('an undrafted opening day is cancelled by a skipped date (control)', async () => {
+    const { db } = await boot();
+    await skipOpeningDay(db);
+    expect((db.dump('market_dates')[OPENER] as any).status).toBe('cancelled');
+  });
+
+  it('once drafted as an opener, the generator leaves it alone', async () => {
+    const { db } = await draftedOpener();
+    await skipOpeningDay(db);
+    expect((db.dump('market_dates')[OPENER] as any).status).toBe('collecting');
+  });
+
+  it('isDateDecided counts the opener cycle', async () => {
+    const { db } = await draftedOpener();
+    const doc = marketDateFromData(OPENER, (await db.collection('market_dates').doc(OPENER).get()).data() as Record<string, unknown>);
+    expect(isDateDecided(doc, T_FEB)).toBe(true);
+  });
+
+  it('a cancelled opening day that was approved cannot be un-cancelled', async () => {
+    const { db } = await approvedOpener();
+    await db.collection('market_dates').doc(OPENER).update({ status: 'cancelled', cancellation_reason: 'ice', cancelled_by: 'mgr_w', cancelled_at: T_FEB });
+    const app = Fastify();
+    app.decorate('db', db as never);
+    app.decorate('env', env as never);
+    await app.register(marketRoutes, { prefix: '/api/markets' });
+    await app.ready();
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/markets/wlrfm/dates/${OPENER}`, headers: { authorization: 'Bearer test:mgr_w' }, payload: { status: 'collecting' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('Cannot un-cancel a decided or past date');
   });
 });

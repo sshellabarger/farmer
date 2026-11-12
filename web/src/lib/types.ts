@@ -628,14 +628,6 @@ export interface InviteBatchResult {
   results: { producer_id: string; business_name: string; email_status: string; sms_status: string }[];
 }
 
-/** PATCH /api/memberships/:id/insurance body (contract 3.4). */
-export interface InsuranceUpdateInput {
-  status: InsuranceStatus;
-  expires_at: string | null;
-  upload_id: string | null;
-  note: string;
-}
-
 export interface BoothInput {
   label: string;
   row: string;
