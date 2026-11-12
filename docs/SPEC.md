@@ -17,7 +17,10 @@ admin page (`docs/phase3-contract.md`, `CHANGELOG.md`); the first engine tick pr
 the one in-window date silently, as designed. The same
 day `farmlink.us` was reconnected to Firebase Hosting (it had been parked at the registrar;
 production `APP_URL` had been the `web.app` address) and a hotfix shipped for Firestore
-`Timestamp` reads (`src/utils/dates.ts`).
+`Timestamp` reads (`src/utils/dates.ts`). **Phase 4 built and merged to `main`
+2026-11-12, not yet deployed** — the 2027 application, per-season memberships (D33),
+booths, booth assignments and booth texts, Hold Harmless and insurance tracking
+(`docs/phase4-contract.md`, `docs/phase4-deploy.md`, `CHANGELOG.md`).
 Items marked **⚠ OPEN** are proposals with a default, not settled facts.
 
 ---
@@ -675,6 +678,11 @@ and a short demo checklist for the owner.
    `docs/2027-application-review.md` (2026-11-08). Demo: submit a 2027 application end
    to end, approve it, see the producer textable, draft and approve a Saturday's booths,
    receive the booth text.
+   **Built and merged 2026-11-12** (`docs/phase4-contract.md`; four executors, three fix
+   rounds, 834 tests). The schema, fees, legal texts, categories and product types are
+   market data set from the admin pages; the deploy and first-use runbook is
+   `docs/phase4-deploy.md`. Open owner items: the Hold Harmless text, the adopted 2027
+   rules, the insurance-requirement wording, and the power flags on stalls (D26).
 5. **Sponsors and Zeffy** — tiers as data, sponsor calendar, Zeffy webhook + nightly sync
    (≤100 req/min), email matching, manual match queue, paid/unpaid on lists.
 6. **Mailchimp and Duda drafts** — draft campaign from template; audience sync with

@@ -308,6 +308,75 @@ hardened in a follow-up (`rework/p3-fix`, below) for the one blocker they found.
 - Nothing texts a producer until an admin gives one a phone; the first real text is the
   Saturday 13:00 CT check-in link for `wlrfm_2026-09-26`.
 
+## [Unreleased] — SJCA rework, Phase 4: the 2027 application, per-season memberships, booths and booth texts (2026-11-12, not deployed)
+
+Built by four parallel executors against a written contract (`docs/phase4-contract.md`,
+scope and decisions D24–D33 in `docs/2027-application-review.md`), merged as
+`rework/phase-4` in the contract's order (A1 → A2 → C1 → C2, plus the integrator's
+end-to-end test), then hardened in three fix rounds: `rework/p4-fix` (Hold Harmless
+guards), `rework/p4-fix-app` (X1–X14, application side) and `rework/p4-fix-booths`
+(Y1–Y9, booth side), integrated as `rework/p4-fix2`. 830 → 834 tests, 59 files; web
+build fully static (20 routes). Release notes per executor: `docs/phase4/notes-*.md`.
+No new function, environment key, index or dependency.
+
+### Added
+- **The 2027 application** at `/apply?market=` (five sections, mobile-first, draft saved
+  in the browser, no login): business and a consented texting number (every 2027
+  applicant becomes textable — the missing `producers.phone` of Phase 3); vendor
+  categories and per-product-type sub-sections with structured product lists, practice
+  checklists, the permit rule for each type and required uploads (10 MB, pdf/jpeg/png/heic,
+  magic bytes checked); booth rate (`seasonal | daily`), spaces, electricity, pay-in-full
+  and the computed season total; stall preferences on the WLRFM map; insurance status;
+  five acknowledgements plus the D32 own-booth statement; typed e-signature. After
+  submission the $15 Zeffy link (D25). Categories, product types, fees, payment links and
+  every legal text are market data (`season`, `fees`, `payment_links`, `legal`,
+  `categories`, `product_types` on `farmers_markets`), never code. `/rules` renders the
+  market's rules; `/agreement?t=` is the Hold Harmless e-sign page.
+- **Per-season memberships (D33)** — ids `<producer>_<market>_<season>`, created with
+  `create()` on approval; every reader goes through `src/services/seasons.ts`; only the
+  market's current season counts for texts, booths and the dashboard; the 39 Phase 2
+  memberships read as 2026 (`scripts/backfill-membership-seasons.mjs` writes the field).
+- **Admin**: applications queue and detail (review, approve with booth terms, decline,
+  withdraw, fee paid/waived, notes, signed-URL uploads); market Season & fees, Legal
+  texts and Booths cards; producer detail by season with insurance, agreement and item
+  approvals; "Invite returning vendors" with dry run and prefill links (D30).
+- **Booths and assignments** — `booths` (seeded V1–V22 + food truck from the admin
+  page), append-only `booth_assignments`, a deterministic planner (usual booths, side-by-
+  side pairs, powered stalls for electric vendors), engine drafts after the check-in
+  deadline, staff edits and approval, booth-number texts through the Phase 3 engine
+  (keyed, quiet-hours aware, corrective texts after changes, per-vendor Resend), and an
+  "Opening day" cycle for the season's first market, which has no earlier check-in.
+- **Hold Harmless and insurance** — signing flips `approved → active` and records the
+  version and a hash of the text; insurance tracked per membership with a valid-through
+  date.
+- **D29** — numbers matching no producer get no auto-reply (STOP/START/HELP still answered).
+- Nightly `rollMarketDates` also purges uploads nobody submitted within 48 hours.
+
+### Hardened in the fix rounds
+- Explicit trusted proxies (real client IP behind Hosting) and daily caps on uploads and
+  submissions; one live application per email/market/season (`application_keys`);
+  approval locks; idempotent repeats; staff texts held during quiet hours (email still
+  goes); acceptance never sent while the Hold Harmless text is missing
+  (`409 hold_harmless_missing`); an empty agreement cannot be signed; escaped emails.
+- Booth texts never go out for a double-booked booth, follow the current assignment,
+  refuse cancelled or started targets, and a change after approval texts only who moved.
+
+### Closed at integration (2026-11-12)
+- The opener cycle now counts as a decision: `actionTimestampSet()` (exported from
+  `src/services/market-dates.ts`) includes `actions.opener.*`, so the generator never
+  moves or cancels an opening day whose booths were drafted, approved or texted, and the
+  un-cancel route uses the same rule (it had its own copy). Three regression tests in
+  `tests/season-opener.test.ts` fail without the change.
+- Removed the dead web helpers `api.draftAssignments / updateAssignments /
+  approveAssignments` and the type `InsuranceUpdateInput` (superseded, unused).
+
+### Known residuals (accepted; details in `docs/phase4/notes-fix-*.md`)
+- If a Saturday is cancelled after the previous date's booths were approved, the
+  following Saturday cannot be assigned in the app.
+- Key/lock takeovers are read-then-set (same documented window as the engine's claims);
+  the daily caps are backstops, not ledgers.
+- A failed booth text or invite text is not retried automatically (staff Resend).
+
 ## [Unreleased] — SJCA rework, Phase 1 (2026-09-20)
 
 Owner approved Phase 1 on 2026-09-20 with decisions D1, D3 (deferred), D5, D6, D8 and D9

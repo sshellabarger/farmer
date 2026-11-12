@@ -28,7 +28,15 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
   is the lock) and each step takes an atomic `workflow_locks` claim via `create()`.
   `APP_URL=https://farmlink.us` (deploy-time env file; the domain was reconnected to
   Hosting on 2026-09-22). Nothing texts a producer until an admin gives one a phone.
-  **Phase 4 is next** (SPEC §8): booth assignment.
+- **Phase 4 is built and merged to `main` (2026-11-12), not yet deployed:** the 2027
+  application (`/apply`, `/rules`, `/agreement?t=`), per-season memberships (D33: ids
+  `<producer>_<market>_<season>`, every reader through `src/services/seasons.ts`, only the
+  market's current season counts), booths and booth assignments with an Opening-day
+  cycle, booth texts through the engine, Hold Harmless e-sign and insurance tracking,
+  returning-vendor invites, D29 (no auto-reply to unknown numbers). Contract:
+  `docs/phase4-contract.md`; deploy and first-use runbook: **`docs/phase4-deploy.md`**.
+  Season, fees, legal texts, categories and product types are market data set from the
+  admin pages. Phase 5 (sponsors and the Zeffy sync) is next after the deploy.
 - **Production sends are opt-in.** `SMS_PROVIDER`/`EMAIL_PROVIDER` default to `console`;
   real providers exist only with `NODE_ENV=production` and `ALLOW_REAL_SENDS=true`. Those
   keys live in `.env.arkansaslocalfoodnetwork` (git-ignored, non-secret), which the
@@ -52,7 +60,7 @@ it before touching anything. The v1 code is preserved at tag `farmlink-v1-final`
 | Data | **Firestore** (admin SDK only; `firestore.rules` / `storage.rules` deny all client access). No SQL, no migrations. |
 | Scheduled work | Cloud Scheduler via `onSchedule`: `processMarketDates` (every 5 min — the check-in workflow engine), `processReminders` (every 15 min) and `rollMarketDates` (nightly; regenerates each market's rolling date window) |
 | SMS | **voip.ms only** (`src/services/voipms.ts` behind `src/services/sms.ts`, 45 s request timeout). No outbound delivery receipts exist, so `messages.status` is terminal at `sent`. Telnyx and WhatsApp were archived to `archive/v1-channels/`. Cloud Tasks was retired (it never ran in prod). |
-| Inbound texts | `src/services/inbound.ts` — every inbound text is logged to `messages`; STOP/START (users and producers), HELP (with the open check-in link), YES/NO against an open check-in, everything else forwarded once to the market's staff plus one courtesy reply per 24 h; unknown numbers get the transition reply. |
+| Inbound texts | `src/services/inbound.ts` — every inbound text is logged to `messages`; STOP/START (users and producers), HELP (with the open check-in link), YES/NO against an open check-in, everything else forwarded once to the market's staff plus one courtesy reply per 24 h; numbers matching no producer are logged and get nothing but STOP/START/HELP replies (D29). |
 | Email | Resend (`src/services/email.ts`) |
 | AI | `@anthropic-ai/sdk` is used only by `src/services/error-notify.ts` to draft alert diagnoses. There is no AI assistant (decision D8). |
 | Web | Next.js 15 / React 19 / Tailwind 4 in `web/`, deployed by Firebase Hosting's web-frameworks integration (current output is fully static); `/api/**` rewrites to the `api` function; retired v1 URLs 301 to `/changed` |
@@ -86,23 +94,29 @@ explicit owner go-ahead in the session — never on the strength of an allowlist
 src/app.ts               buildApp(): plugins, error handler (before routes), /health + /api/health, route list
 src/functions.ts         exports: api (onRequest), processMarketDates + processReminders + rollMarketDates (onSchedule)
 src/server.ts            local runner over the same buildApp()
-src/routes/              auth, sms, admin, admin-users, audit-log, dashboard, markets, market-dates (status/resend/close),
-                         checkin-public (/api/checkin/:token), producers, memberships, applications, checkins, profile,
+src/routes/              auth, sms, admin, admin-users, audit-log, dashboard, markets, market-dates (status/resend/close/assignments),
+                         checkin-public (/api/checkin/:token), producers, memberships, applications (public + queue), booths,
+                         agreements (/api/agreements/:token), insurance, checkins, profile,
                          invite, push, errors, feedback, reminders, uploads
 src/services/            sms (+voipms, console) — the ONE logged send; checkin-workflow (the engine + TEMPLATES),
-                         link-tokens, checkins-submit, open-checkin (findOpenCheckin, staffForMarket), inbound, markets,
+                         link-tokens, purpose-tokens, checkins-submit, open-checkin (findOpenCheckin, staffForMarket), inbound, markets,
+                         seasons (current season, membership ids), applications, application-uploads, invites, booths,
+                         booth-assignments (planner), agreements, storage-port,
                          market-dates (generator + marketDateFromData), producers, identity, audit, otp, push, email,
                          error-notify, support-notify, storage, reminders
 src/middleware/          rbac.ts (authenticate, requireRole), market-scope.ts (requireStaff, requireMarketAccess)
 src/utils/               tz (Intl local↔UTC), dates (Firestore Timestamp → Date), quiet-hours (nextAllowedInstant), jwt,
                          http-error-handler, serialize, sort, errors
 scripts/import-survey.mjs   the Google-Form history importer (excluded from the functions bundle)
+scripts/backfill-membership-seasons.mjs   one-off: writes `season` on the Phase 2 memberships (dry run by default)
 src/types/schema.ts      shared string-union types (documentation, not enforcement)
 src/db/firestore.ts      getDb() + the list of collections the code uses
-web/src/app/             /  /changed  /apply  /checkin?t= (public)  /login  /admin (dashboard)  /admin/markets
-                         /admin/market-dates?id=  /admin/producers  /admin/applications  /admin/users  /feedback  /settings
+web/src/app/             /  /changed  /apply  /rules  /agreement?t=  /checkin?t= (public)  /login  /admin (dashboard)
+                         /admin/markets(/detail)  /admin/market-dates?id=  /admin/producers(/detail)
+                         /admin/applications(/detail)  /admin/users  /feedback  /settings
 archive/                 v1 design package, prototype, postgres-era code, channels, AI harness, web pages, ops log, Firestore schema snapshot
-docs/                    SPEC.md, MONITORING.md, phase2-contract.md, phase3-contract.md, phase3/notes-*.md
+docs/                    SPEC.md, MONITORING.md, phase{2,3,4}-contract.md, phase4-deploy.md, phase{3,4}/notes-*.md,
+                         2027-application-review.md, wlrfm-rules-2027-draft.txt, wlrfm-vendor-map.jpg
 ```
 
 ## Conventions (match the existing code)
