@@ -10,3 +10,7 @@ web/.next/
 web/node_modules/
 .claude/
 .firebase/
+
+# Firebase deploy-time env files (e.g. .env.<project>) — never commit
+.env.*
+!.env.example
