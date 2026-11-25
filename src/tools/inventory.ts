@@ -1,8 +1,12 @@
 import type { ToolContext } from './index.js';
 import { validateHarvestDate } from '../utils/freshness.js';
 import { v4 as uuid } from 'uuid';
+import { squareEnabled } from '../services/square.js';
+import { squareInventoryAdd, squareInventoryQuery } from './inventory-square.js';
 
 export async function inventoryAdd(input: Record<string, unknown>, ctx: ToolContext) {
+  // Square is the system of record once a token is configured.
+  if (squareEnabled(ctx.env)) return squareInventoryAdd(input, ctx);
   const { db, userId } = ctx;
   if (!userId) throw new Error('User not registered');
 
@@ -174,6 +178,7 @@ export async function inventoryClearAll(input: Record<string, unknown>, ctx: Too
 }
 
 export async function inventoryQuery(input: Record<string, unknown>, ctx: ToolContext) {
+  if (squareEnabled(ctx.env)) return squareInventoryQuery(input, ctx);
   const { db, userId } = ctx;
 
   let farmId: string | undefined = input.farm_id as string | undefined;

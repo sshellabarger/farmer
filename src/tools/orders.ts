@@ -3,6 +3,8 @@ import { v4 as uuid } from 'uuid';
 import { calculateNextDropoff, sendNewOrderNotification } from '../services/order-notifications.js';
 import { DEPOT } from '../config/depot.js';
 import { byDateDesc } from '../utils/sort.js';
+import { squareEnabled } from '../services/square.js';
+import { squareOrderCreate, squareOrderUpdate, squareOrderQuery } from './orders-square.js';
 
 interface OrderItem {
   inventory_id: string;
@@ -10,6 +12,7 @@ interface OrderItem {
 }
 
 export async function orderCreate(input: Record<string, unknown>, ctx: ToolContext) {
+  if (squareEnabled(ctx.env)) return squareOrderCreate(input, ctx);
   const { db } = ctx;
   const farmId = input.farm_id as string;
   const marketId = input.market_id as string;
@@ -112,6 +115,7 @@ export async function orderCreate(input: Record<string, unknown>, ctx: ToolConte
 }
 
 export async function orderUpdate(input: Record<string, unknown>, ctx: ToolContext) {
+  if (squareEnabled(ctx.env)) return squareOrderUpdate(input, ctx);
   const { db, userId } = ctx;
   const orderId = input.order_id as string;
 
@@ -144,6 +148,7 @@ export async function orderUpdate(input: Record<string, unknown>, ctx: ToolConte
 }
 
 export async function orderQuery(input: Record<string, unknown>, ctx: ToolContext) {
+  if (squareEnabled(ctx.env)) return squareOrderQuery(input, ctx);
   const { db, userId } = ctx;
 
   let farmId = input.farm_id as string | undefined;

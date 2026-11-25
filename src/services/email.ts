@@ -1,13 +1,13 @@
 import { Resend } from 'resend';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
+import { simulateSend } from '../config/send-guard.js';
 
-function getResend(env: Env) {
-  return new Resend(env.RESEND_API_KEY);
-}
-
-async function resendSend(resend: Resend, payload: Parameters<Resend['emails']['send']>[0]): Promise<void> {
-  const { error } = await resend.emails.send(payload);
+/** The one place an email leaves the app; the send guard sits in front of it. */
+async function resendSend(env: Env, payload: Parameters<Resend['emails']['send']>[0]): Promise<void> {
+  const to = Array.isArray(payload.to) ? payload.to.join(',') : payload.to;
+  if (simulateSend(env, 'email', to, payload.subject ?? '')) return;
+  const { error } = await new Resend(env.RESEND_API_KEY).emails.send(payload);
   if (error) throw new Error(`Resend error: ${error.message}`);
 }
 
@@ -46,7 +46,7 @@ export async function sendInventoryReport({
   const rows = items.map(i => `<tr><td>${i.name}</td><td>${i.remaining}/${i.quantity} ${i.unit}</td><td>$${i.price.toFixed(2)}</td><td>${i.status}</td></tr>`).join('');
   const body = `<h2>${farm.name} Inventory</h2><p>Total value: $${totalValue.toFixed(2)}</p><table><thead><tr><th>Product</th><th>Stock</th><th>Price</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
 
-  await resendSend(getResend(env), { from: env.FROM_EMAIL, to: toEmail, subject: `${farm.name} Inventory Report`, html: baseLayout('Inventory Report', body) });
+  await resendSend(env, { from: env.FROM_EMAIL, to: toEmail, subject: `${farm.name} Inventory Report`, html: baseLayout('Inventory Report', body) });
 }
 
 export async function sendOrdersReport({
@@ -81,7 +81,7 @@ export async function sendOrdersReport({
   const rows = orders.map((d) => { const o = d.data(); return `<tr><td>${o.order_number}</td><td>$${Number(o.total).toFixed(2)}</td><td>${o.status}</td></tr>`; }).join('');
   const body = `<h2>${entityName} Orders (${period})</h2><p>${orders.length} orders, $${totalRevenue.toFixed(2)} total</p><table><thead><tr><th>Order</th><th>Total</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
 
-  await resendSend(getResend(env), { from: env.FROM_EMAIL, to: toEmail, subject: `${entityName} Orders Report`, html: baseLayout('Orders Report', body) });
+  await resendSend(env, { from: env.FROM_EMAIL, to: toEmail, subject: `${entityName} Orders Report`, html: baseLayout('Orders Report', body) });
 }
 
 export async function sendInvoice({
@@ -100,11 +100,11 @@ export async function sendInvoice({
   const rows = itemsSnap.docs.map((d) => { const i = d.data(); return `<tr><td>${i.product_name}</td><td>${i.quantity} ${i.unit}</td><td>$${i.unit_price.toFixed(2)}</td><td>$${i.line_total.toFixed(2)}</td></tr>`; }).join('');
   const body = `<h2>Invoice ${order.order_number}</h2><p>Farm: ${farmDoc.data()?.name} | Market: ${marketDoc.data()?.name}</p><table><thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><p><strong>Order Total: $${Number(order.total).toFixed(2)}</strong></p>`;
 
-  await resendSend(getResend(env), { from: env.FROM_EMAIL, to: toEmail, subject: `Invoice ${order.order_number}`, html: baseLayout(`Invoice ${order.order_number}`, body) });
+  await resendSend(env, { from: env.FROM_EMAIL, to: toEmail, subject: `Invoice ${order.order_number}`, html: baseLayout(`Invoice ${order.order_number}`, body) });
   return order.order_number;
 }
 
 export async function sendEmail({ env, to, subject, message }: { env: Env; to: string; subject: string; message: string }) {
   const body = `<p style="font-size:15px;line-height:1.6">${message.replace(/\n/g, '<br>')}</p>`;
-  await resendSend(getResend(env), { from: env.FROM_EMAIL, to, subject, html: baseLayout(subject, body) });
+  await resendSend(env, { from: env.FROM_EMAIL, to, subject, html: baseLayout(subject, body) });
 }

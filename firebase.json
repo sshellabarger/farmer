@@ -8,7 +8,21 @@
         "node_modules",
         "web",
         ".git",
-        "uploads"
+        "uploads",
+        ".env",
+        ".env.*",
+        "service-account.json",
+        "*service-account*.json",
+        ".claude",
+        ".firebase",
+        "export",
+        "docs",
+        "tests",
+        "*.md",
+        "*.svg",
+        "*.jsx",
+        "*.html",
+        ".DS_Store"
       ]
     }
   ],
@@ -31,5 +45,16 @@
   },
   "storage": {
     "rules": "storage.rules"
+  },
+  "emulators": {
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8080
+    },
+    "ui": {
+      "enabled": true,
+      "port": 4000
+    },
+    "singleProjectMode": true
   }
 }

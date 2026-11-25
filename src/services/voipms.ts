@@ -1,3 +1,4 @@
+import { simulateSend } from '../config/send-guard.js';
 import type { Env } from '../config/env.js';
 
 const VOIPMS_API_BASE = 'https://voip.ms/api/v1/rest.php';
@@ -82,6 +83,9 @@ export async function sendSms({
   to: string;
   body: string;
 }): Promise<string> {
+  const simulated = simulateSend(env, 'sms', to, body);
+  if (simulated) return simulated;
+
   const dst = to.replace(/^\+1/, '');
   const did = (env.VOIPMS_DID || '').replace(/^\+1/, '');
   const username = env.VOIPMS_USERNAME || '';

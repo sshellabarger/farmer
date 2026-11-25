@@ -8,18 +8,19 @@
     "node": "22"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 tsx watch src/server.ts",
     "dev:web": "cd web && npm run dev",
     "build": "tsc",
     "start": "node dist/server.js",
-    "seed": "tsx src/db/seed-firestore.ts",
+    "seed": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 tsx src/db/seed-dev.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "deploy": "npm run build && firebase deploy",
     "deploy:hosting": "firebase deploy --only hosting",
     "deploy:functions": "npm run build && firebase deploy --only functions",
-    "deploy:firestore": "firebase deploy --only firestore"
+    "deploy:firestore": "firebase deploy --only firestore",
+    "emulators": "PATH=/opt/homebrew/opt/openjdk/bin:$PATH firebase emulators:start --only firestore --project demo-farmlink --import=.emulator-data --export-on-exit=.emulator-data"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

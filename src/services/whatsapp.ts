@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { simulateSend } from '../config/send-guard.js';
 import type { Env } from '../config/env.js';
 
 const GRAPH_API_BASE = 'https://graph.facebook.com/v21.0';
@@ -15,6 +16,9 @@ export async function sendWhatsApp({
   to: string;
   body: string;
 }): Promise<string> {
+  const simulated = simulateSend(env, 'whatsapp', to, body);
+  if (simulated) return simulated;
+
   // Meta expects phone numbers without '+' prefix
   const recipient = to.replace(/^\+/, '');
 
@@ -68,6 +72,9 @@ export async function sendWhatsAppTemplate({
   languageCode?: string;
   parameters?: Array<{ type: 'text'; text: string }>;
 }): Promise<string> {
+  const simulated = simulateSend(env, 'whatsapp', to, `template ${templateName}`);
+  if (simulated) return simulated;
+
   const recipient = to.replace(/^\+/, '');
 
   const payload: Record<string, unknown> = {

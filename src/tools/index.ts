@@ -21,6 +21,8 @@ export interface ToolContext {
   env: Env;
   userId?: string;
   phone: string;
+  /** Id of the inbound message being handled; makes Square writes idempotent on carrier retries. */
+  messageId?: string;
 }
 
 export const toolDefinitions: Anthropic.Tool[] = [

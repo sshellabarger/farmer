@@ -9,6 +9,7 @@ import { getDb } from './db/firestore.js';
 import { serializeTimestamps } from './utils/serialize.js';
 import { createErrorHandler } from './utils/http-error-handler.js';
 import { smsRoutes } from './routes/sms.js';
+import { squareRoutes } from './routes/square.js';
 import { farmRoutes } from './routes/farms.js';
 import { marketRoutes } from './routes/markets.js';
 import { inventoryRoutes } from './routes/inventory.js';
@@ -58,6 +59,7 @@ async function start() {
 
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(smsRoutes, { prefix: '/api/sms' });
+  await app.register(squareRoutes, { prefix: '/api/square' });
   await app.register(farmRoutes, { prefix: '/api/farms' });
   await app.register(marketRoutes, { prefix: '/api/markets' });
   await app.register(inventoryRoutes, { prefix: '/api/inventory' });

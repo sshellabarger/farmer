@@ -1,11 +1,18 @@
 import dotenv from 'dotenv';
-dotenv.config({ override: true });
+// No override: values already in the environment (deploy config, test setup) win
+// over a developer's local .env.
+dotenv.config();
 import { z } from 'zod';
 
 const envSchema = z.object({
   // Firebase project (auto-set in Cloud Functions, needed locally)
   GCLOUD_PROJECT: z.string().optional(),
   FIREBASE_CONFIG: z.string().optional(),
+
+  // Send guard: texts, emails and pushes really go out only when
+  // NODE_ENV=production AND this is 'true'. Set it in the deploy-time env file
+  // only, never in .env. See src/config/send-guard.ts.
+  ALLOW_REAL_SENDS: z.enum(['true', 'false']).default('false'),
 
   // SMS Provider: telnyx | voipms | whatsapp
   SMS_PROVIDER: z.enum(['telnyx', 'voipms', 'whatsapp']).default('telnyx'),
@@ -34,6 +41,26 @@ const envSchema = z.object({
   // while the portal URL lacks ?secret= will reject all inbound texts.
   // Blank disables the check (logged as a warning on every inbound).
   VOIPMS_WEBHOOK_SECRET: z.string().default(''),
+
+  // Square: the system of record for catalog, stock, orders, buyers and farms.
+  // Blank token = Square off (the v1 Firestore inventory path is used).
+  // 'production' is honoured only when NODE_ENV=production, so development can
+  // never write to the live seller account. See src/services/square.ts.
+  SQUARE_ACCESS_TOKEN: z.string().default(''),
+  SQUARE_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
+  // The depot Location: stock counts and pickups live here.
+  SQUARE_LOCATION_ID: z.string().default(''),
+  // Catalog category new farm items are filed under (optional).
+  SQUARE_CATEGORY_ID: z.string().default(''),
+
+  // Square webhooks. Both must be set or the webhook route rejects everything.
+  // The URL must be exactly the notification URL registered in the Square
+  // Developer Dashboard: it is part of what Square signs.
+  SQUARE_WEBHOOK_SIGNATURE_KEY: z.string().default(''),
+  SQUARE_WEBHOOK_URL: z.string().default(''),
+
+  // Net payment terms for buyer invoices: due this many days after pickup.
+  INVOICE_NET_DAYS: z.coerce.number().int().min(0).max(90).default(15),
 
   // Email (Resend)
   RESEND_API_KEY: z.string().default(''),

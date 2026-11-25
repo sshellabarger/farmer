@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { simulateSend } from '../config/send-guard.js';
 import type { Env } from '../config/env.js';
 
 const TELNYX_API_BASE = 'https://api.telnyx.com/v2';
@@ -52,6 +53,9 @@ export async function sendSms({
   to: string;
   body: string;
 }): Promise<string> {
+  const simulated = simulateSend(env, 'sms', to, body);
+  if (simulated) return simulated;
+
   const payload: Record<string, string> = {
     from: env.TELNYX_PHONE_NUMBER,
     to,

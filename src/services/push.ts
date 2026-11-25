@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
 import { sendSms } from './sms.js';
+import { guardEnvFromProcess, simulateSend } from '../config/send-guard.js';
 
 /** Store an FCM web-push token on the user's record. */
 export async function registerToken(db: Firestore, userId: string, token: string): Promise<void> {
@@ -28,6 +29,8 @@ async function sendPushToTokens(
   payload: { title: string; body: string; url?: string },
 ): Promise<boolean> {
   if (tokens.length === 0) return false;
+  // Send guard: no env is passed down here, so read the process environment.
+  if (simulateSend(guardEnvFromProcess(), 'push', userId, payload.title)) return false;
   try {
     const res = await getMessaging().sendEachForMulticast({
       tokens,

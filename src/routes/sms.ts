@@ -13,7 +13,7 @@ import { authenticate } from '../middleware/rbac.js';
 // Buffer the request body before parsing so webhook signatures can be checked
 // against the exact bytes the provider signed (JSON.stringify of the parsed
 // body can differ in whitespace/escaping and break verification).
-async function captureRawBody(request: FastifyRequest, _reply: FastifyReply, payload: Readable): Promise<Readable> {
+export async function captureRawBody(request: FastifyRequest, _reply: FastifyReply, payload: Readable): Promise<Readable> {
   const chunks: Buffer[] = [];
   for await (const chunk of payload) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   const raw = Buffer.concat(chunks);

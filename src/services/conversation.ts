@@ -262,7 +262,7 @@ export async function processInboundMessage(input: ProcessMessageInput): Promise
   const contextBlock = contextParts.length > 0
     ? `${dateBlock}\n${contextParts.join('\n')}`
     : dateBlock;
-  const toolContext: ToolContext = { db, env, userId: user?.id, phone };
+  const toolContext: ToolContext = { db, env, userId: user?.id, phone, messageId: input.messageSid };
 
   let response = await client.messages.create({
     model: MODEL,

@@ -14,3 +14,9 @@ web/node_modules/
 # Firebase deploy-time env files (e.g. .env.<project>) — never commit
 .env.*
 !.env.example
+
+# Local Firestore emulator data
+.emulator-data/
+firestore-debug.log
+firebase-debug.log
+ui-debug.log
