@@ -1,598 +1,301 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
-import { v4 as uuid } from 'uuid';
-import { authenticate, requireRole } from '../middleware/rbac.js';
-import { requireStaff, requireMarketAccess, marketIdFromParams, accessibleMarketIds } from '../middleware/market-scope.js';
-import { writeAudit } from '../services/audit.js';
-import { actionTimestampSet, generateMarketDates, marketDateFromData } from '../services/market-dates.js';
-import type { MarketDateDoc } from '../services/market-dates.js';
-import {
-  createMarketSchema,
-  updateMarketSchema,
-  scheduleVersionSchema,
-  skippedDatesSchema,
-  specialDatesSchema,
-  extraQuestionSchema,
-  DEFAULT_WORKFLOW,
-  DEFAULT_QUIET_HOURS,
-  MARKET_SLUG_RE,
-  applicationsOpen,
-  marketFees,
-  marketPaymentLinks,
-  marketLegal,
-  marketCategories,
-  marketProductTypes,
-} from '../services/markets.js';
-import type { FarmersMarket, MarketLegal, ScheduleVersion } from '../services/markets.js';
-import { currentSeason, SEASON_LABEL_RE } from '../services/seasons.js';
-import { inviteReapply } from '../services/invites.js';
-import { toDateOrEpoch } from '../utils/dates.js';
-import { byStringAsc } from '../utils/sort.js';
-
-async function loadMarket(db: FastifyInstance['db'], id: string): Promise<FarmersMarket | null> {
-  const doc = await db.collection('farmers_markets').doc(id).get();
-  if (!doc.exists) return null;
-  return { id: doc.id, ...(doc.data() as Record<string, unknown>) } as FarmersMarket;
-}
-
-/** mailchimp/website are Phase 6; never exposed to a market_manager. */
-function toMarketDTO(market: FarmersMarket, isAdmin: boolean): Partial<FarmersMarket> & { id: string } {
-  if (isAdmin) return market;
-  const { mailchimp: _mailchimp, website: _website, ...rest } = market;
-  return rest;
-}
-
-/** The legal texts can be 50 000 characters each; the audit row records their versions and lengths, not their bodies. */
-function legalAuditView(legal: MarketLegal): Record<string, unknown> {
-  const { rules_markdown, hold_harmless_markdown, ...rest } = legal;
-  return { ...rest, rules_markdown_length: rules_markdown.length, hold_harmless_markdown_length: hold_harmless_markdown.length };
-}
-
-async function marketDateDocs(db: FastifyInstance['db'], marketId: string): Promise<MarketDateDoc[]> {
-  const snap = await db.collection('market_dates').where('market_id', '==', marketId).get();
-  return snap.docs.map((d) => marketDateFromData(d.id, d.data() as Record<string, unknown>));
-}
-
-async function nextUpcomingDate(db: FastifyInstance['db'], marketId: string, now: Date) {
-  const dates = await marketDateDocs(db, marketId);
-  const upcoming = dates
-    .filter((d) => d.status !== 'cancelled' && d.start_at.getTime() >= now.getTime())
-    .sort((a, b) => a.start_at.getTime() - b.start_at.getTime());
-  const next = upcoming[0];
-  if (!next) return null;
-  return { date: next.date, start_time: next.start_time, end_time: next.end_time };
-}
-
-const patchDateSchema = z
-  .object({
-    status: z.enum(['cancelled', 'collecting']).optional(),
-    cancellation_reason: z.string().min(1).optional(),
-    note: z.string().optional(),
-    extra_questions: z.array(extraQuestionSchema).optional(),
-    sponsor_id: z.string().nullable().optional(),
-  })
-  .refine((v) => v.status !== 'cancelled' || !!v.cancellation_reason, {
-    message: 'cancellation_reason is required when cancelling',
-    path: ['cancellation_reason'],
-  })
-  .refine((v) => !v.extra_questions || new Set(v.extra_questions.map((q) => q.key)).size === v.extra_questions.length, {
-    message: 'duplicate extra_questions key',
-    path: ['extra_questions'],
-  });
+import { authenticate, requireRole, requireMarketOwner } from '../middleware/rbac.js';
+import { byDateDesc, byNumberAsc } from '../utils/sort.js';
 
 export async function marketRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
-  const adminOnly = [auth, requireRole('admin')];
-  const staffOnly = [auth, requireStaff()];
+  const marketOwner = requireMarketOwner(app);
+  const marketOrAdmin = requireRole('market', 'admin');
 
-  // ─── GET /api/markets/public ───
-  app.get('/public', async () => {
-    const snap = await app.db.collection('farmers_markets').where('active', '==', true).get();
-    const now = new Date();
-    const markets = [];
-    for (const doc of snap.docs) {
-      const market = { id: doc.id, ...(doc.data() as Record<string, unknown>) } as FarmersMarket;
-      const next = await nextUpcomingDate(app.db, market.id, now);
-      markets.push({ id: market.id, name: market.name, location: market.location, timezone: market.timezone, active: market.active, next });
-    }
+  // GET /api/markets (public)
+  app.get('/', async () => {
+    const snapshot = await app.db.collection('markets').orderBy('name').get();
+    const markets = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
     return { markets };
   });
 
-  // ─── GET /api/markets/:id/rules (public, Phase 4 §3.1) ───
-  // The id comes straight from a public URL: anything that is not a market slug is a 404
-  // before it reaches Firestore (an id with an encoded slash makes the admin SDK throw, which
-  // would be a 500 and an alert for a stranger's typo). An inactive market publishes nothing.
-  app.get('/:id/rules', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    if (!MARKET_SLUG_RE.test(id)) return reply.status(404).send({ error: 'Market not found' });
-    const market = await loadMarket(app.db, id);
-    if (!market || market.active !== true) return reply.status(404).send({ error: 'Market not found' });
-    const legal = marketLegal(market);
-    if (legal.rules_markdown === '' && legal.rules_url === null) {
-      return reply.status(404).send({ error: 'The rules for this market are not published yet' });
-    }
-    return {
-      market_id: market.id,
-      market_name: market.name,
-      season: currentSeason(market, new Date()),
-      rules_version: legal.rules_version,
-      rules_markdown: legal.rules_markdown,
-      rules_url: legal.rules_url,
-      updated_at: toDateOrEpoch(market.updated_at),
-    };
+  // GET /api/markets/:id (public)
+  app.get<{ Params: { id: string } }>('/:id', async (request, reply) => {
+    const doc = await app.db.collection('markets').doc(request.params.id).get();
+    if (!doc.exists) return reply.notFound('Market not found');
+    return { id: doc.id, ...doc.data() };
   });
 
-  // ─── GET /api/markets ───
-  app.get('/', { preHandler: staffOnly }, async (request) => {
-    const user = request.authUser!;
-    const accessible = accessibleMarketIds(user);
-    const snap = await app.db.collection('farmers_markets').get();
-    let markets = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Record<string, unknown>) }) as FarmersMarket);
-    if (accessible !== null) markets = markets.filter((m) => accessible.includes(m.id));
-    markets = byStringAsc(markets, 'name');
-    return { markets: markets.map((m) => toMarketDTO(m, user.role === 'admin')) };
+  // PUT /api/markets/:id
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>('/:id', {
+    preHandler: [auth, marketOrAdmin, marketOwner],
+  }, async (request, reply) => {
+    const { name, location, type, delivery_pref } = request.body as any;
+    const updates: Record<string, unknown> = { updated_at: new Date() };
+    if (name) updates.name = name;
+    if (location) updates.location = location;
+    if (type) updates.type = type;
+    if (delivery_pref) updates.delivery_pref = delivery_pref;
+
+    const ref = app.db.collection('markets').doc(request.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return reply.notFound('Market not found');
+
+    await ref.update(updates);
+    const updated = await ref.get();
+    return { id: updated.id, ...updated.data() };
   });
 
-  // ─── POST /api/markets ───
-  app.post('/', { preHandler: adminOnly }, async (request, reply) => {
-    const input = createMarketSchema.parse(request.body);
-    const user = request.authUser!;
+  // GET /api/markets/:id/available
+  app.get<{ Params: { id: string } }>('/:id/available', {
+    preHandler: [auth, marketOrAdmin, marketOwner],
+  }, async (request) => {
+    const marketId = request.params.id;
 
-    const existing = await app.db.collection('farmers_markets').doc(input.slug).get();
-    if (existing.exists) return reply.status(409).send({ error: `Market '${input.slug}' already exists` });
+    // Get farms connected to this market (filter active in memory)
+    const relsSnap = await app.db
+      .collection('farm_market_rels')
+      .where('market_id', '==', marketId)
+      .get();
 
-    const now = new Date();
-    const versions: ScheduleVersion[] = input.schedule.versions.map((v) => ({
-      ...v,
-      id: uuid(),
-      created_at: now,
-      created_by: user.id,
-    }));
+    const farmIds = relsSnap.docs.filter((d) => d.data().active).map((d) => d.data().farm_id);
+    if (farmIds.length === 0) return { inventory: [] };
 
-    const market: Omit<FarmersMarket, 'id'> = {
-      name: input.name,
-      slug: input.slug,
-      location: { name: input.location.name, address: input.location.address ?? '' },
-      timezone: input.timezone,
-      schedule: {
-        versions,
-        skipped_dates: input.schedule.skipped_dates,
-        special_dates: input.schedule.special_dates,
-      },
-      workflow: { ...DEFAULT_WORKFLOW, ...input.workflow },
-      quiet_hours: input.quiet_hours ?? DEFAULT_QUIET_HOURS,
-      website: input.website ?? null,
-      mailchimp: input.mailchimp ?? null,
-      active: input.active,
-      created_by: user.id,
-      created_at: now,
-      updated_at: now,
-    };
+    // Get available inventory from connected farms
+    const inventory: any[] = [];
+    for (const farmId of farmIds) {
+      const invSnap = await app.db
+        .collection('inventory')
+        .where('farm_id', '==', farmId)
+        .get();
 
-    await app.db.collection('farmers_markets').doc(input.slug).set(market as Record<string, unknown>);
-    const full: FarmersMarket = { id: input.slug, ...market };
-    const generation = await generateMarketDates(app.db, full, { scope: 'window', actor: user.id });
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.create',
-      target: { collection: 'farmers_markets', id: input.slug },
-      after: market,
-    });
+      for (const doc of invSnap.docs) {
+        const inv = doc.data();
+        if (!['available', 'partial'].includes(inv.status)) continue;
+        if (inv.remaining <= 0) continue;
+        const productDoc = await app.db.collection('products').doc(inv.product_id).get();
+        const product = productDoc.data() || {};
+        const farmDoc = await app.db.collection('farms').doc(farmId).get();
+        const farm = farmDoc.data() || {};
 
-    return reply.status(201).send({ market: full, generation });
-  });
-
-  // ─── GET /api/markets/:id ───
-  app.get('/:id', { preHandler: [auth, requireMarketAccess(marketIdFromParams('id'))] }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-    return { market: toMarketDTO(market, request.authUser!.role === 'admin') };
-  });
-
-  // ─── PATCH /api/markets/:id ───
-  app.patch('/:id', { preHandler: adminOnly }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    const input = updateMarketSchema.parse(request.body);
-    const now = new Date();
-    const before: Record<string, unknown> = {};
-    const after: Record<string, unknown> = {};
-    const update: Record<string, unknown> = { updated_at: now };
-
-    if (input.name !== undefined) {
-      before.name = market.name;
-      after.name = input.name;
-      update.name = input.name;
-    }
-    if (input.location !== undefined) {
-      before.location = market.location;
-      after.location = input.location;
-      update.location = { name: input.location.name, address: input.location.address ?? '' };
-    }
-    if (input.timezone !== undefined) {
-      before.timezone = market.timezone;
-      after.timezone = input.timezone;
-      update.timezone = input.timezone;
-    }
-    if (input.workflow !== undefined) {
-      before.workflow = market.workflow;
-      after.workflow = { ...market.workflow, ...input.workflow };
-      update.workflow = after.workflow;
-    }
-    if (input.quiet_hours !== undefined) {
-      before.quiet_hours = market.quiet_hours;
-      after.quiet_hours = input.quiet_hours;
-      update.quiet_hours = input.quiet_hours;
-    }
-    if (input.website !== undefined) update.website = input.website;
-    if (input.mailchimp !== undefined) update.mailchimp = input.mailchimp;
-
-    // ── Phase 4 (contract §2.1): each is written as a whole top-level field, never a dotted path into it. ──
-    if (input.season !== undefined) {
-      const versionId = input.season?.schedule_version_id ?? null;
-      if (versionId !== null && !market.schedule.versions.some((v) => v.id === versionId)) {
-        return reply.status(400).send({ error: 'season.schedule_version_id does not name a schedule version of this market' });
+        inventory.push({
+          id: doc.id,
+          product_name: product.name || 'Unknown',
+          category: product.category || '',
+          farm_name: farm.name || 'Unknown',
+          farm_id: farmId,
+          remaining: inv.remaining,
+          unit: product.unit || '',
+          price: inv.price,
+          status: inv.status,
+          harvest_date: inv.harvest_date,
+          image_url: inv.image_url,
+        });
       }
-      before.season = market.season ?? null;
-      after.season = input.season;
-      update.season = input.season;
-    }
-    if (input.fees !== undefined) {
-      const merged = { ...marketFees(market), ...input.fees };
-      before.fees = marketFees(market);
-      after.fees = merged;
-      update.fees = merged;
-    }
-    if (input.payment_links !== undefined) {
-      const merged = { ...marketPaymentLinks(market), ...input.payment_links };
-      before.payment_links = marketPaymentLinks(market);
-      after.payment_links = merged;
-      update.payment_links = merged;
-    }
-    if (input.legal !== undefined) {
-      const current = marketLegal(market);
-      const merged = { ...current, ...input.legal };
-      before.legal = legalAuditView(current);
-      after.legal = legalAuditView(merged);
-      update.legal = merged;
-    }
-    if (input.booth_map_url !== undefined) {
-      before.booth_map_url = market.booth_map_url ?? null;
-      after.booth_map_url = input.booth_map_url;
-      update.booth_map_url = input.booth_map_url;
-    }
-    if (input.categories !== undefined) {
-      before.categories = (market.categories ?? []).map((c) => c.key);
-      after.categories = input.categories.map((c) => c.key);
-      update.categories = input.categories;
-    }
-    if (input.product_types !== undefined) {
-      before.product_types = (market.product_types ?? []).map((t) => t.key);
-      after.product_types = input.product_types.map((t) => t.key);
-      update.product_types = input.product_types;
-    }
-    if (input.categories !== undefined || input.product_types !== undefined) {
-      const categoryKeys = new Set(marketCategories({ categories: input.categories ?? market.categories }).map((c) => c.key));
-      const types = input.product_types ?? marketProductTypes(market);
-      const bad = types.find((t) => t.category_keys.some((k) => !categoryKeys.has(k)));
-      if (bad) return reply.status(400).send({ error: `product type '${bad.key}' names a category that does not exist` });
     }
 
-    if (input.active !== undefined) {
-      before.active = market.active;
-      after.active = input.active;
-      update.active = input.active;
-    }
-
-    await app.db.collection('farmers_markets').doc(id).update(update);
-    const updated: FarmersMarket = { ...market, ...(update as Partial<FarmersMarket>) };
-
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.update',
-      target: { collection: 'farmers_markets', id },
-      before,
-      after,
-    });
-
-    const needsRegen = input.timezone !== undefined || input.workflow?.deadline_offset_min !== undefined;
-    let generation;
-    if (needsRegen) {
-      generation = await generateMarketDates(app.db, updated, { scope: 'window', actor: user.id });
-    }
-
-    return { market: toMarketDTO(updated, true), generation };
+    return { inventory };
   });
 
-  // ─── POST /api/markets/:id/schedule/versions ───
-  app.post('/:id/schedule/versions', { preHandler: adminOnly }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
+  // GET /api/markets/:id/messages
+  app.get<{ Params: { id: string } }>('/:id/messages', {
+    preHandler: [auth, marketOrAdmin, marketOwner],
+  }, async (request) => {
+    const marketId = request.params.id;
 
-    const input = scheduleVersionSchema.parse(request.body);
-    if (market.schedule.versions.some((v) => v.effective_from === input.effective_from)) {
-      return reply.status(409).send({ error: `A schedule version already starts ${input.effective_from}` });
-    }
+    const ordersSnap = await app.db
+      .collection('orders')
+      .where('market_id', '==', marketId)
+      .get();
+    const orderDocs = byDateDesc(ordersSnap.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
-    const now = new Date();
-    const version: ScheduleVersion = { ...input, id: uuid(), created_at: now, created_by: user.id };
-    const versions = [...market.schedule.versions, version];
-    await app.db.collection('farmers_markets').doc(id).update({ 'schedule': { ...market.schedule, versions }, updated_at: now });
-    const updated: FarmersMarket = { ...market, schedule: { ...market.schedule, versions }, updated_at: now };
+    const messages: any[] = [];
 
-    const generation = await generateMarketDates(app.db, updated, { scope: 'window', actor: user.id });
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.schedule_version.add',
-      target: { collection: 'farmers_markets', id },
-      after: version,
-    });
+    for (const doc of orderDocs) {
+      const order = doc.data();
+      const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+      const farmName = farmDoc.data()?.name || 'Unknown';
+      const amount = `$${Number(order.total).toFixed(2)}`;
 
-    return reply.status(201).send({ market: toMarketDTO(updated, true), generation });
-  });
+      let title = '';
+      let description = '';
+      switch (order.status) {
+        case 'pending':
+          title = `Order placed with ${farmName}`;
+          description = `${order.order_number} for ${amount} — awaiting confirmation`;
+          break;
+        case 'confirmed':
+          title = `${farmName} confirmed ${order.order_number}`;
+          description = `Order for ${amount} confirmed by farm`;
+          break;
+        case 'cancelled':
+          title = `Order cancelled — ${order.order_number}`;
+          description = `${farmName} order for ${amount} was cancelled`;
+          break;
+        case 'in_transit':
+          title = `${farmName} shipped ${order.order_number}`;
+          description = `Order for ${amount} is on the way`;
+          break;
+        case 'delivered':
+          title = `Order delivered — ${order.order_number}`;
+          description = `${farmName} order for ${amount} delivered`;
+          break;
+        default:
+          title = `Order update — ${order.order_number}`;
+          description = `${farmName} order for ${amount} — ${order.status}`;
+      }
 
-  // ─── DELETE /api/markets/:id/schedule/versions/:version_id ───
-  app.delete('/:id/schedule/versions/:version_id', { preHandler: adminOnly }, async (request, reply) => {
-    const { id, version_id } = request.params as { id: string; version_id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    if (market.schedule.versions.length <= 1) {
-      return reply.status(409).send({ error: 'Cannot delete the only schedule version' });
-    }
-    const deleted = market.schedule.versions.find((v) => v.id === version_id);
-    if (!deleted) return reply.status(404).send({ error: 'Schedule version not found' });
-
-    const now = new Date();
-    const versions = market.schedule.versions.filter((v) => v.id !== version_id);
-    await app.db.collection('farmers_markets').doc(id).update({ schedule: { ...market.schedule, versions }, updated_at: now });
-    const updated: FarmersMarket = { ...market, schedule: { ...market.schedule, versions }, updated_at: now };
-
-    const generation = await generateMarketDates(app.db, updated, { scope: 'window', actor: user.id });
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.schedule_version.delete',
-      target: { collection: 'farmers_markets', id },
-      before: deleted,
-    });
-
-    return { market: toMarketDTO(updated, true), generation };
-  });
-
-  // ─── PUT /api/markets/:id/schedule/skipped ───
-  app.put('/:id/schedule/skipped', { preHandler: adminOnly }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    const { skipped_dates } = skippedDatesSchema.parse(request.body);
-    if (skipped_dates.some((s) => market.schedule.special_dates.some((sp) => sp.date === s.date))) {
-      return reply.status(409).send({ error: 'A date cannot be both skipped and special' });
-    }
-
-    const now = new Date();
-    const before = market.schedule.skipped_dates;
-    await app.db.collection('farmers_markets').doc(id).update({ schedule: { ...market.schedule, skipped_dates }, updated_at: now });
-    const updated: FarmersMarket = { ...market, schedule: { ...market.schedule, skipped_dates }, updated_at: now };
-
-    const generation = await generateMarketDates(app.db, updated, { scope: 'window', actor: user.id });
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.skipped_dates.set',
-      target: { collection: 'farmers_markets', id },
-      before,
-      after: skipped_dates,
-    });
-
-    return { market: toMarketDTO(updated, true), generation };
-  });
-
-  // ─── PUT /api/markets/:id/schedule/special ───
-  app.put('/:id/schedule/special', { preHandler: adminOnly }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    const { special_dates } = specialDatesSchema.parse(request.body);
-    if (special_dates.some((s) => market.schedule.skipped_dates.some((sk) => sk.date === s.date))) {
-      return reply.status(409).send({ error: 'A date cannot be both skipped and special' });
-    }
-
-    const now = new Date();
-    const before = market.schedule.special_dates;
-    await app.db.collection('farmers_markets').doc(id).update({ schedule: { ...market.schedule, special_dates }, updated_at: now });
-    const updated: FarmersMarket = { ...market, schedule: { ...market.schedule, special_dates }, updated_at: now };
-
-    const generation = await generateMarketDates(app.db, updated, { scope: 'window', actor: user.id });
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.special_dates.set',
-      target: { collection: 'farmers_markets', id },
-      before,
-      after: special_dates,
-    });
-
-    return { market: toMarketDTO(updated, true), generation };
-  });
-
-  // ─── POST /api/markets/:id/dates/generate ───
-  app.post('/:id/dates/generate', { preHandler: adminOnly }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    const { scope } = z.object({ scope: z.enum(['window', 'season']).default('window') }).parse(request.body ?? {});
-    const generation = await generateMarketDates(app.db, market, { scope, actor: user.id });
-
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action: 'market.dates.generate',
-      target: { collection: 'farmers_markets', id },
-      after: generation,
-    });
-
-    return { generation };
-  });
-
-  // ─── POST /api/markets/:id/invite-reapply (Phase 4 §3.3: invite every returning vendor to apply) ───
-  app.post('/:id/invite-reapply', { preHandler: adminOnly }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const user = request.authUser!;
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    const input = z
-      .object({
-        season: z.string().regex(SEASON_LABEL_RE).optional(),
-        force: z.boolean().default(false),
-        dry_run: z.boolean().default(false),
-      })
-      .parse(request.body ?? {});
-
-    // Applications are taken for the market's configured season only, so that is the season an invite can be for.
-    const label = market.season?.label;
-    if (!label) {
-      return reply.status(409).send({ error: 'Applications are not open: set the season for this market first', code: 'applications_not_open' });
-    }
-    const season = input.season ?? label;
-    if (season !== label) return reply.status(409).send({ error: `Applications are open for ${label}, not ${season}` });
-    // The invitation says "applications are open": outside the window nothing is sent (fix X5).
-    // A dry run still answers, so the list can be reviewed before the window opens.
-    const now = new Date();
-    if (!input.dry_run && !applicationsOpen(market, now)) {
-      return reply.status(409).send({
-        error: `Applications for the ${label} season are not open today; the invitation would say they are. Check the application dates of this market.`,
-        code: 'applications_not_open',
+      messages.push({
+        id: doc.id,
+        type: 'order',
+        title,
+        description,
+        from: farmName,
+        status: order.status,
+        amount: order.total,
+        order_number: order.order_number,
+        timestamp: order.updated_at || order.created_at,
       });
     }
 
-    const result = await inviteReapply({
-      db: app.db,
-      env: app.env,
-      market,
-      season,
-      actor: user.id,
-      force: input.force,
-      dryRun: input.dry_run,
-      now,
-    });
+    const notifsSnap = await app.db
+      .collection('notifications')
+      .where('market_id', '==', marketId)
+      .get();
+    const notifDocs = byDateDesc(notifsSnap.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
 
-    if (!input.dry_run) {
-      await writeAudit(app.db, {
-        actor_id: user.id,
-        actor_role: user.role,
-        action: 'market.invite_reapply',
-        target: { collection: 'farmers_markets', id },
-        after: {
-          season,
-          force: input.force,
-          candidates: result.candidates,
-          invited: result.invited,
-          completed: result.completed,
-          held_quiet_hours: result.held_quiet_hours,
-          skipped_already: result.skipped_already,
-          skipped_applied: result.skipped_applied,
-          skipped_no_contact: result.skipped_no_contact,
-        },
+    for (const doc of notifDocs) {
+      const notif = doc.data();
+      let farmName = 'Unknown';
+      let productName = '';
+
+      if (notif.inventory_id) {
+        const invDoc = await app.db.collection('inventory').doc(notif.inventory_id).get();
+        if (invDoc.exists) {
+          const inv = invDoc.data()!;
+          const farmDoc = await app.db.collection('farms').doc(inv.farm_id).get();
+          farmName = farmDoc.data()?.name || 'Unknown';
+          const prodDoc = await app.db.collection('products').doc(inv.product_id).get();
+          productName = prodDoc.data()?.name || '';
+        }
+      }
+
+      messages.push({
+        id: doc.id,
+        type: 'notification',
+        title: `New inventory from ${farmName}`,
+        description: `New listing: ${productName || 'item'} from ${farmName}`,
+        from: farmName,
+        status: notif.status,
+        notification_type: notif.type,
+        product_name: productName,
+        timestamp: notif.sent_at || notif.created_at,
       });
     }
-    return result;
-  });
 
-  // ─── GET /api/markets/:id/dates ───
-  app.get('/:id/dates', { preHandler: [auth, requireMarketAccess(marketIdFromParams('id'))] }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const market = await loadMarket(app.db, id);
-    if (!market) return reply.status(404).send({ error: 'Market not found' });
-
-    const query = z
-      .object({ from: z.string().optional(), to: z.string().optional(), status: z.enum(['collecting', 'lineup_final', 'published', 'cancelled']).optional() })
-      .parse(request.query ?? {});
-
-    let dates = await marketDateDocs(app.db, id);
-    if (query.from) dates = dates.filter((d) => d.date >= query.from!);
-    if (query.to) dates = dates.filter((d) => d.date <= query.to!);
-    if (query.status) dates = dates.filter((d) => d.status === query.status);
-    dates = byStringAsc(dates, 'date');
-
-    return { dates };
-  });
-
-  // ─── PATCH /api/markets/:id/dates/:date_id ───
-  app.patch('/:id/dates/:date_id', { preHandler: [auth, requireMarketAccess(marketIdFromParams('id'))] }, async (request, reply) => {
-    const { id, date_id } = request.params as { id: string; date_id: string };
-    const user = request.authUser!;
-    const doc = await app.db.collection('market_dates').doc(date_id).get();
-    if (!doc.exists || (doc.data() as Record<string, unknown>).market_id !== id) {
-      return reply.status(404).send({ error: 'Market date not found' });
-    }
-    const existing = marketDateFromData(doc.id, doc.data() as Record<string, unknown>);
-    const input = patchDateSchema.parse(request.body);
-    const now = new Date();
-
-    let update: Record<string, unknown> = { updated_at: now };
-    let action = 'market_date.update';
-    const before: Record<string, unknown> = {};
-    const after: Record<string, unknown> = {};
-
-    if (input.status === 'cancelled') {
-      if (existing.status === 'cancelled') return reply.status(409).send({ error: 'Date is already cancelled' });
-      update = {
-        ...update,
-        status: 'cancelled',
-        cancellation_reason: input.cancellation_reason,
-        cancelled_at: now,
-        cancelled_by: user.id,
-      };
-      action = 'market_date.cancel';
-      before.status = existing.status;
-      after.status = 'cancelled';
-    } else if (input.status === 'collecting') {
-      if (existing.status !== 'cancelled') return reply.status(409).send({ error: 'Date is not cancelled' });
-      // Same rule as the generator, the season opener's booth cycle included.
-      const decided = actionTimestampSet(existing.actions);
-      if (decided || existing.end_at.getTime() < now.getTime()) {
-        return reply.status(409).send({ error: 'Cannot un-cancel a decided or past date' });
-      }
-      update = { ...update, status: 'collecting', cancellation_reason: null, cancelled_at: null, cancelled_by: null };
-      action = 'market_date.uncancel';
-      before.status = existing.status;
-      after.status = 'collecting';
-    }
-
-    if (input.note !== undefined) update.note = input.note;
-    if (input.extra_questions !== undefined) update.extra_questions = input.extra_questions;
-    if (input.sponsor_id !== undefined) update.sponsor_id = input.sponsor_id;
-
-    await app.db.collection('market_dates').doc(date_id).update(update);
-    const updated: MarketDateDoc = { ...existing, ...(update as Partial<MarketDateDoc>) };
-
-    await writeAudit(app.db, {
-      actor_id: user.id,
-      actor_role: user.role,
-      action,
-      target: { collection: 'market_dates', id: date_id },
-      before,
-      after,
+    messages.sort((a, b) => {
+      const aTime = a.timestamp?.toDate?.() || new Date(a.timestamp);
+      const bTime = b.timestamp?.toDate?.() || new Date(b.timestamp);
+      return bTime.getTime() - aTime.getTime();
     });
 
-    return { date: updated };
+    return { messages: messages.slice(0, 50) };
+  });
+
+  // GET /api/markets/:id/farms
+  app.get<{ Params: { id: string } }>('/:id/farms', {
+    preHandler: [auth, marketOrAdmin, marketOwner],
+  }, async (request) => {
+    const marketId = request.params.id;
+
+    const relsSnap = await app.db
+      .collection('farm_market_rels')
+      .where('market_id', '==', marketId)
+      .get();
+    const relDocs = byNumberAsc(relsSnap.docs.map((d) => ({ doc: d, priority: d.data().priority })), 'priority', 99).map((x) => x.doc);
+
+    // Fetch all orders for this market once, then group by farm in memory.
+    const allOrdersSnap = await app.db.collection('orders').where('market_id', '==', marketId).get();
+
+    const farms = await Promise.all(
+      relDocs.map(async (relDoc) => {
+        const rel = relDoc.data();
+        const farmDoc = await app.db.collection('farms').doc(rel.farm_id).get();
+        const farm = farmDoc.data() || {};
+
+        const invSnap = await app.db
+          .collection('inventory')
+          .where('farm_id', '==', rel.farm_id)
+          .get();
+        const availableItems = invSnap.docs.filter((d) => ['available', 'partial'].includes(d.data().status) && d.data().remaining > 0).length;
+
+        let pendingCount = 0, pendingTotal = 0;
+        let historyCount = 0, historyTotal = 0;
+        const recentOrders: any[] = [];
+
+        for (const oDoc of allOrdersSnap.docs) {
+          const o = oDoc.data();
+          if (o.farm_id !== rel.farm_id) continue;
+          if (o.status === 'pending') { pendingCount++; pendingTotal += Number(o.total || 0); }
+          else if (['confirmed', 'delivered', 'in_transit'].includes(o.status)) { historyCount++; historyTotal += Number(o.total || 0); }
+          recentOrders.push({ id: oDoc.id, ...o });
+        }
+
+        recentOrders.sort((a, b) => {
+          const aTime = a.created_at?.toDate?.() || new Date(a.created_at);
+          const bTime = b.created_at?.toDate?.() || new Date(b.created_at);
+          return bTime.getTime() - aTime.getTime();
+        });
+
+        return {
+          id: farmDoc.id,
+          name: farm.name,
+          location: farm.location,
+          specialty: farm.specialty,
+          rel_id: relDoc.id,
+          priority: rel.priority,
+          notification_delay_min: rel.notification_delay_min,
+          active: rel.active,
+          available_items: availableItems,
+          pending_orders: pendingCount,
+          pending_total: pendingTotal,
+          history_orders: historyCount,
+          history_total: historyTotal,
+          recent_orders: recentOrders.slice(0, 5).map((o) => ({
+            id: o.id,
+            order_number: o.order_number,
+            status: o.status,
+            total: o.total,
+            order_date: o.order_date,
+            created_at: o.created_at,
+          })),
+        };
+      }),
+    );
+
+    return { farms };
+  });
+
+  // GET /api/markets/:id/orders
+  app.get<{ Params: { id: string } }>('/:id/orders', {
+    preHandler: [auth, marketOrAdmin, marketOwner],
+  }, async (request) => {
+    const snapshot = await app.db
+      .collection('orders')
+      .where('market_id', '==', request.params.id)
+      .get();
+    const orderDocs = byDateDesc(snapshot.docs.map((d) => ({ doc: d, created_at: d.data().created_at })), 'created_at').slice(0, 50).map((x) => x.doc);
+
+    const orders = await Promise.all(
+      orderDocs.map(async (doc) => {
+        const order = doc.data();
+        const farmDoc = await app.db.collection('farms').doc(order.farm_id).get();
+        return {
+          id: doc.id,
+          order_number: order.order_number,
+          status: order.status,
+          total: order.total,
+          order_date: order.order_date,
+          farm_name: farmDoc.data()?.name || 'Unknown',
+        };
+      }),
+    );
+
+    return { orders };
   });
 }

@@ -6,7 +6,6 @@ import { useAuth } from '@/lib/auth-context';
 import { Icon } from './icons';
 import { useRouter, usePathname } from 'next/navigation';
 import { FARMLINK_NUMBER_DISPLAY, smsHref } from '@/lib/constants';
-import { isStaffRole } from './staff-guard';
 
 interface NavItem {
   label: string;
@@ -15,39 +14,37 @@ interface NavItem {
 }
 
 export function Header() {
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, farm, market, isAuthenticated, logout } = useAuth();
   const router = useRouter();
-  const pathname = usePathname() ?? '';
+  const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
 
-  const isStaff = isAuthenticated && isStaffRole(user?.role);
-  const isAdmin = user?.role === 'admin';
+  const dashPath = user?.role === 'market' && !farm ? '/market' : '/farmer';
 
-  // Section roots match by prefix; the dashboard only matches exactly.
-  const section = (label: string, href: string): NavItem => ({ label, href, active: pathname.startsWith(href) });
-
-  const navItems: NavItem[] = isStaff
+  const navItems: NavItem[] = isAuthenticated
     ? [
-        { label: 'Dashboard', href: '/admin', active: pathname === '/admin' },
-        section('Markets', '/admin/markets'),
-        section('Producers', '/admin/producers'),
-        ...(isAdmin ? [section('Applications', '/admin/applications')] : []),
-        ...(isAdmin ? [section('Users', '/admin/users')] : []),
-        ...(isAdmin ? [section('Broadcast', '/admin/broadcast')] : []),
-        section('Feedback', '/feedback'),
-        section('Settings', '/settings'),
+        { label: farm?.name || market?.name || 'Dashboard', href: dashPath, active: pathname.startsWith(dashPath) },
+        ...(user?.role === 'both' && farm && market
+          ? [{ label: market.name, href: '/market', active: pathname === '/market' }]
+          : []),
+        { label: 'Feedback', href: '/feedback', active: pathname === '/feedback' },
+        { label: 'Settings', href: '/settings', active: pathname === '/settings' },
+        ...(user?.role === 'admin' ? [{ label: 'Admin', href: '/admin', active: pathname === '/admin' }] : []),
       ]
-    : [];
+    : [
+        { label: 'How It Works', href: '/#how-it-works' },
+        { label: 'For Farms & Markets', href: '/#for-you' },
+        { label: 'Revenue Network', href: '/about', active: pathname === '/about' },
+      ];
 
   const go = (href: string) => {
     setMenuOpen(false);
-    router.push(href);
-  };
-
-  const signOut = () => {
-    logout();
-    setMenuOpen(false);
-    router.push('/');
+    if (href.startsWith('/#')) {
+      // Anchor on the landing page — use a plain navigation so the hash works.
+      window.location.href = href;
+    } else {
+      router.push(href);
+    }
   };
 
   return (
@@ -58,9 +55,9 @@ export function Header() {
       <div className="max-w-[1180px] mx-auto px-4 sm:px-6 h-[60px] flex items-center justify-between gap-3">
         {/* Wordmark */}
         <Link
-          href={isStaff ? '/admin' : '/'}
+          href={isAuthenticated ? dashPath : '/'}
           className="flex items-center gap-2.5 no-underline shrink-0"
-          aria-label="SJCA Markets home"
+          aria-label="FarmLink home"
         >
           <div
             className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center"
@@ -68,7 +65,7 @@ export function Header() {
           >
             <Icon name="leaf" size={18} className="text-white" />
           </div>
-          <span className="font-display font-semibold text-[20px] text-text tracking-tight">SJCA Markets</span>
+          <span className="font-display font-semibold text-[20px] text-text tracking-tight">FarmLink</span>
         </Link>
 
         {/* Desktop nav */}
@@ -77,7 +74,7 @@ export function Header() {
             <button
               key={item.href + item.label}
               onClick={() => go(item.href)}
-              className={`px-3 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border-none transition-colors ${
+              className={`px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border-none transition-colors ${
                 item.active ? 'bg-green-50 text-green-700' : 'bg-transparent text-text-soft hover:text-text'
               }`}
             >
@@ -89,7 +86,7 @@ export function Header() {
         {/* Desktop actions */}
         <div className="hidden lg:flex items-center gap-2.5 shrink-0">
           <a
-            href={smsHref('Hi SJCA Markets!')}
+            href={smsHref('Hi FarmLink!')}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-full no-underline font-sans font-semibold text-[13px] text-green-700 border border-green-100 bg-green-50/60 hover:bg-green-50 transition-colors"
           >
             <Icon name="msg" size={14} />
@@ -97,18 +94,27 @@ export function Header() {
           </a>
           {isAuthenticated ? (
             <button
-              onClick={signOut}
+              onClick={() => { logout(); router.push('/'); }}
               className="px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border border-border bg-transparent text-text-soft hover:text-text transition-colors"
             >
               Log out
             </button>
           ) : (
-            <button
-              onClick={() => go('/login')}
-              className="px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border border-border bg-transparent text-text-soft hover:text-text transition-colors"
-            >
-              Log in
-            </button>
+            <>
+              <button
+                onClick={() => go('/login')}
+                className="px-3.5 py-2 rounded-full font-sans font-semibold text-[13.5px] cursor-pointer border border-border bg-transparent text-text-soft hover:text-text transition-colors"
+              >
+                Sign in
+              </button>
+              <button
+                onClick={() => go('/signup')}
+                className="px-5 py-2 rounded-full font-sans font-bold text-[13.5px] text-white cursor-pointer border-none transition-opacity hover:opacity-90"
+                style={{ background: 'linear-gradient(135deg, #21512C 0%, #3D7A47 100%)', boxShadow: '0 2px 10px rgba(42,94,51,0.28)' }}
+              >
+                Get Started
+              </button>
+            </>
           )}
         </div>
 
@@ -139,21 +145,30 @@ export function Header() {
           ))}
           {isAuthenticated ? (
             <button
-              onClick={signOut}
+              onClick={() => { logout(); setMenuOpen(false); router.push('/'); }}
               className="text-left font-sans font-semibold text-[15px] rounded-xl border-none w-full cursor-pointer px-4 py-3 bg-transparent text-text-soft"
             >
               Log out
             </button>
           ) : (
-            <button
-              onClick={() => go('/login')}
-              className="text-left font-sans font-semibold text-[15px] rounded-xl border-none w-full cursor-pointer px-4 py-3 bg-transparent text-text-soft"
-            >
-              Log in
-            </button>
+            <>
+              <button
+                onClick={() => go('/login')}
+                className="text-left font-sans font-semibold text-[15px] rounded-xl border-none w-full cursor-pointer px-4 py-3 bg-transparent text-text-soft"
+              >
+                Sign in
+              </button>
+              <button
+                onClick={() => go('/signup')}
+                className="font-sans font-bold text-[15px] text-white rounded-xl border-none w-full cursor-pointer px-4 py-3 mt-1"
+                style={{ background: 'linear-gradient(135deg, #21512C 0%, #3D7A47 100%)' }}
+              >
+                Get Started Free
+              </button>
+            </>
           )}
           <a
-            href={smsHref('Hi SJCA Markets!')}
+            href={smsHref('Hi FarmLink!')}
             className="flex items-center justify-center gap-2 mt-1 px-4 py-3 rounded-xl no-underline font-sans font-semibold text-[15px] text-green-700 border border-green-100 bg-green-50/60"
           >
             <Icon name="msg" size={16} />

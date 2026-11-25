@@ -1,30 +1,22 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import { Header } from '@/components/header';
 import { Icon } from '@/components/icons';
 import { FARMLINK_NUMBER_DISPLAY, smsHref } from '@/lib/constants';
-import { isStaffRole } from '@/components/staff-guard';
 
 export default function LoginPage() {
-  const { user, isAuthenticated, isLoading, requestOtp, login, logout } = useAuth();
+  const { requestOtp, login } = useAuth();
   const router = useRouter();
-  const [step, setStep] = useState<'phone' | 'otp'>('phone');
+  const [step, setStep] = useState<'phone' | 'otp' | 'role-pick'>('phone');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [userName, setUserName] = useState<string | null>(null);
-
-  // Already signed in as staff (e.g. returning with a stored token) → go straight in.
-  useEffect(() => {
-    if (!isLoading && isAuthenticated && isStaffRole(user?.role)) {
-      router.replace('/admin');
-    }
-  }, [isLoading, isAuthenticated, user, router]);
 
   const formatPhone = (raw: string) => {
     const digits = raw.replace(/\D/g, '');
@@ -43,7 +35,7 @@ export default function LoginPage() {
       // Check if phone is registered
       const check = await api.checkPhone(formatted);
       if (!check.exists) {
-        setError('No account found with this number. Ask an SJCA administrator to invite you.');
+        setError('No account found with this number. Please sign up first.');
         setLoading(false);
         return;
       }
@@ -63,10 +55,19 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const result = await login(phone, code);
-      if (isStaffRole(result.role)) {
-        router.push('/admin');
+      if (result.role === 'both') {
+        // User has both roles — let them pick which view
+        setStep('role-pick');
+        setLoading(false);
+        return;
       }
-      // Non-staff stay here: the signed-in branch below shows the staff-only notice.
+      if (result.hasFarm) {
+        router.push('/farmer');
+      } else if (result.hasMarket) {
+        router.push('/market');
+      } else {
+        router.push('/');
+      }
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {
@@ -74,20 +75,16 @@ export default function LoginPage() {
     }
   };
 
-  const signedInNonAdmin = !isLoading && isAuthenticated && !isStaffRole(user?.role);
-
   return (
     <div className="min-h-screen bg-bg font-sans">
       <Header />
       <div className="max-w-[440px] mx-auto px-4 sm:px-6 py-10 sm:py-16">
         <div className="text-center mb-7">
-          <h1 className="h-display mb-2" style={{ fontSize: 'clamp(28px, 5vw, 36px)' }}>
-            {signedInNonAdmin ? 'Market staff only' : 'Welcome back'}
-          </h1>
+          <h1 className="h-display mb-2" style={{ fontSize: 'clamp(28px, 5vw, 36px)' }}>Welcome back</h1>
           <p className="text-[15px] text-text-soft m-0">
-            {signedInNonAdmin && 'This tool is for SJCA market staff.'}
-            {!signedInNonAdmin && step === 'phone' && 'Sign in with the phone number you text from.'}
-            {!signedInNonAdmin && step === 'otp' && `Welcome back${userName ? `, ${userName}` : ''} — check your messages.`}
+            {step === 'phone' && 'Sign in with the phone number you text from.'}
+            {step === 'otp' && `Welcome back${userName ? `, ${userName}` : ''} — check your messages.`}
+            {step === 'role-pick' && 'Choose which dashboard to open.'}
           </p>
         </div>
 
@@ -95,20 +92,48 @@ export default function LoginPage() {
           {error && (
             <div className="mb-4 px-4 py-3 bg-red-50 text-red-500 rounded-xl text-sm border border-red-50">
               {error}
+              {error.includes('sign up') && (
+                <button
+                  onClick={() => router.push('/signup')}
+                  className="block mt-2 text-green-700 font-semibold bg-transparent border-none cursor-pointer underline text-xs"
+                >
+                  Create an account
+                </button>
+              )}
             </div>
           )}
 
-          {signedInNonAdmin ? (
-            <div className="text-center">
-              <p className="text-sm text-text-soft mb-4">
-                You are signed in as <span className="font-semibold">{user?.name}</span>, but this tool is for SJCA market staff.
-                If you sold through FarmLink, you&apos;ll get a text when the new weekly check-in system is ready.
-              </p>
+          {step === 'role-pick' ? (
+            <div className="space-y-3">
+              {userName && (
+                <div className="mb-2 p-3 bg-green-50 rounded-xl text-center">
+                  <div className="text-green-700 font-bold text-sm">Welcome, {userName}!</div>
+                  <div className="text-text-muted text-xs mt-1">You have both a farm and a market. Choose a view:</div>
+                </div>
+              )}
               <button
-                onClick={() => { logout(); setStep('phone'); setCode(''); setError(''); }}
-                className="text-green-700 font-semibold bg-transparent border-none cursor-pointer underline text-sm"
+                onClick={() => router.push('/farmer')}
+                className="w-full p-4 bg-white border-2 border-earth-200 rounded-xl cursor-pointer hover:border-green-500 hover:bg-green-50 transition-all text-left"
               >
-                Log out
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-green-50 flex items-center justify-center text-xl">🌾</div>
+                  <div>
+                    <div className="font-bold text-sm text-text">Farmer Dashboard</div>
+                    <div className="text-xs text-text-muted mt-0.5">Manage inventory, orders &amp; drop-offs at the depot</div>
+                  </div>
+                </div>
+              </button>
+              <button
+                onClick={() => router.push('/market')}
+                className="w-full p-4 bg-white border-2 border-earth-200 rounded-xl cursor-pointer hover:border-accent-500 hover:bg-accent-50 transition-all text-left"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-accent-50 flex items-center justify-center text-xl">🏪</div>
+                  <div>
+                    <div className="font-bold text-sm text-text">Market Dashboard</div>
+                    <div className="text-xs text-text-muted mt-0.5">Browse farms, order &amp; pick up at the depot</div>
+                  </div>
+                </div>
               </button>
             </div>
           ) : step === 'phone' ? (
@@ -135,7 +160,13 @@ export default function LoginPage() {
               </button>
 
               <div className="mt-5 text-center text-[13px] text-text-muted">
-                Staff accounts are created by invitation.
+                Don&apos;t have an account?{' '}
+                <button
+                  onClick={() => router.push('/signup')}
+                  className="text-green-700 font-semibold bg-transparent border-none cursor-pointer underline"
+                >
+                  Sign up free
+                </button>
               </div>
             </>
           ) : (
@@ -183,11 +214,11 @@ export default function LoginPage() {
 
         {/* Text-first reminder */}
         <a
-          href={smsHref('Hi SJCA Markets!')}
+          href={smsHref('Hi FarmLink!')}
           className="mt-5 flex items-center justify-center gap-2 px-4 py-3 rounded-2xl no-underline bg-green-50/70 border border-green-100 text-green-700 text-[13.5px] font-semibold"
         >
           <Icon name="msg" size={15} />
-          Questions? Text {FARMLINK_NUMBER_DISPLAY}
+          No dashboard needed — text {FARMLINK_NUMBER_DISPLAY} to do everything by SMS
         </a>
       </div>
     </div>

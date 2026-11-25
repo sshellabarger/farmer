@@ -2,7 +2,7 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { FieldValue } from 'firebase-admin/firestore';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Env } from '../config/env.js';
-import { sendSms, type SmsKind } from './sms.js';
+import { sendSms } from './sms.js';
 
 /** Store an FCM web-push token on the user's record. */
 export async function registerToken(db: Firestore, userId: string, token: string): Promise<void> {
@@ -70,26 +70,53 @@ export async function sendPushToUser(db: Firestore, userId: string, payload: { t
 }
 
 /**
+ * Notify a person by phone, preferring free push over paid SMS.
+ * Looks up the user by phone; if they have push tokens, sends push (no SMS).
+ * Otherwise falls back to SMS. Returns the channel used.
+ */
+export async function notifyByPhone(
+  db: Firestore,
+  env: Env,
+  phone: string,
+  payload: { title: string; body: string; url?: string; sms?: string },
+): Promise<'push' | 'sms' | 'none'> {
+  const snap = await db.collection('users').where('phone', '==', phone).limit(1).get();
+  if (!snap.empty) {
+    const userId = snap.docs[0].id;
+    const tokens: string[] = snap.docs[0].data()?.fcm_tokens || [];
+    if (tokens.length > 0) {
+      const ok = await sendPushToTokens(db, userId, tokens, payload);
+      if (ok) return 'push';
+    }
+  }
+  try {
+    await sendSms({ env, to: phone, body: payload.sms || payload.body });
+    return 'sms';
+  } catch {
+    return 'none';
+  }
+}
+
+/**
  * Notify a person by phone with SMS as the AUTHORITATIVE channel.
  *
- * Always sends the SMS and treats it as the source of truth. Push is sent
- * best-effort in parallel — fire-and-forget, never counts as delivery, because
- * FCM "success" only means Google accepted the message, not that the user saw
- * it. (v1's push-first `notifyByPhone` silently dropped reminders when a stale
- * token was accepted — the Jun 7 2026 bug — and is deleted.) Returns 'sms'
- * only if the SMS actually goes out, otherwise 'none'.
+ * Unlike notifyByPhone (which prefers push and skips SMS when FCM accepts the
+ * message), this always sends the SMS and treats it as the source of truth.
+ * Push is sent best-effort in parallel — fire-and-forget, never counts as
+ * delivery, because FCM "success" only means Google accepted the message, not
+ * that the user saw it. Use this for time/action-critical messages (orders,
+ * reminders) where a silent push failure is unacceptable. Returns 'sms' only if
+ * the SMS actually goes out, otherwise 'none'.
  */
 export async function notifyByPhoneSmsFirst(
   db: Firestore,
   env: Env,
   phone: string,
   payload: { title: string; body: string; url?: string; sms?: string },
-  kind: SmsKind = 'alert',
 ): Promise<'sms' | 'none'> {
   const snap = await db.collection('users').where('phone', '==', phone).limit(1).get();
-  let userId: string | null = null;
   if (!snap.empty) {
-    userId = snap.docs[0].id;
+    const userId = snap.docs[0].id;
     const tokens: string[] = snap.docs[0].data()?.fcm_tokens || [];
     if (tokens.length > 0) {
       // Best-effort only; do not await for delivery semantics.
@@ -97,7 +124,7 @@ export async function notifyByPhoneSmsFirst(
     }
   }
   try {
-    await sendSms({ env, db, to: phone, body: payload.sms || payload.body, kind, user_id: userId });
+    await sendSms({ env, to: phone, body: payload.sms || payload.body });
     return 'sms';
   } catch {
     return 'none';

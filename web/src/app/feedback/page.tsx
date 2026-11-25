@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import { Header } from '@/components/header';
+import { ChatWidget } from '@/components/chat-widget';
 import { useRouter } from 'next/navigation';
 
 interface FeedbackItem {
@@ -170,7 +171,7 @@ export default function FeedbackPage() {
               Feedback
             </h1>
             <p className="text-sm mt-1" style={{ color: '#8a7e72' }}>
-              Request features or report issues to help us improve the market manager
+              Request features or report issues to help us improve FarmLink
             </p>
           </div>
           <button
@@ -440,6 +441,8 @@ export default function FeedbackPage() {
           </div>
         )}
       </div>
+
+      <ChatWidget />
     </div>
   );
 }

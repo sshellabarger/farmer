@@ -1,4 +1,4 @@
-import { initializeApp, getApps, type App } from 'firebase-admin/app';
+import { initializeApp, cert, getApps, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
 let app: App | undefined;
@@ -16,75 +16,20 @@ export function getDb(): Firestore {
   return db;
 }
 
-/**
- * Top-level collections the application still reads or writes after the
- * Phase 1 code retirement. Documentation, not enforcement — code uses
- * `.collection('…')` literals. The v1 ordering collections (markets,
- * products, inventory, farm_market_rels, orders, recurring_orders,
- * deliveries, upload_links, conversations) are no longer referenced by code
- * and are exported + deleted in the Phase 1 data step (SPEC §4.5).
- */
 export const collections = {
-  /** Admin/login accounts. `farms` and `users` stay untouched until the D3 producers migration. */
   users: 'users',
   farms: 'farms',
-  otps: 'otps',
-  reminders: 'reminders',
-  feedback: 'feedback',
-  invites: 'invites',
-  admin_broadcasts: 'admin_broadcasts',
-  error_alerts: 'error_alerts',
-  /** Every text sent or received, from Phase 1 on (SPEC §7.2). */
-  messages: 'messages',
-  /** v1 audit rows; reminders.ts still writes here. Data exists until Phase 1 data deletion. */
+  markets: 'markets',
+  products: 'products',
+  inventory: 'inventory',
+  farmMarketRels: 'farm_market_rels',
+  orders: 'orders',
+  orderItems: (orderId: string) => `orders/${orderId}/order_items`,
+  recurringOrders: 'recurring_orders',
+  recurringOrderItems: (roId: string) => `recurring_orders/${roId}/recurring_order_items`,
+  deliveries: 'deliveries',
+  conversations: 'conversations',
+  messages: (convoId: string) => `conversations/${convoId}/messages`,
   notifications: 'notifications',
-  /** v1 view-link tokens; no longer written. Data exists until Phase 1 data deletion. */
-  view_links: 'view_links',
-  // Phase 2 (SPEC §6, §8; Phase 2 contract §2). Doc id = slug.
-  farmers_markets: 'farmers_markets',
-  // Phase 2. Doc id = `${market_id}_${date}`.
-  market_dates: 'market_dates',
-  // Phase 2. Doc id = uuid. Written by src/services/audit.ts writeAudit().
-  audit_log: 'audit_log',
-  // Phase 2. Doc id = uuid.
-  producers: 'producers',
-  // Phase 2. Doc id = `${producer_id}_${market_id}`.
-  producer_memberships: 'producer_memberships',
-  // Phase 2. Doc id = uuid.
-  applications: 'applications',
-  // Phase 4 (A1). Doc id = uuid. Metadata of a public application upload; the bytes live in Storage at `storage_path`.
-  application_uploads: 'application_uploads',
-  // Phase 4 (A1). Doc id = `${market_id}_${season}_${producer_id}`; created atomically — the invite-to-reapply lock.
-  application_invites: 'application_invites',
-  // Phase 4 fix. Doc id = `${market_id}_${season}_${sha256(lower-cased email)}`; created atomically BEFORE the
-  // application it names (`application_id`), so one address has at most one live application per market and season.
-  application_keys: 'application_keys',
-  // Phase 2/3. Doc id = `${market_date_id}_${producer_id}`.
-  checkins: 'checkins',
-  // Phase 3 (contract §2.1). Doc id = the token itself.
-  link_tokens: 'link_tokens',
-  // Phase 3 fix. Doc id = `${market_date_id}__${step}` (checkin | reminder_<offset> | deadline | summary); created atomically by the engine's claim(), never cleared.
-  // Phase 4 also keeps `agreement__<membership_id>`, `application_approve__<application_id>` and
-  // `producer_identity__<sha256(email)>` here (staff and producer actions that must not overlap).
-  workflow_locks: 'workflow_locks',
-  // Phase 4 (A2). Doc id = `${market_id}_<label slug>`; created atomically so a label is unique per market.
-  booths: 'booths',
-  // Phase 4 (A2). Doc id = uuid; append-only (superseded_by), keyed by the TARGET market date.
-  booth_assignments: 'booth_assignments',
+  feedback: 'feedback',
 } as const;
-
-/**
- * True when a Firestore write failed because the document already exists —
- * what `DocumentReference.create()` rejects with. The admin SDK surfaces a
- * GoogleError with gRPC `code` 6 (ALREADY_EXISTS) and a message that starts
- * `6 ALREADY_EXISTS: Document already exists: …`; both are recognised so a
- * wrapped or re-thrown error still counts. `create()` is the one atomic
- * primitive this code base relies on (sends, step locks, first submissions,
- * generated dates); every caller branches on this predicate.
- */
-export function isAlreadyExists(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: unknown; message?: unknown };
-  if (e.code === 6 || e.code === '6' || e.code === 'ALREADY_EXISTS') return true;
-  return typeof e.message === 'string' && /ALREADY_EXISTS/.test(e.message);
-}

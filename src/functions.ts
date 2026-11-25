@@ -1,10 +1,37 @@
 import { onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+import { onTaskDispatched } from 'firebase-functions/v2/tasks';
 import { setGlobalOptions } from 'firebase-functions/v2';
-import type { FastifyInstance } from 'fastify';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
+import cors from '@fastify/cors';
+import formbody from '@fastify/formbody';
+import sensible from '@fastify/sensible';
+import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import { getDb } from './db/firestore.js';
 import { getEnv } from './config/env.js';
-import { buildApp } from './app.js';
+import { smsRoutes } from './routes/sms.js';
+import { farmRoutes } from './routes/farms.js';
+import { marketRoutes } from './routes/markets.js';
+import { inventoryRoutes } from './routes/inventory.js';
+import { orderRoutes } from './routes/orders.js';
+import { authRoutes } from './routes/auth.js';
+import { relationshipRoutes } from './routes/relationships.js';
+import { recurringOrderRoutes } from './routes/recurring-orders.js';
+import { analyticsRoutes } from './routes/analytics.js';
+import { deliveryRoutes } from './routes/deliveries.js';
+import { productRoutes } from './routes/products.js';
+import { uploadRoutes } from './routes/uploads.js';
+import { profileRoutes } from './routes/profile.js';
+import { feedbackRoutes } from './routes/feedback.js';
+import { directoryRoutes } from './routes/directory.js';
+import { inviteRoutes } from './routes/invite.js';
+import { pushRoutes } from './routes/push.js';
+import { errorRoutes } from './routes/errors.js';
+import { reminderRoutes } from './routes/reminders.js';
+import { adminRoutes } from './routes/admin.js';
+import { serializeTimestamps } from './utils/serialize.js';
+import { createErrorHandler } from './utils/http-error-handler.js';
 
 setGlobalOptions({
   region: 'us-central1',
@@ -12,14 +39,80 @@ setGlobalOptions({
   timeoutSeconds: 120,
 });
 
-let app: FastifyInstance | null = null;
+let app: ReturnType<typeof Fastify> | null = null;
 
-// The Fastify app is built once per function instance and reused across
-// invocations. The plugin/route setup lives in buildApp() and is shared with
-// the local dev runner (src/server.ts).
-async function getApp(): Promise<FastifyInstance> {
+async function getApp() {
   if (app) return app;
-  app = await buildApp({ db: getDb(), env: getEnv() });
+
+  const env = getEnv();
+  const db = getDb();
+
+  app = Fastify({ logger: { level: 'info' } });
+
+  await app.register(cors, { origin: true });
+  await app.register(formbody);
+  await app.register(sensible);
+  await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });
+  await app.register(rateLimit, {
+    max: 100,
+    timeWindow: '1 minute',
+    keyGenerator: (req: any) => req.ip,
+  });
+
+  app.decorate('db', db);
+  app.decorate('env', env);
+
+  // Convert Firestore Timestamps to ISO strings in all JSON responses.
+  app.addHook('preSerialization', async (_req: FastifyRequest, _reply: FastifyReply, payload: unknown) => serializeTimestamps(payload));
+
+  app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+
+  // Global error handler — any unhandled route error gets logged, alerted
+  // (text + email with AI-researched fix), and returned as a clean 500.
+  // Zod validation failures come back as 400s without alerting.
+  // Must be set BEFORE the route registrations below: each awaited register()
+  // boots immediately and its routes keep whatever error handler existed at
+  // that moment, so a handler set afterwards never applies to them.
+  app.setErrorHandler(createErrorHandler({ env }));
+
+  await app.register(authRoutes, { prefix: '/api/auth' });
+  await app.register(smsRoutes, { prefix: '/api/sms' });
+  await app.register(farmRoutes, { prefix: '/api/farms' });
+  await app.register(marketRoutes, { prefix: '/api/markets' });
+  await app.register(inventoryRoutes, { prefix: '/api/inventory' });
+  await app.register(orderRoutes, { prefix: '/api/orders' });
+  await app.register(relationshipRoutes, { prefix: '/api/farm-market-rels' });
+  await app.register(recurringOrderRoutes, { prefix: '/api/recurring-orders' });
+  await app.register(analyticsRoutes, { prefix: '/api/analytics' });
+  await app.register(deliveryRoutes, { prefix: '/api/deliveries' });
+  await app.register(productRoutes, { prefix: '/api/products' });
+  await app.register(uploadRoutes, { prefix: '/api/uploads' });
+  await app.register(profileRoutes, { prefix: '/api/profile' });
+  await app.register(feedbackRoutes, { prefix: '/api/feedback' });
+  await app.register(directoryRoutes, { prefix: '/api/directory' });
+  await app.register(inviteRoutes, { prefix: '/api/invite' });
+  await app.register(pushRoutes, { prefix: '/api/push' });
+  await app.register(errorRoutes, { prefix: '/api/errors' });
+  await app.register(reminderRoutes, { prefix: '/api/reminders' });
+  await app.register(adminRoutes, { prefix: '/api/admin' });
+
+  // Short view-link redirect: /api/view/:token → dashboard with a signed JWT
+  app.get('/api/view/:token', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { token } = request.params as { token: string };
+    if (!token) return reply.status(404).send('Not found.');
+    const doc = await db.collection('view_links').doc(token).get();
+    if (!doc.exists) return reply.status(410).send('Link expired or invalid.');
+
+    const data = doc.data()!;
+    const expiresAt = data.expires_at?.toDate?.() || new Date(data.expires_at);
+    if (expiresAt < new Date()) return reply.status(410).send('Link expired.');
+
+    const { signJwt } = await import('./utils/jwt.js');
+    const jwt = signJwt({ sub: data.userId, role: data.role }, env.JWT_SECRET);
+    const page = data.role === 'market' ? 'market' : 'farmer';
+    return reply.redirect(`/${page}?token=${jwt}&tab=${data.tab}`);
+  });
+
   await app.ready();
   return app;
 }
@@ -52,10 +145,44 @@ export const api = onRequest(async (req, res) => {
   res.send(response.body);
 });
 
-// Scheduled function: deliver due user reminders (checked every 15 minutes).
-// Deploying with `npm run deploy:functions` prompts to delete
-// processRecurringOrders, freshnessAlerts and sendNotification (retired in
-// Phase 1) and removes their Cloud Scheduler jobs.
+// Scheduled function: process recurring orders daily at midnight CT
+export const processRecurringOrders = onSchedule(
+  { schedule: '0 0 * * *', timeZone: 'America/Chicago' },
+  async () => {
+    const db = getDb();
+    const env = getEnv();
+    try {
+      const { processRecurringOrders: process } = await import('./services/recurring-orders.js');
+      const result = await process(db, env);
+      console.log(`Recurring orders: ${result.processed} processed, ${result.created} created, ${result.skipped} skipped`);
+    } catch (err) {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err, source: 'scheduler:recurring-orders' }).catch(() => {});
+      throw err;
+    }
+  }
+);
+
+// Scheduled function: freshness sweep daily at 7am CT — flags aging produce
+// and texts farmers what to sell soon, donate, or compost.
+export const freshnessAlerts = onSchedule(
+  { schedule: '0 7 * * *', timeZone: 'America/Chicago' },
+  async () => {
+    const db = getDb();
+    const env = getEnv();
+    try {
+      const { sendFreshnessAlerts } = await import('./services/freshness-alerts.js');
+      const result = await sendFreshnessAlerts(db, env);
+      console.log(`Freshness alerts: ${result.farmsAlerted} farms alerted (${result.agingItems} aging, ${result.pastItems} past shelf life)`);
+    } catch (err) {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err, source: 'scheduler:freshness-alerts' }).catch(() => {});
+      throw err;
+    }
+  }
+);
+
+// Scheduled function: deliver due user reminders (checked every 15 minutes)
 export const processReminders = onSchedule(
   { schedule: '*/15 * * * *', timeZone: 'America/Chicago' },
   async () => {
@@ -73,73 +200,49 @@ export const processReminders = onSchedule(
   }
 );
 
-// Nightly market-date roll (Phase 2 contract §3). The cron's America/Chicago
-// zone only anchors when the job fires; every date/time computation inside
-// the generator uses each market's own `timezone`, never this one.
-export const rollMarketDates = onSchedule(
-  { schedule: '15 3 * * *', timeZone: 'America/Chicago' },
-  async () => {
+// Cloud Task handler: send delayed notifications
+export const sendNotification = onTaskDispatched(
+  { retryConfig: { maxAttempts: 3, minBackoffSeconds: 10 } },
+  async (req) => {
+    const { notificationId, phone, message } = req.data as {
+      notificationId: string;
+      phone: string;
+      message: string;
+    };
+
     const db = getDb();
     const env = getEnv();
-    try {
-      const { generateMarketDates } = await import('./services/market-dates.js');
-      const snap = await db.collection('farmers_markets').where('active', '==', true).get();
-      let created = 0;
-      let updated = 0;
-      let cancelled = 0;
-      for (const doc of snap.docs) {
-        const market = { id: doc.id, ...(doc.data() as Record<string, unknown>) } as import('./services/markets.js').FarmersMarket;
-        const result = await generateMarketDates(db, market, { scope: 'window', actor: 'scheduler' });
-        created += result.created;
-        updated += result.updated;
-        cancelled += result.cancelled;
-      }
-      console.log(`rollMarketDates: ${snap.docs.length} markets, created=${created} updated=${updated} cancelled=${cancelled}`);
+    const notifDoc = await db.collection('notifications').doc(notificationId).get();
 
-      // Phase 4 fix X2: delete the application uploads nobody attached to an
-      // application within 48 hours. Its own try/catch: a purge failure is
-      // alerted, and the roll above has already succeeded and stays that way.
-      try {
-        const { purgeUnattachedUploads } = await import('./services/application-uploads.js');
-        const { firebaseStoragePort } = await import('./services/storage-port.js');
-        const purge = await purgeUnattachedUploads(db, firebaseStoragePort(env), new Date());
-        console.log(`purgeUnattachedUploads: scanned=${purge.scanned} deleted=${purge.deleted} kept=${purge.kept} reattached=${purge.reattached} failed=${purge.failed}`);
-      } catch (purgeErr) {
-        const { notifyError } = await import('./services/error-notify.js');
-        await notifyError({ env, err: purgeErr, source: 'scheduler:purgeUnattachedUploads' }).catch(() => {});
+    if (!notifDoc.exists || notifDoc.data()?.status !== 'pending') {
+      console.log(`Notification ${notificationId} already processed, skipping`);
+      return;
+    }
+
+    const notif = notifDoc.data()!;
+    if (notif.inventory_id) {
+      const invDoc = await db.collection('inventory').doc(notif.inventory_id).get();
+      const inv = invDoc.data();
+      if (!inv || inv.status === 'sold' || inv.remaining <= 0) {
+        await db.collection('notifications').doc(notificationId).update({ status: 'failed' });
+        return;
       }
+    }
+
+    try {
+      const { notifyByPhone } = await import('./services/push.js');
+      const channel = await notifyByPhone(db, env, phone, { title: 'FarmLink', body: message, url: '/', sms: message });
+      if (channel === 'none') throw new Error('No delivery channel succeeded');
+      await db.collection('notifications').doc(notificationId).update({
+        status: 'sent',
+        channel,
+        sent_at: new Date(),
+      });
     } catch (err) {
+      await db.collection('notifications').doc(notificationId).update({ status: 'failed' });
       const { notifyError } = await import('./services/error-notify.js');
-      await notifyError({ env, err, source: 'scheduler:rollMarketDates' }).catch(() => {});
+      await notifyError({ env, err, source: 'task:sendNotification', context: { userPhone: phone } }).catch(() => {});
       throw err;
     }
   }
-);
-
-// Phase 3 check-in workflow engine (contract §3.1). Runs every 5 minutes;
-// each date's own idempotency claims (src/services/checkin-workflow.ts)
-// make an interrupted run safe to resume on the next tick. The cron's
-// America/Chicago zone only anchors when the job fires — every instant the
-// engine computes comes from each market's own timezone/workflow/quiet_hours.
-export const processMarketDates = onSchedule(
-  { schedule: '*/5 * * * *', timeZone: 'America/Chicago', timeoutSeconds: 300 },
-  async () => {
-    const db = getDb();
-    const env = getEnv();
-    try {
-      const { processMarketDates: run } = await import('./services/checkin-workflow.js');
-      const r = await run(db, env);
-      console.log(
-        `processMarketDates: scanned=${r.scanned} considered=${r.considered} checkin_sent=${r.checkin_sent} reminders_sent=${r.reminders_sent} deadlines=${r.deadlines_processed} summaries=${r.summaries_sent} drafts=${r.drafts_generated} booth_texts=${r.booth_texts_sent} claimed=${r.skipped_claimed} errors=${r.errors.length}`,
-      );
-      if (r.errors.length > 0) {
-        const { notifyError } = await import('./services/error-notify.js');
-        await notifyError({ env, err: new Error(r.errors.join('\n')), source: 'scheduler:processMarketDates' }).catch(() => {});
-      }
-    } catch (err) {
-      const { notifyError } = await import('./services/error-notify.js');
-      await notifyError({ env, err, source: 'scheduler:processMarketDates' }).catch(() => {});
-      throw err;
-    }
-  },
 );

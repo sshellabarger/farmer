@@ -1,8 +1,6 @@
 node_modules/
 dist/
 .env
-.env.*
-!.env.example
 service-account.json
 *service-account*.json
 .DS_Store
@@ -10,6 +8,5 @@ service-account.json
 uploads/
 web/.next/
 web/node_modules/
-web/tsconfig.tsbuildinfo
 .claude/
 .firebase/

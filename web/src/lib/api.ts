@@ -1,73 +1,34 @@
-import type { ApplicationDoc, ApplicationListItem, BoothDoc, InsuranceUpdate, InviteBatchExtras, UploadMeta } from './phase4-types';
-import type {
-  ApplicationAction,
-  ApplicationInvite,
-  AssignmentsView,
-  AuditEntry,
-  BoothInput,
-  BoothSeedInput,
-  Checkin,
-  CheckinFormValues,
-  CheckinSubmitInput,
-  CheckinTokenView,
-  CloseResult,
-  CreateMarketInput,
-  CreateProducerInput,
-  DashboardCard,
-  FeePlan,
-  GenerateResult,
-  InviteBatchResult,
-  Market,
-  MarketDate,
-  MarketDateStatusView,
-  Membership,
-  MembershipStatus,
-  MembershipWithProducer,
-  Producer,
-  ProducerListItem,
-  Providers,
-  PublicMarket,
-  ScheduleVersionInput,
-  SkippedDate,
-  SmsOutcome,
-  SpecialDate,
-  StaffUser,
-  UpdateMarketDateInput,
-  UpdateMarketInput,
-  UpdateProducerInput,
-} from './types';
+export interface ConversationSummary {
+  id: string;
+  phone_number: string;
+  context: string;
+  last_message_at: string;
+  created_at: string;
+  user_name: string;
+  user_role: string;
+  last_message: string | null;
+  last_message_direction: string | null;
+  message_count: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  direction: 'inbound' | 'outbound';
+  body: string;
+  source: string;
+  ai_metadata: unknown;
+  created_at: string;
+}
 
 const API_BASE = '/api';
-
-/** Query string from an object; '' when nothing is defined. */
-export function qs(params?: Record<string, string | number | boolean | undefined | null>): string {
-  if (!params) return '';
-  const entries = Object.entries(params).filter(
-    (e): e is [string, string | number | boolean] => e[1] !== undefined && e[1] !== null && e[1] !== '',
-  );
-  if (entries.length === 0) return '';
-  return '?' + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString();
-}
 
 function getToken(): string | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem('farmlink_token');
 }
 
-/** Contract §6.2: `request<T>` throws `ApiError` so callers can branch on `.status` (404 / 410 / …). */
-export class ApiError extends Error {
-  readonly status: number;
-  /** The parsed JSON error body (`code`, `quiet_until`, ...); empty when the response had none. */
-  readonly body: Record<string, unknown>;
-  constructor(message: string, status: number, body: Record<string, unknown> = {}) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-    this.body = body;
-  }
-}
-
-export async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {};
   // Only set a JSON content type when there is actually a body. Fastify
@@ -82,7 +43,7 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.error || body.message || `API error ${res.status}`, res.status, body && typeof body === 'object' ? body : {});
+    throw new Error(body.error || body.message || `API error ${res.status}`);
   }
   // Handle empty bodies (e.g. 204 No Content from DELETE) — res.json() would
   // throw on an empty body, which previously made successful deletes look failed.
@@ -93,6 +54,15 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
 
 export const api = {
   // Auth
+  signup: (data: {
+    name: string; email: string; phone: string; role: 'farmer' | 'market';
+    businessName: string; location: string;
+    marketType?: string; deliveryPref?: string; specialty?: string;
+  }) =>
+    request<{ success: boolean; userId: string; farm: any; market: any }>(
+      '/auth/signup',
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
   checkPhone: (phone: string) =>
     request<{ exists: boolean; user: { name: string; role: string } | null }>(
       '/auth/check-phone',
@@ -104,19 +74,107 @@ export const api = {
       body: JSON.stringify({ phone }),
     }),
   verifyOtp: (phone: string, code: string) =>
-    request<{ success: boolean; token: string; user: any }>(
+    request<{ success: boolean; token: string; user: any; farm: any; market: any }>(
       '/auth/otp/verify',
       { method: 'POST', body: JSON.stringify({ phone, code }) },
     ),
-  getMe: () => request<{ user: any }>('/auth/me'),
-
-  // Invite (by text)
+  getMe: () => request<{ user: any; farm: any; market: any }>('/auth/me'),
   invite: (data: { phone: string; name?: string }) =>
     request<{ success: boolean; message: string }>('/invite', { method: 'POST', body: JSON.stringify(data) }),
-
-  // Push
   registerPush: (token: string) =>
     request<{ success: boolean }>('/push/register', { method: 'POST', body: JSON.stringify({ token }) }),
+
+  // Farms
+  getAllFarms: () => request<any>('/farms'),
+  getFarm: (id: string) => request<any>(`/farms/${id}`),
+  getFarmInventory: (id: string) => request<any>(`/farms/${id}/inventory`),
+  getFarmOrders: (id: string) => request<any>(`/farms/${id}/orders`),
+  getFarmMarkets: (id: string) => request<any>(`/farms/${id}/markets`),
+  addFarmMarket: (farmId: string, data: { name: string; phone?: string; location?: string; type?: string; priority?: number; notification_delay_min?: number }) =>
+    request<any>(`/farms/${farmId}/markets`, { method: 'POST', body: JSON.stringify(data) }),
+  updateFarmMarket: (farmId: string, relId: string, data: { priority?: number; notification_delay_min?: number; active?: boolean }) =>
+    request<any>(`/farms/${farmId}/markets/${relId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  getFarmAnalytics: (id: string) => request<any>(`/farms/${id}/analytics`),
+  getFarmMessages: (id: string) => request<any>(`/farms/${id}/messages`),
+
+  // Markets
+  getAllMarkets: () => request<any>('/markets'),
+  getMarket: (id: string) => request<any>(`/markets/${id}`),
+  getMarketAvailable: (id: string) => request<any>(`/markets/${id}/available`),
+  getMarketOrders: (id: string) => request<any>(`/markets/${id}/orders`),
+  getMarketMessages: (id: string) => request<any>(`/markets/${id}/messages`),
+  getMarketFarms: (id: string) => request<any>(`/markets/${id}/farms`),
+
+  // Inventory
+  getInventory: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/inventory${qs}`);
+  },
+  createInventory: (data: any) =>
+    request<any>('/inventory', { method: 'POST', body: JSON.stringify(data) }),
+  updateInventory: (id: string, data: any) =>
+    request<any>(`/inventory/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteInventory: (id: string) =>
+    request<any>(`/inventory/${id}`, { method: 'DELETE' }),
+  // Push this farm's available produce to Local Food Marketplace (ALFN).
+  syncToLfm: () =>
+    request<{
+      configured: boolean;
+      pushed: boolean;
+      item_count: number;
+      message: string;
+    }>('/inventory/sync-lfm', { method: 'POST', body: JSON.stringify({}) }),
+
+  // Products
+  getProducts: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/products${qs}`);
+  },
+  createProduct: (data: any) =>
+    request<any>('/products', { method: 'POST', body: JSON.stringify(data) }),
+
+  // Orders
+  getOrders: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/orders${qs}`);
+  },
+  getOrder: (id: string) => request<any>(`/orders/${id}`),
+  createOrder: (data: any) =>
+    request<any>('/orders', { method: 'POST', body: JSON.stringify(data) }),
+  updateOrderStatus: (id: string, status: string) =>
+    request<any>(`/orders/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+
+  // Analytics
+  getRevenue: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/analytics/revenue${qs}`);
+  },
+  getTopProducts: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/analytics/top-products${qs}`);
+  },
+  getMarketBreakdown: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/analytics/market-breakdown${qs}`);
+  },
+
+  // Deliveries
+  getDeliveries: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/deliveries${qs}`);
+  },
+
+  // Recurring orders
+  getRecurringOrders: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/recurring-orders${qs}`);
+  },
+  createRecurringOrder: (data: any) =>
+    request<any>('/recurring-orders', { method: 'POST', body: JSON.stringify(data) }),
+  updateRecurringOrder: (id: string, data: any) =>
+    request<any>(`/recurring-orders/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteRecurringOrder: (id: string) =>
+    request<any>(`/recurring-orders/${id}`, { method: 'DELETE' }),
 
   // Reminders
   getReminders: () => request<any>('/reminders'),
@@ -127,10 +185,55 @@ export const api = {
   deleteReminder: (id: string) =>
     request<any>(`/reminders/${id}`, { method: 'DELETE' }),
 
+  // Relationships
+  createRelationship: (data: any) =>
+    request<any>('/farm-market-rels', { method: 'POST', body: JSON.stringify(data) }),
+  updateRelationship: (id: string, data: any) =>
+    request<any>(`/farm-market-rels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  // Directory
+  directoryFarms: (params?: { search?: string; market_id?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params as any).toString() : '';
+    return request<any>(`/directory/farms${qs}`);
+  },
+  directoryMarkets: (params?: { search?: string; farm_id?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params as any).toString() : '';
+    return request<any>(`/directory/markets${qs}`);
+  },
+  connectionRequest: (data: { farm_id: string; market_id: string; initiated_by: 'farm' | 'market'; message?: string }) =>
+    request<any>('/directory/connect', { method: 'POST', body: JSON.stringify(data) }),
+  connectionRespond: (relId: string, accept: boolean) =>
+    request<any>(`/directory/connect/${relId}/respond`, { method: 'POST', body: JSON.stringify({ accept }) }),
+  pendingConnections: (params?: { farm_id?: string; market_id?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params as any).toString() : '';
+    return request<any>(`/directory/connect/pending${qs}`);
+  },
+
+  // SMS / Chat
+  getConversations: (params?: { role?: string; farm_id?: string; market_id?: string }) => {
+    const sp = new URLSearchParams();
+    if (params?.role) sp.set('role', params.role);
+    if (params?.farm_id) sp.set('farm_id', params.farm_id);
+    if (params?.market_id) sp.set('market_id', params.market_id);
+    const qs = sp.toString() ? `?${sp.toString()}` : '';
+    return request<{ conversations: ConversationSummary[] }>(`/sms/conversations${qs}`);
+  },
+  sendChat: (phone: string, message: string) =>
+    request<{ response: string }>('/sms/chat', {
+      method: 'POST',
+      body: JSON.stringify({ phone, message }),
+    }),
+  getChatHistory: (phone: string) =>
+    request<{ messages: ChatMessage[] }>(`/sms/history/${encodeURIComponent(phone)}`),
+
   // Profile
   getProfile: () => request<any>('/profile'),
   updateUser: (data: any) =>
     request<any>('/profile/user', { method: 'PUT', body: JSON.stringify(data) }),
+  updateFarm: (data: any) =>
+    request<any>('/profile/farm', { method: 'PUT', body: JSON.stringify(data) }),
+  updateMarket: (data: any) =>
+    request<any>('/profile/market', { method: 'PUT', body: JSON.stringify(data) }),
 
   // Feedback
   getFeedback: (params?: Record<string, string>) => {
@@ -145,179 +248,29 @@ export const api = {
   deleteFeedback: (id: string) =>
     request<any>(`/feedback/${id}`, { method: 'DELETE' }),
 
-  // Admin (broadcast)
+  // Admin
   getUtilization: () => request<any>('/admin/utilization'),
+  getAdminUsers: () => request<any>('/admin/users'),
   sendBroadcast: (data: { audience: 'farmers' | 'markets' | 'all'; message: string }) =>
     request<any>('/admin/broadcast', { method: 'POST', body: JSON.stringify(data) }),
   getBroadcasts: () => request<any>('/admin/broadcasts'),
 
-  // ── Phase 2 (contract §8.2) ──
-
-  // Markets
-  getPublicMarkets: () => request<{ markets: PublicMarket[] }>('/markets/public'),
-  getMarkets: () => request<{ markets: Market[] }>('/markets'),
-  getMarket: (id: string) => request<{ market: Market }>(`/markets/${id}`),
-  createMarket: (data: CreateMarketInput) =>
-    request<{ market: Market; generation: GenerateResult }>('/markets', { method: 'POST', body: JSON.stringify(data) }),
-  updateMarket: (id: string, data: Partial<UpdateMarketInput>) =>
-    request<{ market: Market; generation?: GenerateResult }>(`/markets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  addScheduleVersion: (id: string, data: ScheduleVersionInput) =>
-    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/versions`, { method: 'POST', body: JSON.stringify(data) }),
-  deleteScheduleVersion: (id: string, versionId: string) =>
-    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/versions/${versionId}`, { method: 'DELETE' }),
-  setSkippedDates: (id: string, skipped_dates: SkippedDate[]) =>
-    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/skipped`, { method: 'PUT', body: JSON.stringify({ skipped_dates }) }),
-  setSpecialDates: (id: string, special_dates: SpecialDate[]) =>
-    request<{ market: Market; generation: GenerateResult }>(`/markets/${id}/schedule/special`, { method: 'PUT', body: JSON.stringify({ special_dates }) }),
-  generateDates: (id: string, scope: 'window' | 'season' = 'window') =>
-    request<{ generation: GenerateResult }>(`/markets/${id}/dates/generate`, { method: 'POST', body: JSON.stringify({ scope }) }),
-  getMarketDates: (id: string, params?: { from?: string; to?: string; status?: string }) =>
-    request<{ dates: MarketDate[] }>(`/markets/${id}/dates${qs(params)}`),
-  updateMarketDate: (id: string, dateId: string, data: UpdateMarketDateInput) =>
-    request<{ date: MarketDate }>(`/markets/${id}/dates/${dateId}`, { method: 'PATCH', body: JSON.stringify(data) }),
-
-  // Producers / memberships / check-ins
-  getProducers: (params?: { market_id?: string; status?: string; season?: string; q?: string; include_inactive?: 'true' }) =>
-    request<{ producers: ProducerListItem[] }>(`/producers${qs(params)}`),
-  getProducer: (id: string) =>
-    request<{
-      producer: Producer;
-      memberships: Membership[];
-      checkins_summary: { count: number; last_submitted_at: string | null };
-      /** Phase 4 (contract 3.3). Absent from servers that predate it. */
-      current_season_by_market?: Record<string, string>;
-      invite?: { token_url: string; sent_at: string } | null;
-    }>(`/producers/${id}`),
-  createProducer: (data: CreateProducerInput) =>
-    request<{ producer: Producer; memberships: Membership[] }>('/producers', { method: 'POST', body: JSON.stringify(data) }),
-  updateProducer: (id: string, data: Partial<UpdateProducerInput>) =>
-    request<{ producer: Producer }>(`/producers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  getMemberships: (params: { market_id: string } | { producer_id: string }) =>
-    request<{ memberships: MembershipWithProducer[] }>(`/memberships${qs(params)}`),
-  createMembership: (data: {
-    producer_id: string;
-    market_id: string;
-    season?: string;
-    status?: MembershipStatus;
-    fee_plan?: FeePlan;
-    spaces?: 1 | 2;
-    electric?: boolean;
-    pay_in_full?: boolean;
-    booth_kind?: 'stall' | 'food_truck';
-    usual_booth_id?: string | null;
-  }) =>
-    request<{ membership: Membership }>('/memberships', { method: 'POST', body: JSON.stringify(data) }),
-  updateMembership: (
-    id: string,
-    data: {
-      status?: MembershipStatus;
-      fee_plan?: FeePlan;
-      usual_booth_id?: string | null;
-      note?: string;
-      spaces?: 1 | 2;
-      electric?: boolean;
-      pay_in_full?: boolean;
-      booth_kind?: 'stall' | 'food_truck';
-      trial_period?: boolean;
-    },
-  ) =>
-    request<{ membership: Membership }>(`/memberships/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  getCheckins: (params: { market_date_id: string } | { producer_id: string }) =>
-    request<{ checkins: Checkin[] }>(`/checkins${qs(params)}`),
-
-  // Staff users, audit, dashboard, providers
-  getStaffUsers: () => request<{ users: StaffUser[] }>('/admin/users'),
-  inviteStaffUser: (data: { phone: string; name: string; role: 'admin' | 'market_manager'; assigned_market_ids: string[]; email?: string }) =>
-    request<{ user: StaffUser; sms: SmsOutcome }>('/admin/users/invite', { method: 'POST', body: JSON.stringify(data) }),
-  resendStaffInvite: (id: string) =>
-    request<{ sms: SmsOutcome }>(`/admin/users/${id}/resend-invite`, { method: 'POST' }),
-  updateStaffUser: (
-    id: string,
-    data: Partial<{ name: string; email: string | null; role: 'admin' | 'market_manager'; assigned_market_ids: string[]; active: boolean }>,
-  ) => request<{ user: StaffUser }>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  getAuditLog: (params?: { limit?: number; collection?: string; actor_id?: string; action_prefix?: string }) =>
-    request<{ entries: AuditEntry[] }>(`/audit-log${qs(params)}`),
-  getDashboard: () => request<{ generated_at: string; markets: DashboardCard[] }>('/dashboard'),
-  getProviders: () => request<Providers>('/admin/providers'),
-
-  // ── Phase 3 (contract §6.2) ──
-  getCheckinByToken: (t: string) => request<CheckinTokenView>(`/checkin/${encodeURIComponent(t)}`),
-  submitCheckin: (t: string, data: CheckinSubmitInput) =>
-    request<{ ok: true; checkin: CheckinFormValues & { submitted_at: string; submissions: number } }>(
-      `/checkin/${encodeURIComponent(t)}`,
-      { method: 'POST', body: JSON.stringify(data) },
-    ),
-  getMarketDateStatus: (id: string) => request<MarketDateStatusView>(`/market-dates/${encodeURIComponent(id)}/status`),
-  // ── Phase 4 fix (booth side): cycle-aware booth assignments. `cycle` is 'next' (a date's check-ins assign the
-  //    next market) or 'opener' (the season's first market date assigns itself). Types live in phase4-types.ts.
-  getMarketDateBoothStatus: (id: string) =>
-    request<Omit<MarketDateStatusView, 'assignments'> & import('./phase4-types').MarketDateBoothViews>(
-      `/market-dates/${encodeURIComponent(id)}/status`,
-    ),
-  draftBoothAssignments: (dateId: string, data: { cycle: import('./phase4-types').AssignmentCycleMode; redraft: boolean }) =>
-    request<{ draft: import('./phase4-types').BoothDraftResult; assignments: import('./phase4-types').BoothAssignmentsView }>(
-      `/market-dates/${encodeURIComponent(dateId)}/assignments/draft`,
-      { method: 'POST', body: JSON.stringify(data) },
-    ),
-  updateBoothAssignments: (
-    dateId: string,
-    data: { cycle: import('./phase4-types').AssignmentCycleMode; changes: { producer_id: string; booth_ids: string[] }[] },
-  ) =>
-    request<import('./phase4-types').BoothAssignmentsUpdateResult>(`/market-dates/${encodeURIComponent(dateId)}/assignments`, {
-      method: 'PATCH',
-      body: JSON.stringify(data),
-    }),
-  approveBoothAssignments: (dateId: string, data: { cycle: import('./phase4-types').AssignmentCycleMode }) =>
-    request<{ assignments: import('./phase4-types').BoothAssignmentsView; texts: import('./phase4-types').BoothApproveTexts }>(
-      `/market-dates/${encodeURIComponent(dateId)}/assignments/approve`,
-      { method: 'POST', body: JSON.stringify(data) },
-    ),
-  resendBoothText: (dateId: string, producer_id: string, cycle: import('./phase4-types').AssignmentCycleMode) =>
-    request<import('./phase4-types').BoothTextResendResult>(
-      `/market-dates/${encodeURIComponent(dateId)}/assignments/resend-text${qs({ producer_id, cycle })}`,
-      { method: 'POST' },
-    ),
-  resendCheckin: (id: string, producer_id: string) =>
-    request<{ sms: SmsOutcome; token_expires_at: string; message_id: string | null }>(
-      `/market-dates/${encodeURIComponent(id)}/resend-checkin${qs({ producer_id })}`,
-      { method: 'POST' },
-    ),
-  closeMarketDate: (id: string, data: { notify: boolean }) =>
-    request<{ result: CloseResult; date: MarketDate }>(`/market-dates/${encodeURIComponent(id)}/close`, {
+  // Uploads
+  uploadImage: async (file: File): Promise<{ url: string; filename: string }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${API_BASE}/uploads`, {
       method: 'POST',
-      body: JSON.stringify(data),
-    }),
-
-  // ── Phase 4 (contract 4.2) ──
-  getApplicationsV2: (p?: { market_id?: string; season?: string; status?: string; fee?: string; category?: string; returning?: 'true' | 'false'; q?: string }) =>
-    request<{ applications: ApplicationListItem[] }>(`/applications${qs(p)}`),
-  getApplicationV2: (id: string) =>
-    request<{ application: ApplicationDoc; uploads: UploadMeta[]; producer: { id: string; business_name: string } | null; prior_memberships: Membership[] }>(`/applications/${id}`),
-  getApplicationUploadUrl: (id: string, uploadId: string) =>
-    request<{ url: string; expires_at: string }>(`/applications/${id}/uploads/${uploadId}/url`),
-  patchApplication: (id: string, data: ApplicationAction) =>
-    request<{ application: ApplicationDoc; producer?: Producer; membership?: Membership; sends?: { sms: string; email: boolean; quiet_until?: string | null } }>(`/applications/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  /** `completed`: an earlier invite had its missing text or email sent now. `quiet_until`: the text is held until then. A 409 carries `code` and `quiet_until` on `ApiError.body`. */
-  inviteProducer: (id: string, market_id: string, force = false) =>
-    request<{ invite: ApplicationInvite; url: string; completed?: boolean; quiet_until?: string | null }>(`/producers/${id}/invite${qs({ market_id, force: force ? 'true' : undefined })}`, { method: 'POST' }),
-  inviteMarket: (id: string, data: { season?: string; force?: boolean; dry_run?: boolean }) =>
-    request<InviteBatchResult & InviteBatchExtras>(`/markets/${id}/invite-reapply`, { method: 'POST', body: JSON.stringify(data) }),
-  membershipItems: (id: string, data: { action: 'approve' | 'decline'; request_id: string } | { action: 'add'; items: string[] }) =>
-    request<{ membership: Membership }>(`/memberships/${id}/items`, { method: 'POST', body: JSON.stringify(data) }),
-  updateInsurance: (id: string, data: InsuranceUpdate) =>
-    request<{ membership: Membership }>(`/memberships/${id}/insurance`, { method: 'PATCH', body: JSON.stringify(data) }),
-  sendAgreementLink: (id: string, send = true) =>
-    request<{ url: string; expires_at: string; sms: string }>(`/memberships/${id}/agreement-link`, { method: 'POST', body: JSON.stringify({ send }) }),
-  getBooths: (marketId: string, includeInactive = false) =>
-    request<{ booths: BoothDoc[] }>(`/markets/${marketId}/booths${qs({ include_inactive: includeInactive ? 'true' : undefined })}`),
-  createBooth: (marketId: string, data: BoothInput) =>
-    request<{ booth: BoothDoc }>(`/markets/${marketId}/booths`, { method: 'POST', body: JSON.stringify(data) }),
-  seedBooths: (marketId: string, data: BoothSeedInput) =>
-    request<{ created: number; existing: number }>(`/markets/${marketId}/booths/seed`, { method: 'POST', body: JSON.stringify(data) }),
-  updateBooth: (marketId: string, boothId: string, data: Partial<BoothInput> & { active?: boolean }) =>
-    request<{ booth: BoothDoc }>(`/markets/${marketId}/booths/${boothId}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  retireBooth: (marketId: string, boothId: string) =>
-    request<{ booth: BoothDoc }>(`/markets/${marketId}/booths/${boothId}`, { method: 'DELETE' }),
-  reorderBooths: (marketId: string, rows: { row: string; booth_ids: string[] }[]) =>
-    request<{ booths: BoothDoc[] }>(`/markets/${marketId}/booths/reorder`, { method: 'PUT', body: JSON.stringify({ rows }) }),
+      headers,
+      body: formData,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || body.message || `Upload failed ${res.status}`);
+    }
+    return res.json();
+  },
 };

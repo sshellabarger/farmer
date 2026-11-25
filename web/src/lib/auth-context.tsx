@@ -3,34 +3,32 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { api } from './api';
 
-export interface AuthUser {
+interface AuthUser {
   id: string;
   name: string;
   role: string;
   phone: string;
-  email: string | null;
-  assigned_market_ids: string[];
 }
 
-/** Fill the Phase 2 fields the API may omit (older tokens, legacy users). */
-function toAuthUser(raw: any): AuthUser {
-  return {
-    id: String(raw?.id ?? ''),
-    name: String(raw?.name ?? ''),
-    role: String(raw?.role ?? ''),
-    phone: String(raw?.phone ?? ''),
-    email: typeof raw?.email === 'string' ? raw.email : null,
-    assigned_market_ids: Array.isArray(raw?.assigned_market_ids) ? raw.assigned_market_ids.map(String) : [],
-  };
+interface AuthFarm {
+  id: string;
+  name: string;
+}
+
+interface AuthMarket {
+  id: string;
+  name: string;
 }
 
 interface AuthContextType {
   user: AuthUser | null;
+  farm: AuthFarm | null;
+  market: AuthMarket | null;
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
   requestOtp: (phone: string) => Promise<void>;
-  login: (phone: string, code: string) => Promise<{ role: string }>;
+  login: (phone: string, code: string) => Promise<{ role: string; hasFarm: boolean; hasMarket: boolean }>;
   logout: () => void;
 }
 
@@ -38,12 +36,15 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [farm, setFarm] = useState<AuthFarm | null>(null);
+  const [market, setMarket] = useState<AuthMarket | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Check existing token on mount. Also capture a token passed in the URL
-  // (?token=...) — harmless, and it keeps any still-circulating v1 links
-  // from bouncing straight to /login before the session is bootstrapped.
+  // (?token=...) from an SMS "view-link" — this must happen BEFORE we decide
+  // the user is logged out, otherwise clicking a texted dashboard link bounces
+  // to /login.
   useEffect(() => {
     let stored = localStorage.getItem('farmlink_token');
 
@@ -68,7 +69,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(stored);
     api.getMe()
       .then((data) => {
-        setUser(toAuthUser(data.user));
+        setUser(data.user);
+        setFarm(data.farm);
+        setMarket(data.market);
       })
       .catch(() => {
         localStorage.removeItem('farmlink_token');
@@ -86,23 +89,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!data?.token || !data?.user) {
       throw new Error('Login failed — no session returned. Please try again.');
     }
-    const user = toAuthUser(data.user);
     localStorage.setItem('farmlink_token', data.token);
     setToken(data.token);
-    setUser(user);
-    return { role: user.role };
+    setUser(data.user);
+    setFarm(data.farm);
+    setMarket(data.market);
+    return {
+      role: data.user.role,
+      hasFarm: !!data.farm,
+      hasMarket: !!data.market,
+    };
   }, []);
 
   const logout = useCallback(() => {
     localStorage.removeItem('farmlink_token');
     setToken(null);
     setUser(null);
+    setFarm(null);
+    setMarket(null);
   }, []);
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        farm,
+        market,
         token,
         isLoading,
         isAuthenticated: !!user,

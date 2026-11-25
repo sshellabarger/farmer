@@ -14,7 +14,7 @@ function normalizePhone(raw: string): string {
 export async function inviteRoutes(app: FastifyInstance) {
   const auth = authenticate(app);
 
-  // POST /api/invite — text an invitation to join.
+  // POST /api/invite — text an invitation to a prospective farm or market.
   app.post('/', { preHandler: [auth] }, async (request, reply) => {
     const schema = z.object({
       phone: z.string().min(10),
@@ -23,31 +23,37 @@ export async function inviteRoutes(app: FastifyInstance) {
     const { phone, name } = schema.parse(request.body);
     const user = request.authUser!;
 
-    // Inviter display name comes from the users doc (no business lookup).
+    // Resolve the inviter's display name + business.
     const userDoc = await app.db.collection('users').doc(user.id).get();
     const inviterName = userDoc.data()?.name || 'A FarmLink member';
 
+    let business = '';
+    if (user.farmId) {
+      const f = await app.db.collection('farms').doc(user.farmId).get();
+      business = f.data()?.name || '';
+    } else if (user.marketId) {
+      const m = await app.db.collection('markets').doc(user.marketId).get();
+      business = m.data()?.name || '';
+    }
+
     const to = normalizePhone(phone);
     const greeting = name ? `Hi ${name}! ` : 'Hi! ';
-    const body = `${greeting}${inviterName} invited you to FarmLink, the St. Joseph Center of Arkansas farmers market manager. Learn more: ${app.env.APP_URL}`;
+    const inviter = business ? `${inviterName} at ${business}` : inviterName;
+    const body = `${greeting}${inviter} wants you to join FarmLink — a free, text-first way to connect local farms and markets. Sign up here: ${app.env.APP_URL}/signup`;
 
-    // Logged to `messages` (kind 'invite') by sendSms; the invitee has no
-    // user yet, so user_id records the inviter.
-    let messageId: string;
     try {
-      const result = await sendSms({ env: app.env, db: app.db, to, body, kind: 'invite', user_id: user.id, sent_by: user.id });
-      messageId = result.message_id;
+      await sendSms({ env: app.env, to, body });
     } catch (err) {
       app.log.error({ err, to }, 'Failed to send invite SMS');
       return reply.status(502).send({ error: 'Could not send the invitation text. Please check the number and try again.' });
     }
 
-    // Record the invite (best-effort) for follow-up.
+    // Record the invite (best-effort) for follow-up/analytics.
     await app.db.collection('invites').add({
       invited_phone: to,
       invited_name: name || null,
       invited_by: user.id,
-      message_id: messageId,
+      inviter_business: business || null,
       created_at: new Date(),
     }).catch(() => {});
 

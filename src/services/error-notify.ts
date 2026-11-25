@@ -90,9 +90,7 @@ async function researchFix(env: Env, classified: ClassifiedError, ctx: NotifyCon
   // Don't call Anthropic if the error IS an Anthropic problem (it would also fail).
   if (classified.isAnthropicError || !env.ANTHROPIC_API_KEY) return undefined;
   try {
-    // Bounded: the notifier runs inside scheduler invocations with a 120 s
-    // request timeout, so it must never wait on retries or a slow API.
-    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 15_000, maxRetries: 0 });
+    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
     const detail = classified.raw instanceof Error
       ? `${classified.raw.message}\n\n${classified.raw.stack || ''}`
       : String(classified.raw);
@@ -162,7 +160,7 @@ export async function notifyError({
       const shortMsg = classified.message.split('\n')[0].slice(0, 100);
       const fix = (aiAnalysis?.split('\n')[0] || getFixHintText(classified.category)).slice(0, 220);
       const body = `⚠️ FarmLink ${classified.category}\n${shortMsg}\n\nFix: ${fix}`;
-      await sendSms({ env, db: getDb(), to: env.ALERT_PHONE, body, kind: 'alert' });
+      await sendSms({ env, to: env.ALERT_PHONE, body });
     } catch (e) {
       console.error('[error-notify] sms failed:', e instanceof Error ? e.message : e);
     }

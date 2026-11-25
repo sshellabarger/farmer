@@ -1,5 +1,4 @@
 import type { Env } from '../config/env.js';
-import { getDb } from '../db/firestore.js';
 import { sendSms } from './sms.js';
 import { sendEmail } from './email.js';
 
@@ -16,7 +15,7 @@ export async function notifySupportFeedback(
 
   if (env.ALERT_PHONE) {
     const body = `📋 New ${label} from ${opts.submittedBy} (${opts.source}):\n"${opts.title}"`;
-    sendSms({ env, db: getDb(), to: env.ALERT_PHONE, body, kind: 'support' }).catch((e) =>
+    sendSms({ env, to: env.ALERT_PHONE, body }).catch((e) =>
       console.warn('[support-notify] SMS failed:', e instanceof Error ? e.message : e),
     );
   }
