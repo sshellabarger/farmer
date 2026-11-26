@@ -13,6 +13,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "seed": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 tsx src/db/seed-dev.ts",
+    "sandbox:wholesale": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 tsx src/db/sandbox-wholesale-check.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

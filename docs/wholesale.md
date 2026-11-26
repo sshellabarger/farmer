@@ -34,9 +34,13 @@ A fee rule: `name`, `code`, `percent` and/or `flat_cents`, `payer` (buyer or far
 | `POST /payouts/run` | Build the payout draft (also runs Tuesdays 6am CT) |
 | `GET /payouts/:payDay`, `PUT /payouts/:payDay/status` | Review it; mark reviewed or paid (then never rebuilt) |
 
+## Sandbox check
+
+`npm run sandbox:wholesale` (with `npm run emulators` running and `npm run seed` done once) runs the real order code against the Square sandbox and prints PASS or FAIL for each step: certificate block, delivery order with no tax, check-in with short items, the once-per-day delivery fee, invoicing, and the payout search. It cancels its orders and restores the test buyer afterwards. It refuses to run unless `SQUARE_ENVIRONMENT=sandbox`. Fee amounts and prices in it are test values only.
+
 ## Still open
 
 - Whether a restaurant's food purchases count as resale, and certificate retention (rule GR-79).
 - Refund policy: refunds are listed on the payout for staff to decide; nothing is deducted automatically.
 - Whether fee income counts as LFPP program income.
-- To test in the Square sandbox: DELIVERY fulfillments, service charges on invoices, line `blocked_taxes`, LINE_ITEM taxes on service charges, and editing line quantities before the invoice.
+- Not covered by the sandbox check: taxed fees (fees are untaxed) and paying an invoice.
