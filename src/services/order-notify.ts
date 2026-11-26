@@ -117,7 +117,12 @@ export async function notifyOrder({ db, env }: Deps, order: SquareOrder, actor?:
       if (actor !== 'farm') out.push({ to: farm.phone, body: `Order ${n} was cancelled.` });
       if (actor !== 'buyer') out.push({ to: buyer.phone, body: `Order ${n} was cancelled.` });
     } else {
-      const words = { confirmed: 'is confirmed', in_transit: `is at the depot, ready for pickup: ${DEPOT.short}`, delivered: 'was picked up' }[status];
+      const delivery = order.fulfillments?.[0]?.type === 'DELIVERY';
+      const words = {
+        confirmed: 'is confirmed',
+        in_transit: delivery ? 'is checked in at the depot and out for delivery soon' : `is checked in at the depot, ready for pickup: ${DEPOT.short}`,
+        delivered: delivery ? 'was delivered' : 'was picked up',
+      }[status];
       invoiceAttached = !!invoiceText;
       out.push({ to: buyer.phone, body: `Order ${n} ${words}.${invoiceText ? ` ${invoiceText}` : ''}` });
     }

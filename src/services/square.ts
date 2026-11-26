@@ -361,6 +361,15 @@ export async function getStockCounts(env: SquareEnv, variationIds: string[]): Pr
 
 export type FulfillmentState = 'PROPOSED' | 'RESERVED' | 'PREPARED' | 'COMPLETED' | 'CANCELED' | 'FAILED';
 
+export interface SquareServiceCharge {
+  uid?: string;
+  name?: string;
+  percentage?: string;
+  amount_money?: { amount: number; currency: string };
+  applied_money?: { amount: number };
+  total_money?: { amount: number };
+}
+
 export interface SquareOrder {
   id: string;
   version: number;
@@ -368,21 +377,76 @@ export interface SquareOrder {
   reference_id?: string;
   customer_id?: string;
   created_at?: string;
+  updated_at?: string;
+  closed_at?: string;
   metadata?: Record<string, string>;
   total_money?: { amount: number; currency: string };
   net_amount_due_money?: { amount: number };
-  line_items?: Array<{ uid: string; name?: string; quantity: string; catalog_object_id?: string; base_price_money?: { amount: number }; total_money?: { amount: number } }>;
-  fulfillments?: Array<{ uid: string; type: string; state: FulfillmentState; pickup_details?: { pickup_at?: string; note?: string } }>;
+  line_items?: Array<{
+    uid: string; name?: string; quantity: string; catalog_object_id?: string;
+    base_price_money?: { amount: number }; gross_sales_money?: { amount: number }; total_money?: { amount: number };
+  }>;
+  service_charges?: SquareServiceCharge[];
+  taxes?: Array<{ uid?: string; catalog_object_id?: string; scope?: string }>;
+  refunds?: Array<{ id: string; status?: string; created_at?: string; amount_money?: { amount: number }; reason?: string }>;
+  fulfillments?: Array<{
+    uid: string; type: string; state: FulfillmentState;
+    pickup_details?: { pickup_at?: string; note?: string };
+    delivery_details?: { deliver_at?: string; note?: string };
+  }>;
 }
 
-export async function createPickupOrder(
+export interface OrderAddress { street: string; city: string; state: string; zip: string }
+
+/**
+ * Create a wholesale order at the wholesale location: a PICKUP at the depot or
+ * a DELIVERY to the buyer.
+ *
+ * Tax (wholesale buyers are exempt): the order carries no catalog taxes and
+ * auto-apply is off, so Square adds none. Each line also blocks the seller's
+ * catalog taxes (`blockTaxIds`) as a backstop. Buyer-paid fees go on as service
+ * charges; `taxes` holds only the LINE_ITEM-scoped taxes those fees reference
+ * (empty unless fees are set to be taxed).
+ */
+export async function createWholesaleOrder(
   env: SquareEnv,
   args: {
     customerId: string; buyerName: string; orderNumber: string; metadata: Record<string, string>;
-    lines: Array<{ variationId: string; quantity: number }>; pickupAt: Date; note?: string; key: string;
+    lines: Array<{ variationId: string; quantity: number }>; at: Date; note?: string; key: string;
+    fulfillment: 'pickup' | 'delivery'; address?: OrderAddress;
+    serviceCharges?: Array<Record<string, unknown>>; taxes?: Array<Record<string, unknown>>; blockTaxIds?: string[];
   },
 ): Promise<SquareOrder> {
-  if (!env.SQUARE_LOCATION_ID) throw new Error('SQUARE_LOCATION_ID (the depot) is not set');
+  if (!env.SQUARE_LOCATION_ID) throw new Error('SQUARE_LOCATION_ID (the wholesale location) is not set');
+  if (args.fulfillment === 'delivery' && !args.address) throw new Error('A delivery order needs the buyer address');
+  const note = args.note ? { note: args.note.slice(0, 500) } : {};
+  const recipient = { customer_id: args.customerId, display_name: args.buyerName };
+  const fulfillment = args.fulfillment === 'delivery'
+    ? {
+        type: 'DELIVERY',
+        state: 'PROPOSED',
+        delivery_details: {
+          recipient: {
+            ...recipient,
+            address: {
+              address_line_1: args.address!.street,
+              locality: args.address!.city,
+              administrative_district_level_1: args.address!.state,
+              postal_code: args.address!.zip,
+              country: 'US',
+            },
+          },
+          schedule_type: 'SCHEDULED',
+          deliver_at: args.at.toISOString(),
+          ...note,
+        },
+      }
+    : {
+        type: 'PICKUP',
+        state: 'PROPOSED',
+        pickup_details: { recipient, schedule_type: 'SCHEDULED', pickup_at: args.at.toISOString(), ...note },
+      };
+  const blocked = (args.blockTaxIds ?? []).map((id, i) => ({ uid: `block-${i}`, tax_catalog_object_id: id }));
   const res = await squareRequest<{ order: SquareOrder }>(env, 'POST', '/v2/orders', {
     idempotency_key: idempotencyKey('order', args.key),
     order: {
@@ -390,19 +454,15 @@ export async function createPickupOrder(
       customer_id: args.customerId,
       reference_id: args.orderNumber,
       metadata: args.metadata,
-      line_items: args.lines.map((l) => ({ catalog_object_id: l.variationId, quantity: String(l.quantity) })),
-      fulfillments: [
-        {
-          type: 'PICKUP',
-          state: 'PROPOSED',
-          pickup_details: {
-            recipient: { customer_id: args.customerId, display_name: args.buyerName },
-            schedule_type: 'SCHEDULED',
-            pickup_at: args.pickupAt.toISOString(),
-            ...(args.note ? { note: args.note.slice(0, 500) } : {}),
-          },
-        },
-      ],
+      pricing_options: { auto_apply_taxes: false, auto_apply_discounts: false },
+      line_items: args.lines.map((l) => ({
+        catalog_object_id: l.variationId,
+        quantity: String(l.quantity),
+        ...(blocked.length ? { pricing_blocklists: { blocked_taxes: blocked } } : {}),
+      })),
+      ...(args.taxes?.length ? { taxes: args.taxes } : {}),
+      ...(args.serviceCharges?.length ? { service_charges: args.serviceCharges } : {}),
+      fulfillments: [fulfillment],
     },
   });
   return res.order;
@@ -418,30 +478,43 @@ export function orderPaid(order: SquareOrder): boolean {
 }
 
 /**
- * Move the pickup along, set metadata, or cancel the whole order. Uses the
- * order version for optimistic locking. `metadata` replaces the whole map.
+ * Move the pickup or delivery along, set metadata, change line quantities
+ * (check-in), add service charges, or cancel the whole order. Uses the order
+ * version for optimistic locking. `metadata` replaces the whole map.
+ * A line set to quantity 0 is removed.
  */
 export async function updateOrder(
   env: SquareEnv,
   order: SquareOrder,
-  change: { state?: FulfillmentState; note?: string; metadata?: Record<string, string> },
+  change: {
+    state?: FulfillmentState; note?: string; metadata?: Record<string, string>;
+    lines?: Array<{ uid: string; quantity: number }>;
+    addServiceCharges?: Array<Record<string, unknown>>; addTaxes?: Array<Record<string, unknown>>;
+  },
 ): Promise<SquareOrder> {
   const f = order.fulfillments?.[0];
-  if (!f) throw new Error('Order has no pickup fulfillment');
+  if (!f) throw new Error('Order has no fulfillment');
+  const details = f.type === 'DELIVERY' ? 'delivery_details' : 'pickup_details';
+  const kept = (change.lines ?? []).filter((l) => l.quantity > 0);
+  const removed = (change.lines ?? []).filter((l) => !(l.quantity > 0));
   const res = await squareRequest<{ order: SquareOrder }>(env, 'PUT', `/v2/orders/${encodeURIComponent(order.id)}`, {
     idempotency_key: idempotencyKey('order-update', order.id, String(order.version), JSON.stringify(change)),
+    ...(removed.length ? { fields_to_clear: removed.map((l) => `line_items[${l.uid}]`) } : {}),
     order: {
       location_id: env.SQUARE_LOCATION_ID,
       version: order.version,
       ...(change.state === 'CANCELED' ? { state: 'CANCELED' } : {}),
       ...(change.metadata ? { metadata: change.metadata } : {}),
+      ...(kept.length ? { line_items: kept.map((l) => ({ uid: l.uid, quantity: String(l.quantity) })) } : {}),
+      ...(change.addTaxes?.length ? { taxes: change.addTaxes } : {}),
+      ...(change.addServiceCharges?.length ? { service_charges: change.addServiceCharges } : {}),
       ...(change.state || change.note
         ? {
             fulfillments: [
               {
                 uid: f.uid,
                 ...(change.state ? { state: change.state } : {}),
-                ...(change.note ? { pickup_details: { note: change.note.slice(0, 500) } } : {}),
+                ...(change.note ? { [details]: { note: change.note.slice(0, 500) } } : {}),
               },
             ],
           }
@@ -449,6 +522,40 @@ export async function updateOrder(
     },
   });
   return res.order;
+}
+
+/**
+ * Wholesale-location orders whose `closed_at` or `updated_at` falls in
+ * [start, end), oldest first. Square allows a time filter on one field, with
+ * the sort on that same field; `closed_at` applies to COMPLETED orders only.
+ */
+export async function searchOrdersByTime(
+  env: SquareEnv,
+  field: 'closed_at' | 'updated_at',
+  start: Date,
+  end: Date,
+  states: Array<SquareOrder['state']> = ['COMPLETED'],
+): Promise<SquareOrder[]> {
+  if (!env.SQUARE_LOCATION_ID) throw new Error('SQUARE_LOCATION_ID (the wholesale location) is not set');
+  const out: SquareOrder[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await squareRequest<{ orders?: SquareOrder[]; cursor?: string }>(env, 'POST', '/v2/orders/search', {
+      location_ids: [env.SQUARE_LOCATION_ID],
+      limit: 500,
+      query: {
+        filter: {
+          state_filter: { states },
+          date_time_filter: { [field]: { start_at: start.toISOString(), end_at: end.toISOString() } },
+        },
+        sort: { sort_field: field === 'closed_at' ? 'CLOSED_AT' : 'UPDATED_AT', sort_order: 'ASC' },
+      },
+      ...(cursor ? { cursor } : {}),
+    });
+    out.push(...(res.orders ?? []));
+    cursor = res.cursor || undefined;
+  } while (cursor);
+  return out;
 }
 
 /** Orders at the depot, newest first. `maxPages` bounds the scan (500 per page). */

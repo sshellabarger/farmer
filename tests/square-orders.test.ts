@@ -20,7 +20,12 @@ const docs: Record<string, Record<string, Record<string, unknown>>> = {
     f1: { user_id: 'farmer1', name: 'Test Farm', phone: '+15015550101', square_vendor_id: 'V1' },
     f2: { user_id: 'farmer2', name: 'Other Farm', phone: '+15015550102', square_vendor_id: 'V2' },
   },
-  markets: { b1: { user_id: 'buyer1', name: 'Test Kitchen', phone: '+15015550103', square_customer_id: 'C1' } },
+  markets: { b1: {
+    user_id: 'buyer1', name: 'Test Kitchen', phone: '+15015550103', square_customer_id: 'C1',
+    physical_address: { street: '1 Test St', city: 'Little Rock', state: 'AR', zip: '72201' },
+    tax_exempt: { status: 'exempt_resale', certificate_type: 'ST-391', signed_date: '2026-11-01', verified_at: '2026-11-02T00:00:00Z' },
+  } },
+  users: { admin1: { role: 'admin' } },
 };
 // Minimal Firestore fake: fixed farms/markets plus a writable store for the app's own collections.
 const store = new Map<string, Record<string, unknown>>();
@@ -35,7 +40,10 @@ const docRef = (name: string, id: string) => ({
     store.set(`${name}/${id}`, data);
   },
   delete: async () => { store.delete(`${name}/${id}`); },
+  set: async (data: Record<string, unknown>) => { store.set(`${name}/${id}`, data); },
+  update: async (data: Record<string, unknown>) => { updates.push({ key: `${name}/${id}`, data }); },
 });
+const updates: Array<{ key: string; data: Record<string, unknown> }> = [];
 const db = {
   collection: (name: string) => ({
     where: (_f: string, _o: string, uid: string) => ({ limit: () => ({ get: async () => {
@@ -43,6 +51,10 @@ const db = {
       return { empty: hit.length === 0, docs: hit };
     } }) }),
     doc: (id: string) => docRef(name, id),
+    get: async () => {
+      const rows = [...store.entries()].filter(([k]) => k.startsWith(`${name}/`)).map(([k, d]) => ({ id: k.slice(name.length + 1), data: () => d }));
+      return { docs: rows };
+    },
   }),
   runTransaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({
     get: (ref: ReturnType<typeof docRef>) => ref.get(),
@@ -69,10 +81,11 @@ describe('square orders', () => {
   let calls: Array<{ method: string; path: string; body: any }>;
   let openOrders: unknown[];
   let stored: ReturnType<typeof squareOrder>;
+  let o2State = 'OPEN';
   let invoice: { id: string; version: number; status: string; order_id: string; public_url?: string; payment_requests?: unknown[] } | undefined;
 
   beforeEach(() => {
-    calls = []; openOrders = []; stored = squareOrder(); invoice = undefined; sendSms.mockClear(); store.clear();
+    calls = []; openOrders = []; o2State = 'OPEN'; stored = squareOrder(); invoice = undefined; sendSms.mockClear(); store.clear(); updates.length = 0;
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: { method: string; body?: string }) => {
       const body = init.body ? JSON.parse(init.body) : undefined;
       const path = new URL(url).pathname;
@@ -83,12 +96,22 @@ describe('square orders', () => {
       else if (path === '/v2/orders/search') json = { orders: openOrders };
       else if (path === '/v2/orders' && init.method === 'POST') json = { order: squareOrder({ reference_id: body.order.reference_id }) };
       else if (path === '/v2/orders/ORDER1' && init.method === 'GET') json = { order: stored };
+      else if (path === '/v2/orders/O2' && init.method === 'GET') json = { order: squareOrder({ id: 'O2', state: o2State }) };
       else if (path === '/v2/orders/ORDER1' && init.method === 'PUT') {
         // Behave like Square: apply the change and bump the version.
+        const cleared = (body.fields_to_clear ?? []).map((f: string) => f.slice('line_items['.length, -1));
+        const lines = stored.line_items
+          .filter((li: any) => !cleared.includes(li.uid))
+          .map((li: any) => {
+            const ch = body.order.line_items?.find((l: any) => l.uid === li.uid);
+            return ch ? { ...li, quantity: ch.quantity, total_money: { amount: 400 * Number(ch.quantity) } } : li;
+          });
         stored = {
           ...stored, version: stored.version + 1, state: body.order.state ?? stored.state, metadata: body.order.metadata ?? stored.metadata,
+          line_items: lines,
+          service_charges: [...((stored as any).service_charges ?? []), ...(body.order.service_charges ?? [])],
           fulfillments: [{ ...stored.fulfillments[0], state: body.order.fulfillments?.[0]?.state ?? stored.fulfillments[0].state }],
-        };
+        } as any;
         json = { order: stored };
       } else if (path === '/v2/invoices' && init.method === 'POST') {
         invoice = { id: 'INV1', version: 0, status: 'DRAFT', order_id: body.invoice.order_id, payment_requests: body.invoice.payment_requests };
@@ -129,6 +152,81 @@ describe('square orders', () => {
     expect((sendSms.mock.calls[0] as any)[0].to).toBe('+15015550101');
   });
 
+  it('refuses a wholesale order until the buyer has a verified tax certificate', async () => {
+    const saved = docs.markets.b1.tax_exempt;
+    try {
+      docs.markets.b1.tax_exempt = undefined as any;
+      expect(await orderCreate(order, ctx('buyer1'))).toMatchObject({ error: 'tax_certificate_missing' });
+      docs.markets.b1.tax_exempt = { ...(saved as object), verified_at: null };
+      expect(await orderCreate(order, ctx('buyer1'))).toMatchObject({ error: 'tax_certificate_not_verified' });
+      expect(created()).toBeUndefined();
+    } finally {
+      docs.markets.b1.tax_exempt = saved;
+    }
+  });
+
+  it('sends an exempt order with no tax, adds buyer fees, saves the terms and the order date', async () => {
+    store.set('fee_rules/svc', { code: 'service', name: 'Service fee', percent: 7, flat_cents: null, payer: 'buyer', applies_to: 'all', per: 'order', effective_from: '2026-01-01', active: true });
+    store.set('fee_rules/com', { code: 'commission', name: 'Commission', percent: 4, flat_cents: null, payer: 'farmer', applies_to: 'all', per: 'order', effective_from: '2026-01-01', active: true });
+    store.set('fee_rules/tbd', { code: 'tbd', name: '[Fee]', percent: null, flat_cents: null, payer: 'buyer', applies_to: 'all', per: 'order', effective_from: '2026-01-01', active: true });
+    const e = { ...env, SQUARE_EXEMPT_BLOCK_TAX_IDS: 'TAX_A, TAX_B', SQUARE_FEE_TAX_IDS: '' } as Env;
+    const res: any = await orderCreate(order, { db, env: e, userId: 'buyer1', phone: 'x', messageId: 'm2' });
+    expect(res).toMatchObject({ success: true, fulfillment: 'pickup' });
+    const o = created()!.body.order;
+    expect(o.pricing_options).toEqual({ auto_apply_taxes: false, auto_apply_discounts: false });
+    expect(o.taxes).toBeUndefined();
+    expect(o.line_items[0].pricing_blocklists.blocked_taxes).toEqual([
+      { uid: 'block-0', tax_catalog_object_id: 'TAX_A' }, { uid: 'block-1', tax_catalog_object_id: 'TAX_B' },
+    ]);
+    // Only the buyer-paid fee goes on the Square order; the placeholder is skipped.
+    expect(o.service_charges).toEqual([{ calculation_phase: 'SUBTOTAL_PHASE', taxable: false, uid: 'fee-service-pct', name: 'Service fee', percentage: '7' }]);
+    const terms = store.get('wholesale_orders/ORDER1') as any;
+    expect(terms).toMatchObject({ farm_id: 'f1', buyer_id: 'b1', fulfillment: 'pickup', tax: { status: 'exempt_resale', certificate_type: 'ST-391' } });
+    expect(terms.fees.map((f: any) => f.code)).toEqual(['commission', 'service']);
+    expect(terms.fees_skipped).toEqual([{ id: 'tbd', reason: 'amount not set yet' }]);
+    expect(updates).toEqual([{ key: 'markets/b1', data: { 'tax_exempt.last_order_at': expect.any(Date) } }]);
+  });
+
+  it('creates a delivery order to the buyer address', async () => {
+    const res: any = await orderCreate({ ...order, fulfillment: 'delivery' }, ctx('buyer1'));
+    expect(res).toMatchObject({ success: true, fulfillment: 'delivery', delivery_address: '1 Test St, Little Rock' });
+    const f = created()!.body.order.fulfillments[0];
+    expect(f).toMatchObject({ type: 'DELIVERY', state: 'PROPOSED', delivery_details: { schedule_type: 'SCHEDULED', recipient: { customer_id: 'C1', address: { address_line_1: '1 Test St', postal_code: '72201' } } } });
+    expect(store.get('wholesale_orders/ORDER1')).toMatchObject({ fulfillment: 'delivery', delivery_day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) });
+  });
+
+  describe('delivery fee once per buyer per delivery day', () => {
+    const dayFee = { id: 'del', code: 'delivery', name: 'Delivery', percent: null, flat_cents: 1000, payer: 'buyer', applies_to: 'delivery', per: 'buyer_delivery_day' };
+    beforeEach(() => {
+      stored = squareOrder({ fulfillments: [{ uid: 'ful1', type: 'DELIVERY', state: 'RESERVED', delivery_details: { deliver_at: '2026-11-27T15:00:00Z' } }] }) as any;
+      store.set('wholesale_orders/ORDER1', { buyer_id: 'b1', fulfillment: 'delivery', delivery_day: '2026-11-27', fees: [dayFee] });
+    });
+    const feePuts = () => calls.filter((c) => c.method === 'PUT' && c.body.order.service_charges);
+
+    it('goes on the first order checked in that day, before its invoice', async () => {
+      await orderUpdate({ order_id: 'ORDER1', status: 'in_transit' }, ctx('farmer1'));
+      expect(feePuts()).toHaveLength(1);
+      expect(feePuts()[0].body.order.service_charges).toEqual([{ calculation_phase: 'SUBTOTAL_PHASE', taxable: false, uid: 'fee-delivery-flat', name: 'Delivery', amount_money: { amount: 1000, currency: 'USD' } }]);
+      expect(store.get('delivery_day_fees/C1_2026-11-27')).toMatchObject({ order_id: 'ORDER1' });
+      expect(calls.findIndex((c) => c === feePuts()[0])).toBeLessThan(calls.findIndex((c) => c.path === '/v2/invoices'));
+    });
+
+    it('is skipped when another live order that day already carries it', async () => {
+      store.set('delivery_day_fees/C1_2026-11-27', { order_id: 'O2' });
+      await orderUpdate({ order_id: 'ORDER1', status: 'in_transit' }, ctx('farmer1'));
+      expect(feePuts()).toHaveLength(0);
+      expect(calls.some((c) => c.path === '/v2/invoices')).toBe(true);
+    });
+
+    it('moves to this order when the one carrying it was cancelled', async () => {
+      store.set('delivery_day_fees/C1_2026-11-27', { order_id: 'O2' });
+      o2State = 'CANCELED';
+      await orderUpdate({ order_id: 'ORDER1', status: 'in_transit' }, ctx('farmer1'));
+      expect(feePuts()).toHaveLength(1);
+      expect(store.get('delivery_day_fees/C1_2026-11-27')).toMatchObject({ order_id: 'ORDER1' });
+    });
+  });
+
   it('counts stock already promised on open orders', async () => {
     openOrders = [squareOrder({ line_items: [{ uid: 'x', quantity: '17', catalog_object_id: 'VAR1' }] })];
     const res: any = await orderCreate(order, ctx('buyer1'));
@@ -151,20 +249,57 @@ describe('square orders', () => {
     expect(put).toMatchObject({ version: 3, fulfillments: [{ uid: 'ful1', state: 'RESERVED' }] });
     expect(put.state).toBeUndefined();
 
-    // Confirmation invoices the buyer: net 15 days from pickup, shared by FarmLink's own text.
-    const inv = calls.find((c) => c.path === '/v2/invoices')!.body.invoice;
+    // Confirmation no longer invoices: the bill waits for check-in.
+    expect(calls.some((c) => c.path === '/v2/invoices')).toBe(false);
+    expect(res.order.payment).toBe('not_invoiced');
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect((sendSms.mock.calls[0] as any)[0].to).toBe('+15015550103');
+  });
+
+  it('invoices at check-in, after fixing short items, net 15 days from pickup', async () => {
+    stored = squareOrder({}, 'RESERVED');
+    store.set('order_notifications/ORDER1', { status: 'confirmed', paid: false });
+    const res: any = await orderUpdate({ order_id: 'ORDER1', status: 'in_transit', received_items: [{ inventory_id: 'VAR1', quantity: 3 }] }, ctx('farmer1'));
+    expect(res.success).toBe(true);
+    // The short line was fixed before the invoice existed.
+    const firstPut = calls.find((c) => c.method === 'PUT')!.body.order;
+    expect(firstPut.line_items).toEqual([{ uid: 'l1', quantity: '3' }]);
+    const putIdx = calls.findIndex((c) => c.method === 'PUT');
+    const invIdx = calls.findIndex((c) => c.path === '/v2/invoices');
+    expect(putIdx).toBeLessThan(invIdx);
+    const inv = calls[invIdx].body.invoice;
     expect(inv).toMatchObject({ order_id: 'ORDER1', delivery_method: 'SHARE_MANUALLY', primary_recipient: { customer_id: 'C1' } });
     expect(inv.payment_requests[0]).toMatchObject({ request_type: 'BALANCE', due_date: '2026-12-12' });
-    expect(res.order.payment).toBe('invoiced');
-    expect(stored.metadata).toMatchObject({ farm_id: 'f1', buyer_id: 'b1', invoice_id: 'INV1' });
-    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect(res.order).toMatchObject({ status: 'in_transit', payment: 'invoiced' });
+    expect(stored.metadata).toMatchObject({ invoice_id: 'INV1' });
     const sms = (sendSms.mock.calls[0] as any)[0];
     expect(sms.to).toBe('+15015550103');
     expect(sms.body).toContain('https://invoice.test/INV1');
 
     // Moving on does not invoice twice.
-    await orderUpdate({ order_id: 'ORDER1', status: 'in_transit' }, ctx('farmer1'));
+    await orderUpdate({ order_id: 'ORDER1', status: 'delivered' }, ctx('farmer1'));
     expect(calls.filter((c) => c.path === '/v2/invoices')).toHaveLength(1);
+  });
+
+  it('refuses check-in quantities above what was ordered, or once invoiced', async () => {
+    stored = squareOrder({}, 'RESERVED');
+    expect(await orderUpdate({ order_id: 'ORDER1', status: 'in_transit', received_items: [{ inventory_id: 'VAR1', quantity: 6 }] }, ctx('farmer1')))
+      .toMatchObject({ error: 'invalid_quantity' });
+    expect(await orderUpdate({ order_id: 'ORDER1', status: 'in_transit', received_items: [{ inventory_id: 'VAR1', quantity: 0 }] }, ctx('farmer1')))
+      .toMatchObject({ error: 'nothing_received' });
+    expect(await orderUpdate({ order_id: 'ORDER1', status: 'confirmed', received_items: [{ inventory_id: 'VAR1', quantity: 2 }] }, ctx('farmer1')))
+      .toMatchObject({ error: 'invalid_input' });
+    stored = squareOrder({ metadata: { farm_id: 'f1', buyer_id: 'b1', invoice_id: 'INV1' } }, 'RESERVED');
+    invoice = { id: 'INV1', version: 1, status: 'UNPAID', order_id: 'ORDER1' };
+    expect(await orderUpdate({ order_id: 'ORDER1', status: 'in_transit', received_items: [{ inventory_id: 'VAR1', quantity: 2 }] }, ctx('farmer1')))
+      .toMatchObject({ error: 'already_invoiced' });
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  it('lets SJCA staff check an order in', async () => {
+    stored = squareOrder({}, 'RESERVED');
+    const res: any = await orderUpdate({ order_id: 'ORDER1', status: 'in_transit' }, ctx('admin1'));
+    expect(res).toMatchObject({ success: true, order: { status: 'in_transit', payment: 'invoiced' } });
   });
 
   it('cancels the order and its pickup together; a buyer may cancel only while pending', async () => {

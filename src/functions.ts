@@ -31,6 +31,7 @@ import { pushRoutes } from './routes/push.js';
 import { errorRoutes } from './routes/errors.js';
 import { reminderRoutes } from './routes/reminders.js';
 import { adminRoutes } from './routes/admin.js';
+import { wholesaleAdminRoutes } from './routes/wholesale-admin.js';
 import { serializeTimestamps } from './utils/serialize.js';
 import { createErrorHandler } from './utils/http-error-handler.js';
 
@@ -97,6 +98,7 @@ async function getApp() {
   await app.register(errorRoutes, { prefix: '/api/errors' });
   await app.register(reminderRoutes, { prefix: '/api/reminders' });
   await app.register(adminRoutes, { prefix: '/api/admin' });
+  await app.register(wholesaleAdminRoutes, { prefix: '/api/admin/wholesale' });
 
   // Short view-link redirect: /api/view/:token → dashboard with a signed JWT
   app.get('/api/view/:token', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -179,6 +181,28 @@ export const freshnessAlerts = onSchedule(
     } catch (err) {
       const { notifyError } = await import('./services/error-notify.js');
       await notifyError({ env, err, source: 'scheduler:freshness-alerts' }).catch(() => {});
+      throw err;
+    }
+  }
+);
+
+// Scheduled function: build the weekly farmer payout sold list every Tuesday
+// at 6am CT, for wholesale orders completed the Tuesday-Monday before. It saves
+// a draft for staff to review; it moves no money and sends no texts.
+export const weeklyFarmerPayout = onSchedule(
+  { schedule: '0 6 * * 2', timeZone: 'America/Chicago' },
+  async () => {
+    const db = getDb();
+    const env = getEnv();
+    const { squareEnabled } = await import('./services/square.js');
+    if (!squareEnabled(env)) return;
+    try {
+      const { buildWeeklyPayout } = await import('./services/payouts.js');
+      const run = await buildWeeklyPayout(db, env);
+      console.log(`Weekly payout ${run.pay_day}: ${run.farms.length} farms, ${run.refunds_for_review.length} refunds to review`);
+    } catch (err) {
+      const { notifyError } = await import('./services/error-notify.js');
+      await notifyError({ env, err, source: 'scheduler:weekly-payout' }).catch(() => {});
       throw err;
     }
   }

@@ -147,13 +147,19 @@ export const toolDefinitions: Anthropic.Tool[] = [
           description: 'List of items to order',
         },
         notes: { type: 'string', description: 'Optional order notes' },
+        fulfillment: {
+          type: 'string',
+          enum: ['pickup', 'delivery'],
+          description: "Pickup at the depot, or SJCA delivery to the buyer's address. Defaults to the buyer's delivery preference, else pickup.",
+        },
       },
       required: ['farm_id', 'market_id', 'items'],
     },
   },
   {
     name: 'order_update',
-    description: 'Update an order status or details.',
+    description:
+      'Update an order status or details. in_transit means the farmer dropped the order off and it was checked in at the depot: that is when short items are fixed and the buyer is invoiced.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -164,6 +170,18 @@ export const toolDefinitions: Anthropic.Tool[] = [
           description: 'New order status',
         },
         notes: { type: 'string', description: 'Updated notes' },
+        received_items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              inventory_id: { type: 'string', description: 'Item id on the order' },
+              quantity: { type: 'number', description: 'Quantity that actually arrived (0 to the ordered amount)' },
+            },
+            required: ['inventory_id', 'quantity'],
+          },
+          description: 'At check-in only (status in_transit): items that arrived short. Items not listed arrived in full.',
+        },
       },
       required: ['order_id'],
     },

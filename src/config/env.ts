@@ -48,7 +48,10 @@ const envSchema = z.object({
   // never write to the live seller account. See src/services/square.ts.
   SQUARE_ACCESS_TOKEN: z.string().default(''),
   SQUARE_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
-  // The depot Location: stock counts and pickups live here.
+  // The wholesale Location: wholesale stock, orders, invoices and payouts live
+  // here. It must be its own Square location, separate from the Little Farm
+  // Stop register, so wholesale sales report on their own (LFPP). It is not
+  // created by FarmLink: set it up in the Square Dashboard, then put its id here.
   SQUARE_LOCATION_ID: z.string().default(''),
   // Catalog category new farm items are filed under (optional).
   SQUARE_CATEGORY_ID: z.string().default(''),
@@ -61,6 +64,16 @@ const envSchema = z.object({
 
   // Net payment terms for buyer invoices: due this many days after pickup.
   INVOICE_NET_DAYS: z.coerce.number().int().min(0).max(90).default(15),
+
+  // Wholesale buyers are tax exempt (resale certificate checked in FarmLink).
+  // Square has no tax-exempt flag for customers, so FarmLink sends their orders
+  // with no taxes and, as a backstop, blocks these Square tax ids on every line.
+  // Set it to the seller's catalog tax ids (comma separated).
+  SQUARE_EXEMPT_BLOCK_TAX_IDS: z.string().default(''),
+  // Square tax ids to charge on buyer-paid fees (delivery, service). Leave
+  // blank: SJCA's fees are not taxed (nonprofit, per SJCA Nov 2026). Kept only
+  // in case that ever changes.
+  SQUARE_FEE_TAX_IDS: z.string().default(''),
 
   // Email (Resend)
   RESEND_API_KEY: z.string().default(''),
